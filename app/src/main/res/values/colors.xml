@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="splash_background">#FF0F1115</color>
+    <!-- The official BTCPay Server icon sits on white; the mark has no light
+         variant, so a dark plate would misrepresent it. -->
+    <color name="ic_launcher_background">#FFFFFFFF</color>
+</resources>

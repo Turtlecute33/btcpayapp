@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_terminal"
+        android:shortcutId="terminal"
+        android:shortcutLongLabel="@string/shortcut_pos_long"
+        android:shortcutShortLabel="@string/shortcut_pos_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.btcpayapp.MainActivity"
+            android:targetPackage="com.btcpayapp"
+            android:data="btcpayapp://shortcut/terminal" />
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_invoice"
+        android:shortcutId="new_invoice"
+        android:shortcutLongLabel="@string/shortcut_invoice_long"
+        android:shortcutShortLabel="@string/shortcut_invoice_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.btcpayapp.MainActivity"
+            android:targetPackage="com.btcpayapp"
+            android:data="btcpayapp://shortcut/new-invoice" />
+    </shortcut>
+
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_scan"
+        android:shortcutId="scan"
+        android:shortcutLongLabel="@string/shortcut_scan_long"
+        android:shortcutShortLabel="@string/shortcut_scan_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetClass="com.btcpayapp.MainActivity"
+            android:targetPackage="com.btcpayapp"
+            android:data="btcpayapp://shortcut/scan" />
+    </shortcut>
+
+</shortcuts>

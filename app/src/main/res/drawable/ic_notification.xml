@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Status-bar icons are masked to a single colour, so this is a flat
+     silhouette of the BTCPay Server mark, sized to 20dp inside the 24dp
+     viewport to leave the optical padding the status bar expects. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+
+    <group
+        android:translateX="6.4045"
+        android:translateY="2"
+        android:scaleX="0.106117"
+        android:scaleY="0.106117">
+        <group
+            android:translateX="-106.19"
+            android:translateY="-58.85">
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M117.24,247.32a11.06,11.06,0,0,1-11-11.06V69.91a11.06,11.06,0,1,1,22.11,0V236.26A11.06,11.06,0,0,1,117.24,247.32Z" />
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M117.25,247.32a11.06,11.06,0,0,1-4.75-21l66.66-31.64L110.69,144.2a11.05,11.05,0,1,1,13.11-17.8l83.35,61.41a11,11,0,0,1-1.82,18.88L122,246.25A10.94,10.94,0,0,1,117.25,247.32Z" />
+            <path
+                android:fillColor="#FFFFFFFF"
+                android:pathData="M117.25,181.93a11.05,11.05,0,0,1-6.56-20l68.47-50.45L112.5,79.89a11.05,11.05,0,0,1,9.48-20l83.35,39.56a11.05,11.05,0,0,1,1.82,18.89L123.8,179.78A11,11,0,0,1,117.25,181.93Z" />
+        </group>
+    </group>
+</vector>

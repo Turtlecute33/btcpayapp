@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BtcPayServer</string>
+
+    <string name="shortcut_scan_short">Scan</string>
+    <string name="shortcut_scan_long">Scan a QR code</string>
+    <string name="shortcut_invoice_short">New invoice</string>
+    <string name="shortcut_invoice_long">Create an invoice</string>
+    <string name="shortcut_pos_short">Terminal</string>
+    <string name="shortcut_pos_long">Open the payment terminal</string>
+
+    <string name="notif_channel_payments">Payments</string>
+    <string name="notif_channel_payments_desc">A payment was received or an invoice changed state.</string>
+    <string name="notif_channel_payouts">Payouts</string>
+    <string name="notif_channel_payouts_desc">A payout needs approval or changed state.</string>
+    <string name="notif_channel_server">Server</string>
+    <string name="notif_channel_server_desc">Your server stopped answering.</string>
+    <string name="notif_channel_feed">BTCPay notifications</string>
+    <string name="notif_channel_feed_desc">The notifications your BTCPay Server shows: new versions, users awaiting approval, invoice problems, invitations.</string>
+</resources>

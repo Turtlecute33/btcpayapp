@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The official BTCPay Server mark, converted from
+  btcpayserver/btcpayserver:BTCPayServer/wwwroot/img/btcpay-logo.svg
+  (viewBox 0 0 105.46 188.47) with the source paint order preserved.
+
+  The outer group centres the 105.46x188.47 artwork inside the 108x108 adaptive
+  viewport at 59dp tall, which keeps every extremity inside the 66dp circle a
+  round launcher mask guarantees. The inner groups reproduce the SVG's own
+  translate(-106.19 -58.85); the two untransformed source shapes sit between
+  them so the paint order is unchanged.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:translateX="37.475"
+        android:translateY="24.47"
+        android:scaleX="0.31339"
+        android:scaleY="0.31339">
+
+        <group
+            android:translateX="-106.19"
+            android:translateY="-58.85">
+            <!-- Full-height stem. -->
+            <path
+                android:fillColor="#CEDC21"
+                android:pathData="M117.24,247.32a11.06,11.06,0,0,1-11-11.06V69.91a11.06,11.06,0,1,1,22.11,0V236.26A11.06,11.06,0,0,1,117.24,247.32Z" />
+            <!-- Lower bowl. -->
+            <path
+                android:fillColor="#51B13E"
+                android:pathData="M117.25,247.32a11.06,11.06,0,0,1-4.75-21l66.66-31.64L110.69,144.2a11.05,11.05,0,1,1,13.11-17.8l83.35,61.41a11,11,0,0,1-1.82,18.88L122,246.25A10.94,10.94,0,0,1,117.25,247.32Z" />
+            <!-- Upper bowl. -->
+            <path
+                android:fillColor="#CEDC21"
+                android:pathData="M117.25,181.93a11.05,11.05,0,0,1-6.56-20l68.47-50.45L112.5,79.89a11.05,11.05,0,0,1,9.48-20l83.35,39.56a11.05,11.05,0,0,1,1.82,18.89L123.8,179.78A11,11,0,0,1,117.25,181.93Z" />
+        </group>
+
+        <!-- Where the bowls overlap. -->
+        <path
+            android:fillColor="#1E7A44"
+            android:pathData="M22.11,70.86L22.11,117.61L53.82,94.25Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M0,51.26h22.11v53.89h-22.11z" />
+
+        <group
+            android:translateX="-106.19"
+            android:translateY="-58.85">
+            <path
+                android:fillColor="#CEDC21"
+                android:pathData="M128.3,69.91a11.06,11.06,0,1,0-22.11,0V209H128.3Z" />
+        </group>
+    </group>
+</vector>

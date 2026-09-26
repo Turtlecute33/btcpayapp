@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Transport policy.
+
+  Base: TLS only, system CA store only. User-installed CAs are deliberately NOT
+  trusted, so a rogue MDM profile or a sideloaded root cannot silently intercept
+  API keys. Instances using a private CA or a self-signed certificate are
+  supported through explicit, per-account certificate pinning in the app itself
+  (the user is shown the SPKI fingerprint and must accept it once), which is a
+  far narrower grant than trusting a whole extra root.
+
+  Exceptions to the TLS rule, both of which are safe:
+    * .onion  - Tor already provides authentication and encryption end to end,
+                and no CA can issue for .onion. Matching is by hostname suffix.
+    * loopback - traffic never leaves the device.
+-->
+<network-security-config>
+
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">onion</domain>
+    </domain-config>
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">::1</domain>
+    </domain-config>
+
+</network-security-config>

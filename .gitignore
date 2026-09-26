@@ -1,0 +1,25 @@
+# Build output
+/build
+/app/build
+.gradle
+.cxx
+.kotlin
+
+# Local machine configuration — contains the SDK path, never commit it
+local.properties
+
+# Signing material. If a keystore or its passwords ever land in this repo,
+# rotate them; git history is forever.
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Captured output
+/captures
+*.hprof
