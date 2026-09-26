@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" role="img" aria-labelledby="t d">
+  <title id="t">BtcPayServer for Android — unofficial app</title>
+  <desc id="d">An unofficial, native Android client for BTCPay Server. Not affiliated with the BTCPay Server project.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#08110C"/>
+      <stop offset="1" stop-color="#11271A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="1084.0" cy="250" r="340" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#51B13E" stop-opacity="0.34"/>
+      <stop offset="1" stop-color="#51B13E" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="132" cy="120" r="260" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#CEDC21" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#CEDC21" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#FFFFFF" fill-opacity="0.05"/>
+    </pattern>
+    <clipPath id="card"><rect width="1280" height="440" rx="28"/></clipPath>
+    <filter id="lift" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000" flood-opacity="0.45"/>
+    </filter>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#0B1A12" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <g clip-path="url(#card)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue', Arial, sans-serif">
+    <rect width="1280" height="440" fill="url(#bg)"/>
+    <rect width="1280" height="440" fill="url(#dots)"/>
+    <rect width="1280" height="440" fill="url(#glow)"/>
+    <rect width="1280" height="440" fill="url(#glow2)"/>
+
+    <!-- App icon: the launcher tile -->
+    <g filter="url(#lift)">
+      <rect x="88" y="76" width="88" height="88" rx="22" fill="#FFFFFF"/>
+    </g>
+    <g transform="translate(108.62 80.00) scale(0.42447)">
+      <g transform="translate(-106.19 -58.85)">
+        <path fill="#CEDC21" d="M117.24,247.32a11.06,11.06,0,0,1-11-11.06V69.91a11.06,11.06,0,1,1,22.11,0V236.26A11.06,11.06,0,0,1,117.24,247.32Z"/>
+        <path fill="#51B13E" d="M117.25,247.32a11.06,11.06,0,0,1-4.75-21l66.66-31.64L110.69,144.2a11.05,11.05,0,1,1,13.11-17.8l83.35,61.41a11,11,0,0,1-1.82,18.88L122,246.25A10.94,10.94,0,0,1,117.25,247.32Z"/>
+        <path fill="#CEDC21" d="M117.25,181.93a11.05,11.05,0,0,1-6.56-20l68.47-50.45L112.5,79.89a11.05,11.05,0,0,1,9.48-20l83.35,39.56a11.05,11.05,0,0,1,1.82,18.89L123.8,179.78A11,11,0,0,1,117.25,181.93Z"/>
+      </g>
+      <path fill="#1E7A44" d="M22.11,70.86L22.11,117.61L53.82,94.25Z"/>
+      <path fill="#FFFFFF" d="M0,51.26h22.11v53.89h-22.11z"/>
+      <g transform="translate(-106.19 -58.85)">
+        <path fill="#CEDC21" d="M128.3,69.91a11.06,11.06,0,1,0-22.11,0V209H128.3Z"/>
+      </g>
+    </g>
+
+    <!-- Unofficial badge -->
+    <rect x="204" y="84" width="196" height="34" rx="17" fill="#CEDC21" fill-opacity="0.12" stroke="#CEDC21" stroke-opacity="0.55"/>
+    <text x="302" y="106.5" text-anchor="middle" font-size="15" font-weight="700" letter-spacing="2.4" fill="#DDE86A" textLength="156" lengthAdjust="spacingAndGlyphs">UNOFFICIAL APP</text>
+    <text x="204" y="152" font-size="19" fill="#8CA597">Not affiliated with the BTCPay Server project</text>
+
+    <!-- Title -->
+    <text x="86" y="262" font-size="58" font-weight="800" letter-spacing="-1.2" fill="#FFFFFF">BtcPayServer<tspan font-weight="300" fill="#A7C3B1"> for Android</tspan></text>
+    <text x="88" y="312" font-size="25" fill="#B9CBBF">A native, private client for your own BTCPay Server.</text>
+    <text x="88" y="370" xml:space="preserve" font-size="19" font-weight="600" letter-spacing="0.4" fill="#7D998A">Terminal<tspan fill="#51B13E">  ·  </tspan>Invoices<tspan fill="#51B13E">  ·  </tspan>On-chain<tspan fill="#51B13E">  ·  </tspan>Lightning<tspan fill="#51B13E">  ·  </tspan>Payouts<tspan fill="#51B13E">  ·  </tspan>Admin</text>
+
+    <!-- Phone illustration -->
+    <g filter="url(#lift)">
+      <rect x="960" y="56" width="248" height="470" rx="42" fill="#0D1712" stroke="#2C4A38" stroke-width="2"/>
+    </g>
+    <rect x="970" y="66" width="228" height="470" rx="33" fill="#F4F7F5"/>
+    <rect x="1050.0" y="78" width="68" height="8" rx="4" fill="#D5DDD8"/>
+    <text x="1084.0" y="124" text-anchor="middle" font-size="12" font-weight="600" letter-spacing="1.6" fill="#6A7F72">SCAN TO PAY</text>
+    <text x="1084.0" y="160" text-anchor="middle" font-size="30" font-weight="800" letter-spacing="-0.6" fill="#0B1A12">21 000 sats</text>
+    <text x="1084.0" y="182" text-anchor="middle" font-size="12" fill="#7A8C81">Expires in 14:52</text>
+    <g filter="url(#soft)">
+      <rect x="1002.0" y="200" width="164" height="164" rx="16" fill="#FFFFFF"/>
+    </g>
+    <path transform="translate(1011.939 209.939) scale(4.9697)" fill="#0B1A12" shape-rendering="crispEdges" d="M0 0h7v1h-7zM8 0h1v1h-1zM10 0h2v1h-2zM16 0h1v1h-1zM19 0h2v1h-2zM22 0h7v1h-7zM0 1h1v1h-1zM6 1h1v1h-1zM8 1h1v1h-1zM10 1h1v1h-1zM14 1h1v1h-1zM17 1h2v1h-2zM20 1h1v1h-1zM22 1h1v1h-1zM28 1h1v1h-1zM0 2h1v1h-1zM2 2h3v1h-3zM6 2h1v1h-1zM9 2h3v1h-3zM13 2h2v1h-2zM16 2h1v1h-1zM22 2h1v1h-1zM24 2h3v1h-3zM28 2h1v1h-1zM0 3h1v1h-1zM2 3h3v1h-3zM6 3h1v1h-1zM8 3h1v1h-1zM10 3h1v1h-1zM12 3h6v1h-6zM20 3h1v1h-1zM22 3h1v1h-1zM24 3h3v1h-3zM28 3h1v1h-1zM0 4h1v1h-1zM2 4h3v1h-3zM6 4h1v1h-1zM10 4h1v1h-1zM13 4h1v1h-1zM15 4h2v1h-2zM19 4h1v1h-1zM22 4h1v1h-1zM24 4h3v1h-3zM28 4h1v1h-1zM0 5h1v1h-1zM6 5h1v1h-1zM9 5h1v1h-1zM12 5h2v1h-2zM18 5h3v1h-3zM22 5h1v1h-1zM28 5h1v1h-1zM0 6h7v1h-7zM8 6h1v1h-1zM10 6h1v1h-1zM12 6h1v1h-1zM14 6h1v1h-1zM16 6h1v1h-1zM18 6h1v1h-1zM20 6h1v1h-1zM22 6h7v1h-7zM8 7h1v1h-1zM15 7h1v1h-1zM17 7h1v1h-1zM0 8h1v1h-1zM2 8h2v1h-2zM5 8h3v1h-3zM9 8h1v1h-1zM14 8h1v1h-1zM16 8h5v1h-5zM22 8h1v1h-1zM25 8h1v1h-1zM27 8h2v1h-2zM2 9h3v1h-3zM7 9h1v1h-1zM9 9h1v1h-1zM11 9h2v1h-2zM16 9h1v1h-1zM18 9h3v1h-3zM22 9h3v1h-3zM28 9h1v1h-1zM0 10h1v1h-1zM2 10h2v1h-2zM5 10h2v1h-2zM8 10h4v1h-4zM14 10h1v1h-1zM17 10h2v1h-2zM20 10h2v1h-2zM23 10h1v1h-1zM26 10h2v1h-2zM0 11h2v1h-2zM3 11h3v1h-3zM7 11h4v1h-4zM13 11h2v1h-2zM18 11h5v1h-5zM24 11h1v1h-1zM28 11h1v1h-1zM1 12h1v1h-1zM4 12h1v1h-1zM6 12h1v1h-1zM9 12h1v1h-1zM11 12h1v1h-1zM13 12h5v1h-5zM20 12h1v1h-1zM25 12h2v1h-2zM0 13h3v1h-3zM4 13h2v1h-2zM8 13h2v1h-2zM11 13h1v1h-1zM15 13h3v1h-3zM22 13h1v1h-1zM26 13h3v1h-3zM1 14h3v1h-3zM6 14h2v1h-2zM9 14h1v1h-1zM11 14h1v1h-1zM13 14h1v1h-1zM16 14h2v1h-2zM19 14h2v1h-2zM22 14h1v1h-1zM26 14h3v1h-3zM0 15h1v1h-1zM3 15h3v1h-3zM8 15h4v1h-4zM19 15h6v1h-6zM27 15h1v1h-1zM3 16h2v1h-2zM6 16h3v1h-3zM10 16h4v1h-4zM18 16h3v1h-3zM24 16h2v1h-2zM27 16h1v1h-1zM1 17h2v1h-2zM5 17h1v1h-1zM7 17h5v1h-5zM13 17h3v1h-3zM18 17h1v1h-1zM23 17h1v1h-1zM25 17h3v1h-3zM0 18h1v1h-1zM2 18h1v1h-1zM4 18h3v1h-3zM9 18h3v1h-3zM15 18h2v1h-2zM20 18h1v1h-1zM22 18h3v1h-3zM26 18h1v1h-1zM2 19h2v1h-2zM8 19h1v1h-1zM10 19h1v1h-1zM14 19h5v1h-5zM22 19h3v1h-3zM26 19h1v1h-1zM1 20h1v1h-1zM3 20h1v1h-1zM6 20h1v1h-1zM9 20h1v1h-1zM13 20h1v1h-1zM15 20h4v1h-4zM20 20h7v1h-7zM8 21h1v1h-1zM11 21h3v1h-3zM20 21h1v1h-1zM24 21h5v1h-5zM0 22h7v1h-7zM8 22h3v1h-3zM13 22h1v1h-1zM16 22h5v1h-5zM22 22h1v1h-1zM24 22h2v1h-2zM27 22h1v1h-1zM0 23h1v1h-1zM6 23h1v1h-1zM8 23h1v1h-1zM10 23h1v1h-1zM15 23h2v1h-2zM20 23h1v1h-1zM24 23h2v1h-2zM27 23h2v1h-2zM0 24h1v1h-1zM2 24h3v1h-3zM6 24h1v1h-1zM9 24h2v1h-2zM14 24h4v1h-4zM20 24h5v1h-5zM26 24h3v1h-3zM0 25h1v1h-1zM2 25h3v1h-3zM6 25h1v1h-1zM8 25h2v1h-2zM11 25h2v1h-2zM14 25h2v1h-2zM17 25h1v1h-1zM19 25h1v1h-1zM21 25h1v1h-1zM23 25h3v1h-3zM28 25h1v1h-1zM0 26h1v1h-1zM2 26h3v1h-3zM6 26h1v1h-1zM8 26h1v1h-1zM10 26h1v1h-1zM12 26h1v1h-1zM18 26h1v1h-1zM20 26h1v1h-1zM23 26h1v1h-1zM26 26h1v1h-1zM28 26h1v1h-1zM0 27h1v1h-1zM6 27h1v1h-1zM10 27h1v1h-1zM14 27h1v1h-1zM20 27h2v1h-2zM23 27h1v1h-1zM25 27h1v1h-1zM27 27h1v1h-1zM0 28h7v1h-7zM8 28h1v1h-1zM10 28h1v1h-1zM16 28h1v1h-1zM19 28h4v1h-4zM27 28h1v1h-1z"/>
+    <rect x="986.0" y="386" width="196" height="38" rx="19" fill="#51B13E"/>
+    <path d="M1006.0 405 l6 6 l12 -13" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1096.0" y="410" text-anchor="middle" font-size="15" font-weight="700" fill="#FFFFFF">Payment received</text>
+  </g>
+</svg>
