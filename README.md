@@ -104,8 +104,9 @@ a phone: pairing, the app lock and one send.
 
 Gradle checks every dependency against `gradle/verification-metadata.xml`.
 After you change a dependency, update it with
-`./gradlew --write-verification-metadata sha256 :app:assembleRelease :app:testDebugUnitTest :app:lintRelease`
-and review the diff. Gradle records the aapt2 jar only for the system it runs
+`GRADLE_USER_HOME=$(mktemp -d) ./gradlew --write-verification-metadata sha256 :app:assembleRelease :app:testDebugUnitTest :app:lintRelease`
+and review the diff. The empty Gradle home makes Gradle download, and so
+record, every file that CI downloads; a warm cache can hide some. Gradle records the aapt2 jar only for the system it runs
 on, and CI runs on Linux. After an Android Gradle Plugin update, also add
 `aapt2-<version>-linux.jar` (and `-windows.jar` for Windows builds): run the
 command once on Linux, or hash the jars from Google Maven by hand.
