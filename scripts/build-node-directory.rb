@@ -13,11 +13,17 @@
 # Source: a mempool.space instance's Lightning module, which serves the graph
 # per country. That covers announced clearnet nodes; Tor-only nodes carry no
 # geolocation and are reachable here only through the top-100 rankings, which
-# are fetched as well. The gap is real and is documented in the README rather
-# than papered over.
+# are fetched as well. The gap is real and is documented in the README's
+# "Lightning node names" section rather than papered over.
+#
+# Next to this script it writes `lnnodes.manifest.json`: where the data came
+# from, when, which version of this script made it, and the asset's SHA-256.
+# It stays out of the APK. NodeDirectoryTest checks the hash, so an asset
+# edited by hand, or regenerated without the manifest, fails the build.
 #
 # Everything below is stdlib.
 
+require 'digest'
 require 'json'
 require 'net/http'
 require 'uri'
@@ -26,6 +32,7 @@ require 'set'
 ROOT = File.expand_path('..', __dir__)
 API = "#{ENV.fetch('MEMPOOL', 'https://mempool.space')}/api/v1/lightning".freeze
 OUT = File.join(ROOT, 'app/src/main/assets/lnnodes.bin')
+MANIFEST = File.join(ROOT, 'scripts/lnnodes.manifest.json')
 CURATED_KT = File.join(ROOT, 'app/src/main/java/com/btcpayapp/core/lightning/NodeDirectory.kt')
 
 # Format version. Bump only together with NodeIndex.kt.
@@ -53,17 +60,34 @@ CONFUSABLES = {
   'ѕ' => 's', 'і' => 'i', 'ј' => 'j', 'ԁ' => 'd', 'ɡ' => 'g', 'ӏ' => 'l',
   'α' => 'a', 'β' => 'b', 'ε' => 'e', 'ι' => 'i', 'κ' => 'k', 'ν' => 'v',
   'ο' => 'o', 'ρ' => 'p', 'σ' => 'o', 'τ' => 't', 'υ' => 'u', 'χ' => 'x',
-  'ѐ' => 'e', 'ё' => 'e', '０' => '0', 'ⅼ' => 'l', 'ⅰ' => 'i'
+  'ѐ' => 'e', 'ё' => 'e', 'ⅼ' => 'l', 'ⅰ' => 'i'
 }.freeze
+
+# Names a scammer gains most from wearing: the exchanges and payment services a
+# merchant sends money to. Renaming a one-channel node "okx.com" is free;
+# funding a large node is not. So an alias that merely *contains* one of these
+# is kept only on a node with at least DOMINANT_MIN_CHANNELS channels and
+# BRAND_MIN_CAPACITY sat — the brands' own extra nodes ("Bitrefill Routing",
+# "River Financial 2") pass, a fresh look-alike does not.
+BRAND_TOKENS = %w[
+  acinq binance bitfinex bitgo bitrefill blink coinbase coingate fixedfloat
+  kraken lnmarkets nicehash okx opennode paxful river strike walletofsatoshi
+].freeze
+BRAND_MIN_CAPACITY = 100_000_000
 
 def get(path)
   uri = URI("#{API}#{path}")
   3.times do |attempt|
-    response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', open_timeout: 15, read_timeout: 120) do |http|
-      http.get(uri.request_uri, 'User-Agent' => 'btcpayapp-node-directory/1')
+    begin
+      response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == 'https', open_timeout: 15, read_timeout: 120) do |http|
+        http.get(uri.request_uri, 'User-Agent' => 'btcpayapp-node-directory/1')
+      end
+      return JSON.parse(response.body) if response.is_a?(Net::HTTPSuccess)
+      warn "  #{path}: HTTP #{response.code}#{attempt < 2 ? ', retrying' : ''}"
+    rescue Timeout::Error, SocketError, SystemCallError, OpenSSL::SSL::SSLError => e
+      # A dropped connection costs one request, not the whole run.
+      warn "  #{path}: #{e.class}#{attempt < 2 ? ', retrying' : ''}"
     end
-    return JSON.parse(response.body) if response.is_a?(Net::HTTPSuccess)
-    warn "  #{path}: HTTP #{response.code}#{attempt < 2 ? ', retrying' : ''}"
     sleep(2 * (attempt + 1))
   end
   nil
@@ -125,8 +149,16 @@ def sanitise(alias_text)
   text
 end
 
+# The comparison form of a name, never shown. NFKC first turns full-width
+# ("Ｋｒａｋｅｎ") and mathematical ("𝐊𝐫𝐚𝐤𝐞𝐧") letters into plain ASCII; the
+# table then folds the Cyrillic and Greek look-alikes that NFKC leaves alone.
 def fold(name)
-  name.downcase.chars.map { |c| CONFUSABLES.fetch(c, c) }.join.gsub(/[^[:alnum:]]/, '')
+  name.unicode_normalize(:nfkc).downcase.chars.map { |c| CONFUSABLES.fetch(c, c) }.join.gsub(/[^[:alnum:]]/, '')
+end
+
+def wears_brand?(candidate)
+  return false unless BRAND_TOKENS.any? { |token| candidate[:fold].include?(token) }
+  candidate[:channels] < DOMINANT_MIN_CHANNELS || candidate[:capacity] < BRAND_MIN_CAPACITY
 end
 
 curated = File.read(CURATED_KT).scan(/"([0-9a-f]{66})"\s+to\s+"((?:[^"\\]|\\.)*)"/).to_h
@@ -163,10 +195,13 @@ raw.each do |pubkey, node|
 end
 
 # Curated names are hand-verified. Anyone else claiming one is dropped outright
-# rather than resolved by capacity: the whole value of the curated layer is that
-# "Kraken" on a channel row means Kraken.
+# rather than resolved by capacity: the whole value of the curated layer is
+# that "Kraken" on a channel row means Kraken. A brand inside a longer alias is
+# dropped unless the node is large (see BRAND_TOKENS).
 before = candidates.size
-candidates.reject! { |c| curated_folds.include?(c[:fold]) && curated[c[:key]].nil? }
+candidates.reject! do |c|
+  curated[c[:key]].nil? && (curated_folds.include?(c[:fold]) || wears_brand?(c))
+end
 stats[:impersonates_curated] = before - candidates.size
 
 kept = []
@@ -235,5 +270,19 @@ header << [HEADER_BYTES + index.bytesize].pack('N')
 raise 'header drift' unless header.bytesize == HEADER_BYTES
 
 Dir.mkdir(File.dirname(OUT)) unless Dir.exist?(File.dirname(OUT))
-File.binwrite(OUT, header + index + names)
+asset = header + index + names
+File.binwrite(OUT, asset)
 puts "wrote #{OUT} — #{(File.size(OUT) / 1024.0).round(1)} KiB (#{index.bytesize / 1024} KiB index, #{names.bytesize / 1024} KiB names)"
+
+# The script's own blob hash, as git computes it, so the manifest names the
+# exact generator even before that version is committed.
+script = File.binread(__FILE__)
+manifest = {
+  'source' => API,
+  'generated' => Time.now.utc.strftime('%Y-%m-%d'),
+  'script' => "#{File.basename(__FILE__)} blob #{Digest::SHA1.hexdigest("blob #{script.bytesize}\0#{script}")}",
+  'nodes' => kept.size,
+  'sha256' => Digest::SHA256.hexdigest(asset)
+}
+File.write(MANIFEST, JSON.pretty_generate(manifest) + "\n")
+puts "wrote #{MANIFEST}"

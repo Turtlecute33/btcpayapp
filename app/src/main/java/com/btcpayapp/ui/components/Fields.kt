@@ -1,13 +1,19 @@
 package com.btcpayapp.ui.components
 
+import com.btcpayapp.core.util.Dates
 import com.btcpayapp.ui.theme.Motion
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.expandVertically
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -16,6 +22,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.text.KeyboardActionScope
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDropDown
@@ -23,9 +31,11 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -42,12 +52,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 
+/**
+ * The app's text field.
+ *
+ * [onImeAction] runs when the keyboard's Go, Search, Send or Done key is
+ * pressed, and the keyboard then closes. Compose gives Go, Search and Send no
+ * behaviour of their own, so a field that shows one of those keys without a
+ * handler has a key that does nothing. Null keeps the default behaviour: Next
+ * moves to the next field, Done closes the keyboard.
+ */
 @Composable
 fun FormField(
     label: String,
@@ -64,7 +84,19 @@ fun FormField(
     leadingIcon: @Composable (() -> Unit)? = null,
     trailingIcon: @Composable (() -> Unit)? = null,
     visualTransformation: VisualTransformation = VisualTransformation.None,
+    onImeAction: (() -> Unit)? = null,
 ) {
+    val keyboardActions = remember(onImeAction) {
+        if (onImeAction == null) {
+            KeyboardActions.Default
+        } else {
+            val run: KeyboardActionScope.() -> Unit = {
+                onImeAction()
+                defaultKeyboardAction(ImeAction.Done)
+            }
+            KeyboardActions(onGo = run, onSearch = run, onSend = run, onDone = run)
+        }
+    }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -90,6 +122,7 @@ fun FormField(
         singleLine = singleLine,
         minLines = if (singleLine) 1 else 3,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
+        keyboardActions = keyboardActions,
         leadingIcon = leadingIcon,
         trailingIcon = trailingIcon,
         visualTransformation = visualTransformation,
@@ -183,6 +216,14 @@ fun <T> FormDropdown(
     }
 }
 
+/**
+ * A labelled switch where the whole row is the control.
+ *
+ * The row is toggleable with the switch role, and the [Switch] itself takes no
+ * input. So a tap on the title works, not only on the small thumb, and a
+ * screen reader reads the title, the description and the state as one control
+ * ("Privacy mode, off, switch") instead of a bare "off, switch".
+ */
 @Composable
 fun FormSwitch(
     title: String,
@@ -195,6 +236,12 @@ fun FormSwitch(
     Row(
         modifier = modifier
             .fillMaxWidth()
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                onValueChange = onCheckedChange,
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -218,7 +265,7 @@ fun FormSwitch(
             }
         }
         Spacer(Modifier.width(16.dp))
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 
@@ -234,7 +281,9 @@ fun ConfirmDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
-        text = { Text(message) },
+        // Scrolls, so the end of a long message (a whole web address, say) can
+        // be read rather than cut off below the buttons.
+        text = { Text(message, Modifier.verticalScroll(rememberScrollState())) },
         confirmButton = {
             TextButton(onClick = onConfirm) {
                 Text(
@@ -327,5 +376,75 @@ fun FormSection(
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(0.dp)) {
         if (title != null) SectionHeader(title)
         content()
+    }
+}
+
+/**
+ * A date the user picks as a calendar day, with Choose and, once one is set,
+ * Clear.
+ *
+ * The picker speaks UTC midnight; [onPick] gets the local start of that day,
+ * or with [endOfDay] its last second, so an expiry picked for 1 Oct lasts all
+ * of 1 Oct where the user is.
+ */
+@Composable
+fun DateRow(
+    label: String,
+    epochSeconds: Long?,
+    endOfDay: Boolean,
+    onPick: (Long?) -> Unit,
+    emptyText: String = "Not set",
+    supportingText: String? = null,
+    enabled: Boolean = true,
+) {
+    var picking by remember { mutableStateOf(false) }
+
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = epochSeconds?.let(Dates::date) ?: emptyText,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            supportingText?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        // "Clear" only exists once a date has been chosen, and it appears right
+        // beside the button that was just tapped to choose one.
+        AnimatedVisibility(
+            visible = enabled && epochSeconds != null,
+            enter = expandHorizontally(Motion.spatialSize) + fadeIn(Motion.effects),
+            exit = shrinkHorizontally(Motion.spatialSize) + fadeOut(Motion.effectsFast),
+        ) {
+            TextButton(onClick = { onPick(null) }) { Text("Clear") }
+        }
+        TextButton(onClick = { picking = true }, enabled = enabled) { Text("Choose") }
+    }
+
+    if (picking) {
+        val picker = rememberDatePickerState(initialSelectedDateMillis = epochSeconds?.let(Dates::pickerMillis))
+        DatePickerDialog(
+            onDismissRequest = { picking = false },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onPick(
+                            picker.selectedDateMillis?.let {
+                                if (endOfDay) Dates.pickerEndOfDay(it) else Dates.pickerStartOfDay(it)
+                            },
+                        )
+                        picking = false
+                    },
+                ) { Text("Set") }
+            },
+            dismissButton = { TextButton(onClick = { picking = false }) { Text("Cancel") } },
+        ) {
+            DatePicker(state = picker)
+        }
     }
 }

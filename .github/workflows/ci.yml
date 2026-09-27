@@ -1,0 +1,41 @@
+# Unit tests, lint and an unsigned, minified release build on every push and
+# pull request. Signing never happens here: the release key stays on the
+# maintainer's machine. Every action is pinned by commit SHA, because a tag can
+# be moved to point at other code.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # The wrapper jar is checked here, before setup-gradle restores its cache.
+      # setup-gradle's own check also accepts checksums saved in that cache, so
+      # it is turned off below.
+      - uses: gradle/actions/wrapper-validation@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+        with:
+          # The open-source cache. The default, 'enhanced', is a closed-source
+          # library under Gradle's own terms of use.
+          cache-provider: basic
+          validate-wrappers: false
+
+      - name: Test, lint and build
+        run: ./gradlew :app:testDebugUnitTest :app:lintRelease :app:assembleRelease

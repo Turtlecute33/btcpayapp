@@ -122,7 +122,8 @@ fun LockScreen(
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "Unlocked with your device credentials",
+                // An instruction, not a status: the overlay is up because the app is locked.
+                text = "Unlock with your fingerprint, face or device PIN",
                 modifier = Modifier.arrive(2),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

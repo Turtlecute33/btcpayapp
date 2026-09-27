@@ -22,6 +22,19 @@ class BtcPayApi(
 
     val json: Json get() = client.json
 
+    /**
+     * The same server with a longer per-read timeout, for the one call that
+     * legitimately waits on the server (a Lightning payment blocks until the
+     * node gives up). Never shorter than the account's own, and the whole-call
+     * deadline in [BtcPayClient.execute] grows with it.
+     */
+    fun withReadTimeout(readTimeoutMs: Int): BtcPayApi = BtcPayApi(
+        client,
+        endpoint.copy(
+            transport = endpoint.transport.copy(readTimeoutMs = maxOf(endpoint.transport.readTimeoutMs, readTimeoutMs)),
+        ),
+    )
+
     /** Serialises a request body. Resolved at compile time, no reflection. */
     inline fun <reified B> body(value: B): String = json.encodeToString(value)
 
@@ -38,11 +51,23 @@ class BtcPayApi(
         authenticate: Boolean = true,
     ): T = decode(raw("GET", path, null, query, authenticate))
 
+    /**
+     * A success answer that cannot be read is [ApiException.OutcomeUnknown]
+     * here: the server has done the request, and a screen must not offer to
+     * send it again as if it had failed.
+     */
     suspend inline fun <reified T> post(
         path: String,
         body: String? = null,
         query: List<Pair<String, Any?>> = emptyList(),
-    ): T = decode(raw("POST", path, body, query))
+    ): T {
+        val response = raw("POST", path, body, query)
+        return try {
+            decode<T>(response)
+        } catch (e: ApiException.Decoding) {
+            throw ApiException.OutcomeUnknown(e)
+        }
+    }
 
     suspend inline fun <reified T> put(
         path: String,

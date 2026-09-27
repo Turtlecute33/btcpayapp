@@ -1,5 +1,6 @@
 package com.btcpayapp.ui.screens.invoice
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -25,6 +26,10 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
@@ -36,28 +41,93 @@ import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.mayHaveGoneThrough
 import com.btcpayapp.data.api.dto.InvoiceData
 import com.btcpayapp.data.api.dto.RefundInvoiceRequest
 import com.btcpayapp.data.api.dto.RefundTriggerData
 import com.btcpayapp.data.api.dto.RefundVariant
-import com.btcpayapp.data.api.endpoints.invoice
+import com.btcpayapp.data.api.endpoints.invoiceWithPaymentMethods
 import com.btcpayapp.data.api.endpoints.refundInvoice
 import com.btcpayapp.data.api.endpoints.refundTrigger
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.FormField
+import com.btcpayapp.ui.components.FormProblem
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SectionHeader
+import com.btcpayapp.ui.components.maskedIfPrivate
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
+import com.btcpayapp.ui.screens.payout.payoutMethodLabel
+import com.btcpayapp.data.session.OutcomeHold
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.theme.Motion
 import java.math.BigDecimal
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
+
+private val HUNDRED = BigDecimal(100)
+
+/**
+ * One refund figure: an amount, its currency and, for a figure in the payment
+ * method's own currency, the divisibility it is shown at.
+ *
+ * The Fiat variant is in the *invoice* currency (the server rounds it there);
+ * the other three are in the payment currency. Formatting all four with the
+ * payment currency showed "50 BTC" for a $50 invoice.
+ */
+internal data class RefundFigure(val amount: BigDecimal, val currency: String, val divisibility: Int? = null) {
+    val text: String
+        get() = divisibility?.let { "${Amounts.trim(amount, it)} $currency" } ?: Amounts.format(amount, currency)
+}
+
+/** What [variant] refunds before any withholding, or null when the server gave no figure for it. */
+internal fun RefundTriggerData.figureFor(variant: RefundVariant): RefundFigure? {
+    fun paid(amount: BigDecimal?) = amount?.let { RefundFigure(it, paymentCurrency, paymentCurrencyDivisibility) }
+    return when (variant) {
+        RefundVariant.CurrentRate -> paid(paymentAmountNow)
+        RefundVariant.RateThen -> paid(paymentAmountThen)
+        RefundVariant.OverpaidAmount -> paid(overpaidPaymentAmount)
+        RefundVariant.Fiat -> RefundFigure(invoiceAmount, invoiceCurrency)
+        RefundVariant.Custom, RefundVariant.Unknown -> null
+    }
+}
+
+/**
+ * The withheld share, 0 to 100, with blank read as 0. Null for anything else,
+ * which is a field error that blocks the refund. An unreadable "10%" used to
+ * be dropped from the request, so the customer could claim everything.
+ */
+internal fun withheldPercent(text: String): BigDecimal? =
+    if (text.isBlank()) BigDecimal.ZERO else Amounts.parse(text)?.takeIf { it.signum() >= 0 && it <= HUNDRED }
+
+/** The field error for the withholding, or null when [withheldPercent] accepts it. */
+internal fun withholdProblem(text: String): String? =
+    if (withheldPercent(text) != null) null else Amounts.parseProblem(text) ?: "Enter a percentage from 0 to 100."
+
+/** [amount] less [withheld] percent. Exact: dividing by 100 only moves the point. */
+internal fun refundAfterWithholding(amount: BigDecimal, withheld: BigDecimal): BigDecimal =
+    amount.multiply(HUNDRED.subtract(withheld)).movePointLeft(2)
+
+/**
+ * Whether the server approves the customer's claim by itself, so no one
+ * reviews it before it is paid. BTCPay sets AutoApproveClaims for RateThen,
+ * CurrentRate and OverpaidAmount, and for Custom when its currency is the
+ * payment method's own (GreenfieldInvoiceController.RefundInvoice). Compared
+ * without case: a doubtful match warns rather than stays quiet.
+ */
+internal fun refundAutoApproved(variant: RefundVariant, customCurrency: String, paymentCurrency: String): Boolean =
+    when (variant) {
+        RefundVariant.RateThen, RefundVariant.CurrentRate, RefundVariant.OverpaidAmount -> true
+        RefundVariant.Custom -> customCurrency.trim().equals(paymentCurrency.trim(), ignoreCase = true)
+        RefundVariant.Fiat, RefundVariant.Unknown -> false
+    }
 
 /**
  * Refunds in BTCPay are not a push. The server creates a **pull payment** — a
@@ -68,6 +138,7 @@ import kotlinx.coroutines.launch
 data class RefundState(
     val invoice: InvoiceData? = null,
     val trigger: RefundTriggerData? = null,
+    val triggerError: ApiException? = null,
     val methodIds: List<String> = emptyList(),
     val selectedMethodId: String? = null,
     val variant: RefundVariant = RefundVariant.CurrentRate,
@@ -78,37 +149,82 @@ data class RefundState(
     val description: String = "",
     val loading: Boolean = true,
     val submitting: Boolean = false,
+    /** A create may have been made ([mayHaveGoneThrough]). Stays set: a second try could make a second claimable refund. */
+    val outcomeUnknown: Boolean = false,
+    val notice: String? = null,
     val error: ApiException? = null,
-)
+) {
+    /** The payment method's currency, which decides whether a Custom refund is approved by the server. */
+    val paymentCurrency: String
+        get() = trigger?.paymentCurrency?.takeIf { it.isNotBlank() }
+            ?: invoice?.paymentMethods?.firstOrNull { it.paymentMethodId == selectedMethodId }?.currency
+                ?.takeIf { it.isNotBlank() }
+            ?: selectedMethodId?.substringBefore('-').orEmpty()
+
+    /**
+     * What the customer can claim: the chosen variant's figure less the
+     * withholding. Null while that is not known, or the input is not valid,
+     * and then nothing can be submitted: the review must show the real figure.
+     */
+    internal val refundFigure: RefundFigure?
+        get() {
+            val withheld = withheldPercent(subtractPercentage) ?: return null
+            val base = when (variant) {
+                RefundVariant.Custom -> customCurrency.trim().takeIf { it.isNotEmpty() }
+                    ?.let { currency -> Amounts.inCurrency(customAmount, currency)?.let { RefundFigure(it, currency) } }
+                else -> trigger?.figureFor(variant)
+            } ?: return null
+            return base.copy(amount = refundAfterWithholding(base.amount, withheld))
+        }
+
+    val canSubmit: Boolean
+        get() = !submitting && !outcomeUnknown && selectedMethodId != null && refundFigure != null
+}
 
 class RefundViewModel(
     private val graph: AppGraph,
     private val invoiceId: String,
 ) : ViewModel() {
 
+    /** The store the invoice belongs to, so every call goes there (see [StoreBinding]). */
+    private val bound = StoreBinding(graph.session)
+
+    /** Whose funds the refund claims, for the confirmation. */
+    val storeName: String get() = bound.name
+
     private val _state = MutableStateFlow(RefundState())
     val state = _state.asStateFlow()
 
+    /**
+     * Held while [RefundState.outcomeUnknown] is on screen, so a store or account
+     * switch cannot close it before it is read: a second try could make a second
+     * refund. Owned here and not by the composable, so a tab switch or a screen
+     * on top does not release it. It ends when this screen is closed.
+     */
+    private val outcomeHold = OutcomeHold(graph.session).also(::addCloseable)
+
+    /** Changes the state and the hold together. Use it for every change that can set [RefundState.outcomeUnknown]. */
+    private fun edit(transform: (RefundState) -> RefundState) =
+        outcomeHold.set(_state.updateAndGet(transform).outcomeUnknown)
+
     init {
         load()
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
-    /**
-     * Waits for the store instead of silently giving up.
-     *
-     * `activeStore` starts null and only becomes non-null once `/stores`
-     * returns. Opening this screen from a payment notification or a launcher
-     * shortcut on a cold start would otherwise find no store, return from
-     * `load()` without clearing `loading`, and spin forever with no retry.
-     */
-    private suspend fun awaitStoreId(): String =
-        graph.session.activeStore.filterNotNull().first().id
+    fun reload() = load()
 
     private fun load() {
+        val store = bound.id ?: run {
+            _state.update { it.copy(loading = false, error = ApiException.NoAccount()) }
+            return
+        }
         viewModelScope.launch {
-            val storeId = awaitStoreId()
+            _state.update { it.copy(loading = it.invoice == null, error = null) }
             runCatching {
-                graph.session.requireApi().invoice(storeId, invoiceId, includePaymentMethods = true)
+                // Fills paymentMethods on servers before 2.4.1 too; without it
+                // no method is listed there and the refund cannot be made.
+                graph.session.requireApi().invoiceWithPaymentMethods(store, invoiceId)
             }.onSuccess { data ->
                 val paid = data.paymentMethods.orEmpty()
                     .filter { it.payments.isNotEmpty() }
@@ -131,24 +247,40 @@ class RefundViewModel(
     }
 
     fun selectMethod(methodId: String) {
-        _state.update { it.copy(selectedMethodId = methodId, trigger = null) }
+        _state.update { it.copy(selectedMethodId = methodId, trigger = null, triggerError = null) }
         loadTrigger(methodId)
     }
 
+    fun retryTrigger() {
+        _state.value.selectedMethodId?.let(::loadTrigger)
+    }
+
+    /**
+     * The figures behind every option but Custom. A failure is shown with a
+     * retry, because without them those options cannot be reviewed and so
+     * cannot be submitted. An answer for a method that is no longer selected
+     * is dropped, so an option never shows another method's amount.
+     */
     private fun loadTrigger(methodId: String) {
-        val storeId = graph.session.activeStore.value?.id ?: return
+        val store = bound.id ?: return
+        _state.update { it.copy(triggerError = null) }
         viewModelScope.launch {
             runCatching {
-                graph.session.requireApi().refundTrigger(storeId, invoiceId, methodId)
-            }.onSuccess { data -> _state.update { it.copy(trigger = data) } }
-            // A failure here only costs the preview figures, so it is not
-            // surfaced as a blocking error.
+                graph.session.requireApi().refundTrigger(store, invoiceId, methodId)
+            }.onSuccess { data ->
+                _state.update { if (it.selectedMethodId == methodId) it.copy(trigger = data) else it }
+            }.onFailure { failure ->
+                val error = failure.asApiException()
+                _state.update { if (it.selectedMethodId == methodId) it.copy(triggerError = error) else it }
+            }
         }
     }
 
-    fun update(transform: (RefundState) -> RefundState) = _state.update(transform)
+    fun update(transform: (RefundState) -> RefundState) = edit { transform(it).copy(notice = null) }
 
     fun dismissError() = _state.update { it.copy(error = null) }
+
+    fun reportNotice(text: String) = _state.update { it.copy(notice = text) }
 
     fun submit(onCreated: (String) -> Unit) {
         val snapshot = _state.value
@@ -157,48 +289,54 @@ class RefundViewModel(
         // every other write path in the app, it re-checks its in-flight flag
         // here rather than relying on the button's `enabled`, which lags the
         // click by a recomposition.
-        if (snapshot.submitting) return
-        val storeId = graph.session.activeStore.value?.id ?: return
-        val methodId = snapshot.selectedMethodId ?: return
+        if (!snapshot.canSubmit) return
+        val store = bound.id ?: return
+        val methodId = snapshot.selectedMethodId?.toPayoutMethodId() ?: return
+        val withheld = withheldPercent(snapshot.subtractPercentage) ?: return
+        val custom = snapshot.variant == RefundVariant.Custom
 
         viewModelScope.launch {
-            _state.update { it.copy(submitting = true, error = null) }
+            _state.update { it.copy(submitting = true, error = null, notice = null) }
             runCatching {
-                graph.session.requireApi().refundInvoice(
-                    storeId = storeId,
-                    invoiceId = invoiceId,
-                    request = RefundInvoiceRequest(
-                        name = snapshot.name.takeIf { it.isNotBlank() },
-                        description = snapshot.description.takeIf { it.isNotBlank() },
-                        payoutMethods = listOf(methodId.toPayoutMethodId()),
-                        refundVariant = snapshot.variant,
-                        // `Amounts.parse`, not `toBigDecimalOrNull`: the field
-                        // uses KeyboardType.Decimal, so on a de/fr/cs/it locale
-                        // the keyboard emits a comma. `toBigDecimalOrNull`
-                        // parses "2,5" to null and silently drops the
-                        // withholding — refunding the customer the full amount
-                        // with no error shown.
-                        subtractPercentage = Amounts.parse(snapshot.subtractPercentage),
-                        customAmount = Amounts.parse(snapshot.customAmount)
-                            ?.takeIf { snapshot.variant == RefundVariant.Custom },
-                        customCurrency = snapshot.customCurrency
-                            .takeIf { snapshot.variant == RefundVariant.Custom },
-                    ),
-                )
+                graph.session.spending {
+                    graph.session.requireApi().refundInvoice(
+                        storeId = store,
+                        invoiceId = invoiceId,
+                        request = RefundInvoiceRequest(
+                            name = snapshot.name.takeIf { it.isNotBlank() },
+                            description = snapshot.description.takeIf { it.isNotBlank() },
+                            // Both: servers before 2.4.1 read only the single id,
+                            // and refund with the invoice's default method without it.
+                            payoutMethods = listOf(methodId),
+                            payoutMethodId = methodId,
+                            refundVariant = snapshot.variant,
+                            subtractPercentage = withheld.takeIf { it.signum() > 0 },
+                            customAmount = Amounts.parse(snapshot.customAmount).takeIf { custom },
+                            customCurrency = snapshot.customCurrency.trim().takeIf { custom },
+                        ),
+                    )
+                }
             }.onSuccess {
                 // Cleared on success too. Left true, a no-op navigation (the
                 // screen already popped) would leave the spinner spinning
                 // forever and the button disabled.
                 _state.update { current -> current.copy(submitting = false) }
                 onCreated(it.id)
-            }
-                .onFailure { failure ->
-                    _state.update { it.copy(submitting = false, error = failure.asApiException()) }
+            }.onFailure { failure ->
+                val error = failure.asApiException()
+                edit {
+                    if (error.mayHaveGoneThrough()) {
+                        it.copy(submitting = false, outcomeUnknown = true)
+                    } else {
+                        it.copy(submitting = false, error = error)
+                    }
                 }
+            }
         }
     }
 }
 
+private const val OUTCOME_UNKNOWN = "The refund may have been created. Check Pull payments before you try again."
 
 /** Payout method ids collapse LNURL onto Lightning. */
 private fun String.toPayoutMethodId(): String =
@@ -212,8 +350,15 @@ fun RefundScreen(
 ) {
     val viewModel = appViewModel(key = "refund-$invoiceId") { RefundViewModel(it, invoiceId) }
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
+    var reviewing by remember { mutableStateOf(false) }
 
-    AppScreen(title = "Refund", onBack = onBack) { padding ->
+    // Leaving would cancel the create with the view model and lose its answer,
+    // which says whether it is safe to try again. So back waits for it.
+    BackHandler(enabled = state.submitting) {}
+
+    AppScreen(title = "Refund", onBack = { if (!state.submitting) onBack() }) { padding ->
         // A spinner rather than a skeleton: what is coming is a form, and a
         // placeholder that guessed the wrong shape would be worse than none.
         AnimatedSwap(state.loading, label = "refund") { loading ->
@@ -228,7 +373,11 @@ fun RefundScreen(
                     .padding(padding)
                     .verticalScroll(rememberScrollState()),
             ) {
-                ErrorBanner(state.error, onDismiss = viewModel::dismissError)
+                ErrorBanner(
+                    state.error,
+                    onDismiss = viewModel::dismissError,
+                    onRetry = if (state.invoice == null) viewModel::reload else null,
+                )
 
                 Text(
                     text = "The customer receives a claim link and redeems it with their own wallet. " +
@@ -256,18 +405,22 @@ fun RefundScreen(
 
                 SectionHeader("How much")
 
+                // Without these figures the options cannot be reviewed, so a
+                // failure says so and offers another try.
+                ErrorBanner(state.triggerError, onRetry = viewModel::retryTrigger)
+
                 val trigger = state.trigger
                 val options = listOf(
-                    RefundVariant.CurrentRate to ("Value at today's rate" to trigger?.paymentAmountNow),
-                    RefundVariant.RateThen to ("Value at the rate when paid" to trigger?.paymentAmountThen),
-                    RefundVariant.Fiat to ("The invoice amount" to trigger?.invoiceAmount),
-                    RefundVariant.OverpaidAmount to ("Only the overpayment" to trigger?.overpaidPaymentAmount),
-                    RefundVariant.Custom to ("A custom amount" to null),
+                    RefundVariant.CurrentRate to "Value at today's rate",
+                    RefundVariant.RateThen to "Value at the rate when paid",
+                    RefundVariant.Fiat to "The invoice amount",
+                    RefundVariant.OverpaidAmount to "Only the overpayment",
+                    RefundVariant.Custom to "A custom amount",
                 )
 
-                options.forEach { (variant, labelAndAmount) ->
-                    val (label, amount) = labelAndAmount
-                    val enabled = variant == RefundVariant.Custom || amount != null
+                options.forEach { (variant, label) ->
+                    val figure = trigger?.figureFor(variant)
+                    val enabled = variant == RefundVariant.Custom || figure != null
                     Row(
                         Modifier
                             .fillMaxWidth()
@@ -287,10 +440,9 @@ fun RefundScreen(
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text(label, style = MaterialTheme.typography.bodyLarge)
-                            if (amount != null && trigger != null) {
+                            if (figure != null) {
                                 Text(
-                                    text = "${Amounts.trim(amount, trigger.paymentCurrencyDivisibility)} " +
-                                        trigger.paymentCurrency,
+                                    text = maskedIfPrivate(figure.text),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -313,6 +465,7 @@ fun RefundScreen(
                             value = state.customAmount,
                             onValueChange = { value -> viewModel.update { it.copy(customAmount = value) } },
                             keyboardType = KeyboardType.Decimal,
+                            error = Amounts.inCurrencyProblem(state.customAmount, state.customCurrency.trim()),
                         )
                         FormField(
                             label = "Currency",
@@ -328,6 +481,7 @@ fun RefundScreen(
                     onValueChange = { value -> viewModel.update { it.copy(subtractPercentage = value) } },
                     keyboardType = KeyboardType.Decimal,
                     supportingText = "Deducted from the refund, for a restocking fee or similar.",
+                    error = withholdProblem(state.subtractPercentage),
                 )
 
                 SectionHeader("Label")
@@ -345,13 +499,13 @@ fun RefundScreen(
                     singleLine = false,
                 )
 
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(16.dp))
+
+                FormProblem(if (state.outcomeUnknown) OUTCOME_UNKNOWN else state.notice)
 
                 Button(
-                    onClick = { viewModel.submit(onCreated) },
-                    enabled = !state.submitting && state.selectedMethodId != null &&
-                        (state.variant != RefundVariant.Custom || Amounts.parse(state.customAmount)
-                            ?.let { it > BigDecimal.ZERO } == true),
+                    onClick = { if (state.canSubmit) reviewing = true },
+                    enabled = state.canSubmit,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
@@ -375,5 +529,37 @@ fun RefundScreen(
                 Spacer(Modifier.height(32.dp))
             }
         }
+    }
+
+    // Every variant is reviewed, not only the ones the server approves by
+    // itself: the figure here is the first time the operator sees the amount
+    // after the withholding, and a pull payment cannot be taken back once the
+    // link is out. So it is shown in privacy mode too, here and in the prompt.
+    // The invoice and the payout method are named too: "BTC" alone does not
+    // say whether the customer claims on-chain or over Lightning.
+    val figure = state.refundFigure
+    val methodId = state.selectedMethodId?.toPayoutMethodId()
+    if (reviewing && figure != null && methodId != null) {
+        val autoApproved = refundAutoApproved(state.variant, state.customCurrency, state.paymentCurrency)
+        val amount = figure.text
+        ConfirmDialog(
+            title = "Create this refund?",
+            message = buildString {
+                append("Refund ").append(amount).append(" from ").append(viewModel.storeName).append(".\n")
+                append("Invoice: ").append(invoiceId).append('\n')
+                append("Paid out over: ").append(payoutMethodLabel(methodId)).append('\n')
+                append("The customer claims it with a link.")
+                if (autoApproved) append(" Claims are paid without approval.")
+            },
+            confirmLabel = "Create",
+            onDismiss = { reviewing = false },
+            onConfirm = {
+                reviewing = false
+                val subtitle = "$amount from ${viewModel.storeName}"
+                scope.afterSpendGate(gate, "Confirm refund", subtitle, viewModel::reportNotice) {
+                    viewModel.submit(onCreated)
+                }
+            },
+        )
     }
 }

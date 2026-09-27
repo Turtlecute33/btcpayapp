@@ -7,7 +7,6 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -15,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -24,13 +22,11 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -38,12 +34,13 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -75,14 +72,12 @@ import com.btcpayapp.ui.components.QrCode
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
+import com.btcpayapp.ui.components.maskedIfPrivate
+import com.btcpayapp.ui.components.NoStoreSelectedState
 import com.btcpayapp.ui.theme.AppTheme
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -102,18 +97,35 @@ private enum class PaymentsPhase { NoStore, Offline, Tabs }
 private enum class PaymentsListPhase { Loading, Error, Empty, Content }
 
 /**
+ * One row per payment hash, newest first.
+ *
+ * Both lists are loaded once and never paged. `offsetIndex` is no page cursor:
+ * LND and CLN read it as a createdAt filter in milliseconds for payments and as
+ * the node's own add or pay index for invoices, so paging with the list size
+ * fetched the whole history again and showed every payment several times.
+ * The node also sends its list in its own order (LND oldest first), and
+ * CLN can list one hash more than once when a payment was retried. The newest
+ * entry per hash is the one that says what happened. A blank hash matches
+ * nothing and keeps its row.
+ */
+internal fun <T> newestPerHash(items: List<T>, hash: (T) -> String, time: (T) -> Long?): List<T> {
+    val seen = HashSet<String>()
+    return items
+        .sortedByDescending { time(it) ?: Long.MIN_VALUE }
+        .filter { item -> hash(item).let { it.isBlank() || seen.add(it) } }
+}
+
+/**
  * A stable, unique key per row.
  *
- * Stable — the payment hash — so that a page landing or a pull-to-refresh moves
- * the rows already on screen instead of discarding and re-measuring every
- * visible one, which would make this list jump and lose its place.
+ * Stable — the payment hash — so that a pull-to-refresh moves the rows already
+ * on screen instead of discarding and re-measuring every visible one, which
+ * would make this list jump and lose its place.
  *
  * Unique because a duplicate key in a `LazyColumn` is a crash rather than a
- * cosmetic fault, and both endpoints page by a cursor the node owns: an invoice
- * settling between two requests can repeat a row across the seam. A repeat is
- * given a row of its own rather than dropped — a list that quietly hides a
- * payment is worse than one that shows it twice — and a backend that leaves the
- * hash blank falls back to the position.
+ * cosmetic fault. [newestPerHash] leaves one row per hash, but a backend that
+ * leaves the hash blank falls back to the BOLT11 string, which can repeat, and
+ * then to the position.
  */
 private fun rowKeys(identities: List<String>): List<String> {
     val used = HashSet<String>(identities.size)
@@ -134,14 +146,10 @@ data class LightningPaymentsState(
 
     val invoices: List<LightningInvoiceData> = emptyList(),
     val invoicesLoading: Boolean = false,
-    val invoicesMore: Boolean = false,
-    val invoicesEnd: Boolean = false,
     val pendingOnly: Boolean = false,
 
     val payments: List<LightningPaymentData> = emptyList(),
     val paymentsLoading: Boolean = false,
-    val paymentsMore: Boolean = false,
-    val paymentsEnd: Boolean = false,
     val includePending: Boolean = true,
 
     val refreshing: Boolean = false,
@@ -156,73 +164,62 @@ class LightningPaymentsViewModel(
     private val serverNode: Boolean,
 ) : ViewModel() {
 
+    private val node = LightningBinding(graph.session, serverNode)
+
     private val _state = MutableStateFlow(LightningPaymentsState(invoicesLoading = true))
     val state = _state.asStateFlow()
-    private var invoiceJob: kotlinx.coroutines.Job? = null
-    private var paymentJob: kotlinx.coroutines.Job? = null
+    private var invoiceJob: Job? = null
+    private var paymentJob: Job? = null
 
     init {
-        if (serverNode) {
-            loadInvoices(reset = true)
-        } else {
-            viewModelScope.launch {
-                graph.session.activeStore
-                    .map { it?.id }
-                    .distinctUntilChanged()
-                    .collectLatest { storeId ->
-                        if (storeId != null) {
-                            loadInvoices(reset = true)
-                        } else {
-                            delay(NO_STORE_GRACE_MS)
-                            _state.update { it.copy(invoicesLoading = false, noStore = true) }
-                        }
-                    }
-            }
+        loadInvoices()
+        node.retryWhenKnown(viewModelScope) {
+            if (_state.value.tab == TAB_INVOICES) loadInvoices() else loadPayments()
         }
     }
 
     fun selectTab(index: Int) {
         if (_state.value.tab == index) return
         _state.update { it.copy(tab = index, error = null) }
-        if (index == TAB_PAYMENTS && _state.value.payments.isEmpty()) loadPayments(reset = true)
-        if (index == TAB_INVOICES && _state.value.invoices.isEmpty()) loadInvoices(reset = true)
+        if (index == TAB_PAYMENTS && _state.value.payments.isEmpty()) loadPayments()
+        if (index == TAB_INVOICES && _state.value.invoices.isEmpty()) loadInvoices()
     }
 
     fun setPendingOnly(value: Boolean) {
         _state.update { it.copy(pendingOnly = value) }
-        loadInvoices(reset = true)
+        loadInvoices()
     }
 
     fun setIncludePending(value: Boolean) {
         _state.update { it.copy(includePending = value) }
-        loadPayments(reset = true)
+        loadPayments()
     }
 
     fun refresh() {
-        if (_state.value.tab == TAB_INVOICES) {
-            loadInvoices(reset = true, refreshing = true)
-        } else {
-            loadPayments(reset = true, refreshing = true)
-        }
+        if (_state.value.tab == TAB_INVOICES) loadInvoices(refreshing = true) else loadPayments(refreshing = true)
     }
 
-    fun loadMore() {
+    /**
+     * Reloads the open tab quietly when the screen comes back, so a payment
+     * made meanwhile is listed. Skipped while that tab loads, which also
+     * covers the first resume, straight after [init].
+     */
+    fun onResume() {
         val current = _state.value
+        if (current.refreshing) return
         if (current.tab == TAB_INVOICES) {
-            if (current.invoicesLoading || current.invoicesMore || current.invoicesEnd) return
-            loadInvoices(reset = false)
+            if (!current.invoicesLoading) loadInvoices()
         } else {
-            if (current.paymentsLoading || current.paymentsMore || current.paymentsEnd) return
-            loadPayments(reset = false)
+            if (!current.paymentsLoading) loadPayments()
         }
     }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
-    private fun loadInvoices(reset: Boolean, refreshing: Boolean = false) {
-        if (!reset && invoiceJob?.isActive == true) return
+    /** The whole list, once; see [newestPerHash] for why there is no paging. */
+    private fun loadInvoices(refreshing: Boolean = false) {
         invoiceJob?.cancel()
-        val scope = graph.lightningScopeOrNull(serverNode)
+        val scope = node.scope
         if (scope == null) {
             _state.update { it.copy(invoicesLoading = false, refreshing = false, noStore = true) }
             return
@@ -230,32 +227,28 @@ class LightningPaymentsViewModel(
         invoiceJob = viewModelScope.launch {
             _state.update {
                 it.copy(
-                    invoicesLoading = reset && !refreshing && it.invoices.isEmpty(),
-                    invoicesMore = !reset,
+                    invoicesLoading = !refreshing && it.invoices.isEmpty(),
                     refreshing = refreshing,
                     noStore = false,
                     error = null,
                 )
             }
-            val snapshot = _state.value
-            // `offsetIndex` is the node's own cursor; the endpoint takes no page
-            // size, so an empty page is the only reliable end marker.
-            val offset = if (reset) null else snapshot.invoices.size.toLong()
+            val pendingOnly = _state.value.pendingOnly
 
             runCatching {
                 graph.session.requireApi().lightningInvoices(
                     scope = scope,
-                    pendingOnly = snapshot.pendingOnly.takeIf { it },
-                    offsetIndex = offset,
+                    pendingOnly = pendingOnly.takeIf { it },
                     cryptoCode = cryptoCode,
                 )
-            }.onSuccess { page ->
+            }.onSuccess { list ->
+                // Greenfield gives an invoice no creation time. Its expiry is
+                // the closest stand-in: creation plus the expiry window.
+                val invoices = newestPerHash(list, { it.paymentHash }, { it.expiresAt })
                 _state.update { current ->
                     current.copy(
-                        invoices = if (reset) page else current.invoices + page,
+                        invoices = invoices,
                         invoicesLoading = false,
-                        invoicesMore = false,
-                        invoicesEnd = page.isEmpty(),
                         refreshing = false,
                         nodeOffline = false,
                         error = null,
@@ -266,7 +259,6 @@ class LightningPaymentsViewModel(
                 _state.update {
                     it.copy(
                         invoicesLoading = false,
-                        invoicesMore = false,
                         refreshing = false,
                         nodeOffline = error.isNodeUnreachable(),
                         error = error.takeIf { e -> !e.isNodeUnreachable() },
@@ -276,10 +268,10 @@ class LightningPaymentsViewModel(
         }
     }
 
-    private fun loadPayments(reset: Boolean, refreshing: Boolean = false) {
-        if (!reset && paymentJob?.isActive == true) return
+    /** As [loadInvoices]. */
+    private fun loadPayments(refreshing: Boolean = false) {
         paymentJob?.cancel()
-        val scope = graph.lightningScopeOrNull(serverNode)
+        val scope = node.scope
         if (scope == null) {
             _state.update { it.copy(paymentsLoading = false, refreshing = false, noStore = true) }
             return
@@ -287,30 +279,26 @@ class LightningPaymentsViewModel(
         paymentJob = viewModelScope.launch {
             _state.update {
                 it.copy(
-                    paymentsLoading = reset && !refreshing && it.payments.isEmpty(),
-                    paymentsMore = !reset,
+                    paymentsLoading = !refreshing && it.payments.isEmpty(),
                     refreshing = refreshing,
                     noStore = false,
                     error = null,
                 )
             }
-            val snapshot = _state.value
-            val offset = if (reset) null else snapshot.payments.size.toLong()
+            val includePending = _state.value.includePending
 
             runCatching {
                 graph.session.requireApi().lightningPayments(
                     scope = scope,
-                    includePending = snapshot.includePending,
-                    offsetIndex = offset,
+                    includePending = includePending,
                     cryptoCode = cryptoCode,
                 )
-            }.onSuccess { page ->
+            }.onSuccess { list ->
+                val payments = newestPerHash(list, { it.paymentHash }, { it.createdAt })
                 _state.update { current ->
                     current.copy(
-                        payments = if (reset) page else current.payments + page,
+                        payments = payments,
                         paymentsLoading = false,
-                        paymentsMore = false,
-                        paymentsEnd = page.isEmpty(),
                         refreshing = false,
                         nodeOffline = false,
                         error = null,
@@ -321,7 +309,6 @@ class LightningPaymentsViewModel(
                 _state.update {
                     it.copy(
                         paymentsLoading = false,
-                        paymentsMore = false,
                         refreshing = false,
                         nodeOffline = error.isNodeUnreachable(),
                         error = error.takeIf { e -> !e.isNodeUnreachable() },
@@ -346,7 +333,6 @@ fun LightningPaymentsScreen(
     val invoiceListState = rememberLazyListState()
     val paymentListState = rememberLazyListState()
 
-    val activeListState = if (state.tab == TAB_INVOICES) invoiceListState else paymentListState
     val activeCount = if (state.tab == TAB_INVOICES) state.invoices.size else state.payments.size
 
     // Which way the tabs are travelling. The state carries only where the
@@ -358,11 +344,7 @@ fun LightningPaymentsScreen(
     val forward = state.tab >= previousTab
     SideEffect { previousTab = state.tab }
 
-    LaunchedEffect(activeListState, activeCount) {
-        snapshotFlow { activeListState.layoutInfo.visibleItemsInfo.lastOrNull()?.index }
-            .filter { it != null && it >= activeCount - 5 }
-            .collectLatest { viewModel.loadMore() }
-    }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     AppScreen(
         title = "Invoices and payments",
@@ -447,8 +429,8 @@ private fun InvoicesTab(
 ) {
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // Keyed off the list itself, so the pass over it happens when a page lands
-    // rather than on every recomposition of a screen with a switch on it.
+    // Keyed off the list itself, so the pass over it happens when the list
+    // lands rather than on every recomposition of a screen with a switch on it.
     val keys = remember(state.invoices) {
         rowKeys(state.invoices.map { it.paymentHash.ifBlank { it.BOLT11 } })
     }
@@ -458,6 +440,16 @@ private fun InvoicesTab(
             title = "Unpaid only",
             checked = state.pendingOnly,
             onCheckedChange = onPendingOnly,
+        )
+        // Said plainly, because the list cannot be made complete from here:
+        // without an index LND sends its oldest invoices, and there is no
+        // cursor that pages back to the newest.
+        Text(
+            text = "Listed by your Lightning node. Some nodes send only their oldest invoices, " +
+                "so recent ones can be missing. The store's Invoices screen lists every store payment.",
+            modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         ThinDivider()
 
@@ -499,7 +491,6 @@ private fun InvoicesTab(
                             onToggle = { expanded = if (expanded == rowKey) null else rowKey },
                         )
                     }
-                    item { ListFooterSpinner(visible = state.invoicesMore) }
                     item { Spacer(Modifier.height(24.dp)) }
                 }
             }
@@ -561,7 +552,6 @@ private fun PaymentsTab(
                             onToggle = { expanded = if (expanded == rowKey) null else rowKey },
                         )
                     }
-                    item { ListFooterSpinner(visible = state.paymentsMore) }
                     item { Spacer(Modifier.height(24.dp)) }
                 }
             }
@@ -624,7 +614,7 @@ private fun InvoiceRow(
             Spacer(Modifier.width(12.dp))
             Text(
                 // What arrived beats what was asked for, when they differ.
-                text = msatLabel(invoice.amountReceived ?: invoice.amount, unit),
+                text = maskedIfPrivate(msatLabel(invoice.amountReceived ?: invoice.amount, unit)),
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
             )
@@ -685,9 +675,8 @@ private fun PaymentRow(
             ?: TextUtil.middleEllipsis(payment.paymentHash, 10, 8)
     }
     val fee = remember(payment.feeAmount, unit) {
-        payment.feeAmount?.takeIf { it.toBigIntegerOrNull()?.signum() == 1 }
-            ?.let { "fee ${msatLabel(it, unit)}" }
-    }
+        payment.feeAmount.takeIfPositive()?.let { msatLabel(it, unit) }
+    }?.let { "fee ${maskedIfPrivate(it)}" }
 
     Column(modifier) {
         Row(
@@ -722,7 +711,7 @@ private fun PaymentRow(
             }
             Spacer(Modifier.width(12.dp))
             Text(
-                text = msatLabel(payment.totalAmount, unit),
+                text = maskedIfPrivate(msatLabel(payment.totalAmount, unit)),
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 1,
             )
@@ -770,28 +759,4 @@ internal fun PaymentStatusPill(status: LightningPaymentStatus) {
         LightningPaymentStatus.Unknown -> colors.expired to colors.onExpired
     }
     StatusPill(label = status.name, container = container, content = content)
-}
-
-/**
- * The next page, on its way.
- *
- * It grows into the end of the list and collapses out of it rather than
- * appearing between two frames: the list is lengthening at the same moment, and
- * a spinner that simply blinks into the gap reads as the list stuttering rather
- * than as more of it arriving.
- */
-@Composable
-private fun ListFooterSpinner(visible: Boolean) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
-        exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(24.dp),
-            horizontalArrangement = Arrangement.Center,
-        ) {
-            CircularProgressIndicator(Modifier.size(24.dp))
-        }
-    }
 }

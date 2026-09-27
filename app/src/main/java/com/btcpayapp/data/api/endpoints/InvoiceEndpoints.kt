@@ -49,6 +49,23 @@ internal suspend fun BtcPayApi.invoice(
     listOf("includePaymentMethods" to includePaymentMethods.takeIf { it }),
 )
 
+/**
+ * The invoice with [InvoiceData.paymentMethods] always filled, on every 2.x.
+ *
+ * The single-invoice GET honours `includePaymentMethods` only from 2.4.1; older
+ * servers ignore the flag and send no list, or an empty one (2.3.6 to 2.4.0).
+ * Without one, checkout has no QR, a refund has no method to pick and the
+ * detail screen shows no payments. The `.../payment-methods` route exists in
+ * every 2.x, so it fills the gap with a second request only when the first
+ * answer has no method. An invoice always has at least one, so an empty list
+ * means the server left them out.
+ */
+internal suspend fun BtcPayApi.invoiceWithPaymentMethods(storeId: String, invoiceId: String): InvoiceData {
+    val invoice = invoice(storeId, invoiceId, includePaymentMethods = true)
+    if (!invoice.paymentMethods.isNullOrEmpty()) return invoice
+    return invoice.copy(paymentMethods = invoicePaymentMethods(storeId, invoiceId))
+}
+
 internal suspend fun BtcPayApi.createInvoice(storeId: String, request: CreateInvoiceRequest): InvoiceData =
     post("api/v1/stores/${storeId.pathSegment()}/invoices", body(request))
 

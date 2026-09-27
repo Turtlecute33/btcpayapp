@@ -1,9 +1,11 @@
 package com.btcpayapp.data.session
 
+import com.btcpayapp.core.store.saved
 import com.btcpayapp.core.util.Log
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.BtcPayClient
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.ApplicationUserData
 import com.btcpayapp.data.api.dto.PaymentMethodData
 import com.btcpayapp.data.api.dto.ServerInfoData
@@ -25,12 +27,14 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Holds "which server and store am I looking at", and the small amount of state
@@ -83,11 +87,31 @@ class SessionManager(
     private val _serverInfo = MutableStateFlow<ServerInfoData?>(null)
     val serverInfo: StateFlow<ServerInfoData?> = _serverInfo.asStateFlow()
 
+    /**
+     * The live version from `server/info`, else the one stored on the account
+     * at the last successful refresh. Null when neither is known: gates then
+     * let the server decide (see [serverAtLeast]).
+     */
+    val serverVersion: StateFlow<ServerVersion?> = combine(serverInfo, activeAccount) { info, account ->
+        ServerVersion.parse(info?.version?.takeIf(String::isNotBlank) ?: account?.serverVersion)
+    }.stateIn(scope, SharingStarted.Eagerly, null)
+
+    /** True when the server runs [version] or later, or its version is unknown. */
+    fun serverAtLeast(version: ServerVersion): Boolean =
+        serverVersion.value.let { it == null || it >= version }
+
     private val _paymentMethods = MutableStateFlow<List<PaymentMethodData>>(emptyList())
     val paymentMethods: StateFlow<List<PaymentMethodData>> = _paymentMethods.asStateFlow()
     private val _paymentMethodsLoaded = MutableStateFlow(false)
     val paymentMethodsLoaded = _paymentMethodsLoaded.asStateFlow()
     private val storesOwner = MutableStateFlow<Account?>(null)
+
+    /**
+     * True once the store list loaded for the current account; false again on
+     * an account change. Tells "this key sees no store" apart from "not loaded".
+     */
+    private val _storesLoaded = MutableStateFlow(false)
+    val storesLoaded: StateFlow<Boolean> = _storesLoaded.asStateFlow()
 
     private val _refreshing = MutableStateFlow(false)
     val refreshing: StateFlow<Boolean> = _refreshing.asStateFlow()
@@ -107,10 +131,24 @@ class SessionManager(
 
     private val refreshMutex = Mutex()
 
+    /**
+     * Gates the refresh collectors below. The graph, and so this class, is
+     * built in every process, including those started only for a sync job or
+     * at boot, where the UI's requests would be pure cost.
+     */
+    private val started = MutableStateFlow(false)
+
+    /** Lets the session load. Called by the activity; later calls do nothing. */
+    fun start() {
+        started.value = true
+    }
+
     init {
         scope.launch {
+            started.first { it }
             activeAccount.map { it?.sessionIdentity() }.distinctUntilChanged().collectLatest { account ->
                 storesOwner.value = null
+                _storesLoaded.value = false
                 _stores.value = emptyList()
                 _user.value = null
                 _serverInfo.value = null
@@ -122,6 +160,7 @@ class SessionManager(
             }
         }
         scope.launch {
+            started.first { it }
             activeStore.map { it?.id }.distinctUntilChanged().collectLatest { storeId ->
                 _paymentMethods.value = emptyList()
                 _paymentMethodsLoaded.value = false
@@ -147,14 +186,82 @@ class SessionManager(
             ?: _stores.value.firstOrNull()?.id ?: throw ApiException.NoAccount()
     }
 
-    private fun Account.sessionIdentity() = copy(activeStoreId = null)
+    /**
+     * The account minus what may change without making it another session:
+     * the chosen store, and the server version this class writes back itself.
+     */
+    private fun Account.sessionIdentity() = copy(activeStoreId = null, serverVersion = null)
 
-    suspend fun selectStore(storeId: String) {
-        val accountId = activeAccount.value?.id ?: return
-        accounts.setActiveStore(accountId, storeId)
+    // --- Payments in flight --------------------------------------------------
+
+    private val spendLock = Any()
+    private var spendCount = 0
+    private var holdCount = 0
+    private val _spendInFlight = MutableStateFlow(false)
+    private val _busy = MutableStateFlow(false)
+
+    /**
+     * True while a request that moves money, or changes where it goes, runs
+     * (see [spending]). A store or account switch clears every store screen
+     * and its ViewModel, which would cancel the request and lose its outcome.
+     */
+    val spendInFlight: StateFlow<Boolean> = _spendInFlight.asStateFlow()
+
+    /** True while a money request runs (spending{}) OR a money outcome is still open (also on a tab that is not shown). Store and account switches are refused while it is true. */
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    /**
+     * Runs [block] marked as a payment in flight. Wrap every request that
+     * sends funds or changes where they go. Counted, so overlapping payments keep the mark until the
+     * last one ends; the lock keeps the counts and the flags in step.
+     */
+    suspend fun <T> spending(block: suspend () -> T): T {
+        countMarks(spend = +1)
+        return try {
+            block()
+        } finally {
+            countMarks(spend = -1)
+        }
     }
 
-    suspend fun selectAccount(accountId: String) = accounts.setActive(accountId)
+    /**
+     * Marks one money outcome as open until the returned function is called; calling it twice is harmless.
+     * Screens take it through [OutcomeHold].
+     */
+    fun holdOutcome(): () -> Unit {
+        countMarks(hold = +1)
+        // Once only: a repeated call must not take away the mark of another
+        // outcome that is still open.
+        val released = AtomicBoolean(false)
+        return { if (released.compareAndSet(false, true)) countMarks(hold = -1) }
+    }
+
+    private fun countMarks(spend: Int = 0, hold: Int = 0) = synchronized(spendLock) {
+        spendCount += spend
+        holdCount += hold
+        _spendInFlight.value = spendCount > 0
+        _busy.value = spendCount > 0 || holdCount > 0
+    }
+
+    /**
+     * Switches store. Returns null when switched, else the text to show.
+     * Refused while [busy], for a deep link as for a tap: the switch clears
+     * the store's screens, and with them a payment's result, which the user
+     * must see before paying again. Waiting for the payment to end and then
+     * switching is no better: the result appears only then, and the switch
+     * would remove it at once. Never throws for a failed write.
+     */
+    suspend fun selectStore(storeId: String): String? {
+        if (_busy.value) return SPEND_IN_FLIGHT
+        val accountId = activeAccount.value?.id ?: return null
+        return if (saved(TAG) { accounts.setActiveStore(accountId, storeId) }) null else SAVE_FAILED
+    }
+
+    /** As [selectStore], for the active account. */
+    suspend fun selectAccount(accountId: String): String? {
+        if (_busy.value) return SPEND_IN_FLIGHT
+        return if (saved(TAG) { accounts.setActive(accountId) }) null else SAVE_FAILED
+    }
 
     /**
      * Pulls the three things the shell needs. The calls are independent, so they
@@ -184,18 +291,36 @@ class SessionManager(
                 .onSuccess { list ->
                     _stores.value = list.sortedBy { it.name.lowercase() }
                     storesOwner.value = owner
+                    _storesLoaded.value = true
                     _lastError.value = null
                 }
                 .onFailure { it.record() }
 
-            user.onSuccess { _user.value = it }.onFailure { it.record() }
+            // Pairing accepts a key without "View your profile", so that
+            // refusal is not a session failure, as for server info below.
+            user.onSuccess { _user.value = it }.onFailure { if (it !is ApiException.Forbidden) it.record() }
             // Server info needs no special permission on a modern instance, but
             // an old or tightly scoped key can still be refused. That must not
             // mark the whole session as failed when the store list loaded.
-            info.onSuccess { _serverInfo.value = it }
+            info.onSuccess {
+                _serverInfo.value = it
+                rememberServerVersion(it.version)
+            }
         } finally {
             _refreshing.value = false
         }
+    }
+
+    /**
+     * Stores the reported version on the account, so version gates hold before
+     * the next `server/info` answers, or when a scoped key is refused it.
+     * [sessionIdentity] ignores the field, so the write does not reset the
+     * session. A failed write only costs the cached value.
+     */
+    private suspend fun rememberServerVersion(version: String) {
+        val account = accounts.vault.value.activeAccount ?: return
+        if (version.isBlank() || version == account.serverVersion) return
+        saved(TAG) { accounts.update(account.id) { it.copy(serverVersion = version) } }
     }
 
     suspend fun refreshPaymentMethods(storeId: String) {
@@ -231,17 +356,9 @@ class SessionManager(
 
     // --- Capability checks used to hide UI a key cannot drive ---------------
 
-    fun hasPermission(permission: String, storeId: String? = null): Boolean {
-        val granted = activeAccount.value?.permissions ?: return true // unknown: let the server decide
-        if (granted.isEmpty()) return true
-        if (granted.any { it == "unrestricted" || it == "unrestricted:" }) return true
-        return granted.any { entry ->
-            val (name, scope) = entry.split(':', limit = 2).let {
-                it[0] to it.getOrNull(1)?.takeIf(String::isNotBlank)
-            }
-            name == permission && (scope == null || storeId == null || scope == storeId)
-        }
-    }
+    /** Follows the server's policy tree; unknown grants let the server decide. See [Permissions]. */
+    fun hasPermission(permission: String, storeId: String? = null): Boolean =
+        Permissions.covers(activeAccount.value?.permissions, permission, storeId)
 
     val isServerAdmin: Boolean
         get() = user.value?.isAdmin == true
@@ -305,4 +422,39 @@ class SessionManager(
 
     fun canSpendLightning(): Boolean =
         hasPermission("btcpay.store.canuselightningnode", activeStore.value?.id)
+
+    fun canCreateInvoice(storeId: String): Boolean = hasPermission("btcpay.store.cancreateinvoice", storeId)
+
+    private companion object {
+        const val TAG = "SessionManager"
+        // An open result can wait on a tab that is not shown, so waiting alone may not end it.
+        const val SPEND_IN_FLIGHT = "A payment or a store change is in progress, or a payment result is still open. " +
+            "Wait for it to end or close the result, then try again."
+        const val SAVE_FAILED = "Could not save the change. Try again."
+    }
+}
+
+/** One screen's claim on [SessionManager.holdOutcome], owned by its ViewModel so that it outlives composition (a tab switch or a screen
+ *  pushed on top must not release an unseen result). set(true) takes the hold once, set(false) releases it, close() releases it for good. */
+class OutcomeHold(private val session: SessionManager) : AutoCloseable {
+    private var release: (() -> Unit)? = null
+    private var closed = false
+
+    // Synchronized: a ViewModel may call set() from a background coroutine
+    // while it is cleared, and so closed, on the main thread.
+    @Synchronized
+    fun set(active: Boolean) {
+        if (active && !closed) {
+            if (release == null) release = session.holdOutcome()
+        } else {
+            release?.invoke()
+            release = null
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        closed = true
+        set(false)
+    }
 }

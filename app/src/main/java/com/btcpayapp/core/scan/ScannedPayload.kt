@@ -62,7 +62,8 @@ object ScanParser {
 
     private val BECH32_ADDRESS = Regex("^(bc1|tb1|bcrt1)[02-9ac-hj-np-z]{6,87}$", RegexOption.IGNORE_CASE)
     private val BASE58_ADDRESS = Regex("^[13mn2][1-9A-HJ-NP-Za-km-z]{25,39}$")
-    private val BOLT11 = Regex("^ln(bc|tb|bcrt)[0-9]*[munp]?1[02-9ac-hj-np-z]{50,}$", RegexOption.IGNORE_CASE)
+    /** Mainnet, testnet, signet (`tbs`, which [com.btcpayapp.core.lightning.Bolt11] reads too) and regtest. */
+    private val BOLT11 = Regex("^ln(bc|tb|tbs|bcrt)[0-9]*[munp]?1[02-9ac-hj-np-z]{50,}$", RegexOption.IGNORE_CASE)
     private val NODE_URI = Regex("^[0-9a-fA-F]{66}@[^\\s]+$")
 
     fun parse(input: String): ScannedPayload {

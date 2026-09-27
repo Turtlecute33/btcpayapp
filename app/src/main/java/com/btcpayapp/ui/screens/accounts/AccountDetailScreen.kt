@@ -29,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -47,11 +48,16 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
+import com.btcpayapp.core.net.CertificateProbe
 import com.btcpayapp.core.net.Tls
+import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.BtcPayApi
+import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.attempt
+import com.btcpayapp.data.api.isOnThisPhone
 import com.btcpayapp.data.api.endpoints.revokeCurrentApiKey
 import com.btcpayapp.data.model.Account
 import com.btcpayapp.data.model.AccountProxy
@@ -59,6 +65,7 @@ import com.btcpayapp.data.session.toEndpoint
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.CertificateCheckDialog
 import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.CopyableField
 import com.btcpayapp.ui.components.DetailRow
@@ -69,12 +76,18 @@ import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
+import com.btcpayapp.ui.screens.settings.rememberOwnerCheck
 import com.btcpayapp.ui.theme.Motion
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.net.URI
 
 data class AccountDetailState(
     val account: Account? = null,
@@ -89,9 +102,17 @@ data class AccountDetailState(
     val busy: Boolean = false,
     val dirty: Boolean = false,
     val portError: String? = null,
+    val hostError: String? = null,
     val error: ApiException? = null,
     val message: String? = null,
     val removed: Boolean = false,
+    /** A call from this screen met a key the account has not accepted. */
+    val keyChanged: Boolean = false,
+    /** The session's last call for this account did; only known while it is the active one. */
+    val sessionKeyChanged: Boolean = false,
+    val probing: Boolean = false,
+    /** The server's current certificate, while the user checks it. */
+    val probe: CertificateProbe? = null,
 )
 
 class AccountDetailViewModel(
@@ -130,9 +151,16 @@ class AccountDetailViewModel(
             }
         }
         viewModelScope.launch {
-            combine(graph.session.activeAccount, graph.session.serverInfo) { active, info ->
-                info?.version?.takeIf { active?.id == accountId }
-            }.collect { version -> _state.update { it.copy(liveServerVersion = version) } }
+            combine(
+                graph.session.activeAccount,
+                graph.session.serverInfo,
+                graph.session.lastError,
+            ) { active, info, error ->
+                val mine = active?.id == accountId
+                Pair(info?.version?.takeIf { mine }, mine && error.isKeyChanged())
+            }.collect { (version, keyChanged) ->
+                _state.update { it.copy(liveServerVersion = version, sessionKeyChanged = keyChanged) }
+            }
         }
     }
 
@@ -140,7 +168,7 @@ class AccountDetailViewModel(
 
     fun setProxyEnabled(value: Boolean) = _state.update { it.copy(proxyEnabled = value, dirty = true) }
 
-    fun setProxyHost(value: String) = _state.update { it.copy(proxyHost = value, dirty = true) }
+    fun setProxyHost(value: String) = _state.update { it.copy(proxyHost = value, dirty = true, hostError = null) }
 
     fun setProxyPort(value: String) =
         _state.update { it.copy(proxyPort = value.filter(Char::isDigit), dirty = true, portError = null) }
@@ -155,22 +183,32 @@ class AccountDetailViewModel(
         val account = _state.value.account ?: return
         val snapshot = _state.value
         val port = snapshot.proxyPort.toIntOrNull()
+        val proxyHost = snapshot.proxyHost.trim().ifBlank { "127.0.0.1" }
 
-        if (snapshot.proxyEnabled && (port == null || port !in 1..65535)) {
-            _state.update { it.copy(portError = "Enter a port between 1 and 65535.") }
+        val portError = "Enter a port between 1 and 65535."
+            .takeIf { snapshot.proxyEnabled && (port == null || port !in 1..65535) }
+        // Plain HTTP is only encrypted by Tor itself, so the hop to the proxy
+        // carries the key in clear text. It must not leave the phone.
+        // The client refuses such a request too; this says so before saving.
+        val hostError = "For an unencrypted .onion address the proxy must run on this phone (127.0.0.1)."
+            .takeIf { snapshot.proxyEnabled && account.cleartext && !isOnThisPhone(proxyHost) }
+        if (portError != null || hostError != null) {
+            _state.update { it.copy(portError = portError, hostError = hostError) }
             return
         }
 
         viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null, portError = null) }
-            runCatching { graph.accounts.update(account.id) { stored ->
+            _state.update { it.copy(busy = true, error = null, portError = null, hostError = null) }
+            attempt { graph.accounts.update(account.id) { stored ->
                 stored.copy(
                     label = snapshot.label.trim().ifBlank { stored.host },
                     proxy = if (snapshot.proxyEnabled) {
                         AccountProxy(
-                            host = snapshot.proxyHost.trim().ifBlank { "127.0.0.1" },
+                            host = proxyHost,
                             port = port ?: 9050,
-                            socks = snapshot.proxySocks,
+                            // The HTTP-proxy option is hidden for plain HTTP,
+                            // so an old choice of it must not stay in force.
+                            socks = snapshot.proxySocks || account.cleartext,
                         )
                     } else {
                         null
@@ -180,7 +218,6 @@ class AccountDetailViewModel(
             }.onSuccess {
                 _state.update { it.copy(busy = false, dirty = false, message = "Saved") }
             }.onFailure { failure ->
-                if (failure is kotlinx.coroutines.CancellationException) throw failure
                 _state.update { it.copy(busy = false, error = ApiException.Transport("Could not save the account. Check device storage and try again.")) }
             }
         }
@@ -198,24 +235,16 @@ class AccountDetailViewModel(
         val account = _state.value.account ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
-            runCatching {
-                BtcPayApi(graph.client, account.toEndpoint()).revokeCurrentApiKey()
-                graph.accounts.remove(account.id)
+            val revoked = runCatching { BtcPayApi(graph.client, account.toEndpoint()).revokeCurrentApiKey() }
+            revoked.exceptionOrNull()?.let { failure ->
+                val error = failure.asApiException()
+                // A changed server key blocks the revocation too. The notice it
+                // raises is the way to trust the new key and try again.
+                _state.update { it.copy(busy = false, error = error, keyChanged = it.keyChanged || error.isKeyChanged()) }
+                return@launch
             }
-                .onSuccess {
-                    _state.update { it.copy(busy = false, removed = true) }
-                }
-                .onFailure { failure ->
-                    _state.update {
-                        it.copy(
-                            busy = false,
-                            error = failure as? ApiException
-                                ?: ApiException.Transport(
-                                    failure.message ?: "Could not revoke the key on the server.",
-                                ),
-                        )
-                    }
-                }
+            remove(account.id, "The key is revoked, but the account could not be removed from this " +
+                "phone. Use Remove without revoking.")
         }
     }
 
@@ -223,15 +252,78 @@ class AccountDetailViewModel(
         val account = _state.value.account ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
-            runCatching { graph.accounts.remove(account.id) }.onSuccess {
-                _state.update { it.copy(busy = false, removed = true) }
-            }.onFailure { failure ->
-                if (failure is kotlinx.coroutines.CancellationException) throw failure
-                _state.update { it.copy(busy = false, error = ApiException.Transport("Could not remove the account. Check device storage and try again.")) }
+            remove(account.id, "Could not remove the account. Check device storage and try again.")
+        }
+    }
+
+    /**
+     * Through [AppGraph.removeAccount], which also forgets the account's sync
+     * state and clears its notifications. The vault alone would
+     * leave both behind.
+     */
+    private suspend fun remove(id: String, failureText: String) {
+        attempt { graph.removeAccount(id) }.onSuccess {
+            _state.update { it.copy(busy = false, removed = true) }
+        }.onFailure { failure ->
+            _state.update { it.copy(busy = false, error = ApiException.Transport(failureText)) }
+        }
+    }
+
+    /**
+     * Reads the certificate the server offers now, for [CertificateCheckDialog].
+     *
+     * Direct connections only. The probe cannot use a proxy, so for an onion
+     * or proxied account it would look the name up on the local network and
+     * reach the server from this phone's own address, which is what the proxy
+     * is there to prevent. The screen does not offer it for those.
+     */
+    fun reviewCertificate() {
+        val account = _state.value.account ?: return
+        if (!account.canProbe || _state.value.probing) return
+        viewModelScope.launch {
+            _state.update { it.copy(probing = true, error = null) }
+            val probe = withContext(Dispatchers.IO) { Tls.probeCertificate(account.host, account.httpsPort) }
+            _state.update {
+                it.copy(
+                    probing = false,
+                    probe = probe,
+                    error = if (probe == null) ApiException.Transport("Could not read the server's certificate. Try again.") else null,
+                )
             }
         }
     }
+
+    fun cancelReview() = _state.update { it.copy(probe = null) }
+
+    /**
+     * Replaces the pins with [pin], which the user has just matched against
+     * the server itself in [CertificateCheckDialog]. Replaced, not added: the
+     * old key is the one the server no longer uses, and keeping it would let
+     * whoever holds it pass for this server.
+     */
+    fun trustNewKey(pin: String) {
+        val account = _state.value.account ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(probe = null, busy = true, error = null) }
+            attempt { graph.accounts.update(account.id) { it.copy(certificatePins = listOf(pin)) } }
+                .onSuccess {
+                    _state.update { it.copy(busy = false, keyChanged = false, message = "The new key is trusted.") }
+                }.onFailure { failure ->
+                        _state.update { it.copy(busy = false, error = ApiException.Transport("Could not save the account. Check device storage and try again.")) }
+                }
+        }
+    }
 }
+
+/** Plain HTTP: only a proxy on this phone may carry it. See [AccountDetailViewModel.save]. */
+private val Account.cleartext: Boolean get() = baseUrl.startsWith("http://", ignoreCase = true)
+
+/** Whether [AccountDetailViewModel.reviewCertificate] may connect: a direct HTTPS connection. */
+private val Account.canProbe: Boolean get() = proxy == null && !isOnion && !cleartext
+
+private val Account.httpsPort: Int get() = runCatching { URI(baseUrl).port }.getOrNull()?.takeIf { it > 0 } ?: 443
+
+private fun Throwable?.isKeyChanged(): Boolean = (this as? ApiException.Tls)?.problem == TlsProblem.KeyChanged
 
 @Composable
 fun AccountDetailScreen(
@@ -254,6 +346,13 @@ fun AccountDetailScreen(
     // consuming the message flips the effect's key, which would cancel a
     // suspended `showSnackbar` before it ever appeared.
     val scope = rememberCoroutineScope()
+    val gate = rememberSpendGate()
+    // Removing an account does part of what Erase everything does, and
+    // revoking its key also stops whatever else uses that key, so both ask
+    // for the same proof.
+    val owner = rememberOwnerCheck(onFailed = {
+        scope.launch { snackbarHostState.showSnackbar("Not confirmed, so nothing was done.") }
+    })
     LaunchedEffect(state.message) {
         val message = state.message ?: return@LaunchedEffect
         viewModel.consumeMessage()
@@ -333,6 +432,15 @@ fun AccountDetailScreen(
                 if (account.usesPinnedCertificate) {
                     SectionHeader("Pinned certificate")
                     Column(Modifier.padding(horizontal = 16.dp)) {
+                        if (state.keyChanged || state.sessionKeyChanged) {
+                            KeyChangedNotice(
+                                canReview = account.canProbe,
+                                probing = state.probing,
+                                enabled = !state.busy,
+                                onReview = viewModel::reviewCertificate,
+                            )
+                            Spacer(Modifier.height(12.dp))
+                        }
                         account.certificatePins.forEach { pin ->
                             CopyableField(
                                 label = "SHA-256 of the public key",
@@ -379,6 +487,7 @@ fun AccountDetailScreen(
                             label = "Proxy host",
                             value = state.proxyHost,
                             onValueChange = viewModel::setProxyHost,
+                            error = state.hostError,
                             enabled = !state.busy,
                         )
                         FormField(
@@ -389,15 +498,19 @@ fun AccountDetailScreen(
                             error = state.portError,
                             enabled = !state.busy,
                         )
-                        FormSwitch(
-                            title = "SOCKS5",
-                            checked = state.proxySocks,
-                            onCheckedChange = viewModel::setProxySocks,
-                            description = "Off sends requests through an HTTP proxy instead. SOCKS5 is " +
-                                "what Orbot and a standalone Tor daemon expose, and it keeps hostname " +
-                                "lookups off the local resolver.",
-                            enabled = !state.busy,
-                        )
+                        // Plain HTTP goes through SOCKS on this phone only,
+                        // so there is no choice to offer.
+                        if (!account.cleartext) {
+                            FormSwitch(
+                                title = "SOCKS5",
+                                checked = state.proxySocks,
+                                onCheckedChange = viewModel::setProxySocks,
+                                description = "Off sends requests through an HTTP proxy instead. SOCKS5 is " +
+                                    "what Orbot and a standalone Tor daemon expose, and it keeps hostname " +
+                                    "lookups off the local resolver.",
+                                enabled = !state.busy,
+                            )
+                        }
                     }
                 }
             }
@@ -452,7 +565,7 @@ fun AccountDetailScreen(
 
                 Button(
                     onClick = { confirmRevoke = true },
-                    enabled = !state.busy,
+                    enabled = !state.busy && !owner.busy,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = MaterialTheme.colorScheme.error,
                         contentColor = MaterialTheme.colorScheme.onError,
@@ -466,7 +579,7 @@ fun AccountDetailScreen(
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
                     onClick = { confirmRemove = true },
-                    enabled = !state.busy,
+                    enabled = !state.busy && !owner.busy,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                 ) {
                     Icon(Icons.Rounded.DeleteForever, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -487,7 +600,7 @@ fun AccountDetailScreen(
             destructive = true,
             onConfirm = {
                 confirmRevoke = false
-                viewModel.revokeAndRemove()
+                owner.confirm("Revoke and remove", viewModel::revokeAndRemove)
             },
             onDismiss = { confirmRevoke = false },
         )
@@ -502,10 +615,75 @@ fun AccountDetailScreen(
             destructive = true,
             onConfirm = {
                 confirmRemove = false
-                viewModel.removeWithoutRevoking()
+                owner.confirm("Remove without revoking", viewModel::removeWithoutRevoking)
             },
             onDismiss = { confirmRemove = false },
         )
+    }
+
+    val probe = state.probe
+    if (probe != null && account != null) {
+        CertificateCheckDialog(
+            host = account.host,
+            port = account.httpsPort,
+            probe = probe,
+            onTrust = { pin ->
+                viewModel.cancelReview()
+                // The pin decides who receives this account's key from now on,
+                // so a wrong one hands the key to whoever holds it. That is
+                // control of the store, and it takes the same confirmation.
+                scope.afterSpendGate(gate, "Trust the new key", account.host, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.trustNewKey(pin)
+                }
+            },
+            onCancel = viewModel::cancelReview,
+        )
+    }
+}
+
+/**
+ * Shown when a pinned account met a key it has not accepted.
+ *
+ * Without it the account was stuck: every call failed, the revocation too, so
+ * the only way out left the old key live on the server. A key change is also
+ * what an interception looks like, which is why the new key is checked
+ * against the server itself before anything is trusted.
+ */
+@Composable
+private fun KeyChangedNotice(canReview: Boolean, probing: Boolean, enabled: Boolean, onReview: () -> Unit) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("The server's key changed", style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = if (canReview) {
+                    "${TlsProblem.KeyChanged.userMessage} If you did not change the server's certificate, " +
+                        "someone may be intercepting the connection."
+                } else {
+                    "${TlsProblem.KeyChanged.userMessage} This account uses a proxy or Tor, so the app " +
+                        "cannot check the new key. Revoke the key on the server's website, then remove " +
+                        "this account without revoking and connect again."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (canReview) {
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = onReview, enabled = enabled && !probing) {
+                    AnimatedSwap(probing, label = "probe") { busy ->
+                        if (busy) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        } else {
+                            Text("Review the new certificate")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

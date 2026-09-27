@@ -34,7 +34,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -53,16 +52,20 @@ import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.ApiJson
 import com.btcpayapp.data.api.asApiException
 import com.btcpayapp.data.api.dto.AppItem
 import com.btcpayapp.data.api.dto.AppItemPriceType
+import com.btcpayapp.data.api.dto.PointOfSaleAppData
 import com.btcpayapp.data.api.dto.PointOfSaleAppRequest
 import com.btcpayapp.data.api.dto.PosView
 import com.btcpayapp.data.api.endpoints.createPointOfSaleApp
-import com.btcpayapp.data.api.endpoints.encodeItemTemplate
-import com.btcpayapp.data.api.endpoints.pointOfSaleApp
+import com.btcpayapp.data.api.endpoints.pointOfSaleAppJson
 import com.btcpayapp.data.api.endpoints.updatePointOfSaleApp
+import com.btcpayapp.data.api.overlaid
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
+import com.btcpayapp.ui.components.ActionBar
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppCard
 import com.btcpayapp.ui.components.AppScreen
@@ -75,11 +78,17 @@ import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.confirmDiscardChanges
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 
 private val POS_VIEWS = listOf(PosView.Static, PosView.Cart, PosView.Light, PosView.Print)
 
@@ -91,7 +100,31 @@ private enum class PosEditPhase { Loading, Error, Form }
 
 private val PRICE_TYPES = listOf(AppItemPriceType.Fixed, AppItemPriceType.Minimum, AppItemPriceType.Topup)
 
-/** One row of the item editor. Strings throughout, because the fields are text boxes. */
+/**
+ * The keys a PoS update may clear: the text fields this form can empty. An
+ * absent key keeps the server's value, so a field the form does not show
+ * (HTML language, meta tags, anything a newer server adds) is never wiped.
+ */
+private val POS_CLEARABLE = setOf(
+    "title", "description", "currency", "tipText", "notificationUrl", "redirectUrl",
+    "customAmountPayButtonText", "fixedAmountPayButtonText", "formId",
+)
+
+/** Read-only keys of the GET, and `items`, which the PUT takes as the `template` string. */
+private val POS_DROP = setOf("id", "storeId", "created", "appType", "archived", "items")
+
+/** The item keys the item editor can empty. */
+private val ITEM_CLEARABLE = setOf("description", "price", "inventory", "buyButtonText")
+
+/** A create with no store selected; the app list offers "New" even then. */
+internal fun noStoreSelected() = ApiException.NotFound("Select a store before creating an app.")
+
+/**
+ * One row of the item editor. Strings throughout, because the fields are text boxes.
+ *
+ * [original] is the item as loaded, so what the editor does not show (image,
+ * buy-button text, tax rate) goes back unchanged; null for a new item.
+ */
 data class PosItemDraft(
     val id: String = "",
     val title: String = "",
@@ -101,7 +134,9 @@ data class PosItemDraft(
     val inventory: String = "",
     val categories: String = "",
     val disabled: Boolean = false,
+    val original: AppItem? = null,
     val titleError: String? = null,
+    val priceError: String? = null,
 )
 
 data class PointOfSaleEditState(
@@ -136,6 +171,9 @@ data class PointOfSaleEditState(
     val editingIndex: Int = -1,
 
     val nameError: String? = null,
+    /** The store's currency, for item prices when [currency] is blank. */
+    val storeCurrency: String = "",
+    val dirty: Boolean = false,
     val finished: Boolean = false,
 )
 
@@ -144,37 +182,62 @@ class PointOfSaleEditViewModel(
     private val appId: String?,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(PointOfSaleEditState())
+    /**
+     * The store this screen was opened for, and the only one it creates in
+     * (see [StoreBinding]). A store switch closes the screen (the shell's
+     * reset), so it never changes.
+     */
+    private val bound = StoreBinding(graph.session)
+    private val storeId: String? get() = bound.id
+
+    private val _state = MutableStateFlow(
+        PointOfSaleEditState(storeCurrency = bound.store?.defaultCurrency.orEmpty()),
+    )
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
+    /**
+     * The app as the server sent it, and its items by id. The update replaces
+     * the whole app, so it starts from these and changes only what this form
+     * edits; a typed round trip dropped item images, tax rates and the HTML
+     * settings.
+     */
+    private var raw: JsonObject? = null
+    private var rawItems: Map<String, JsonObject> = emptyMap()
 
     init {
         if (appId != null) load()
+        // After a cold start the store comes later, and with it the default currency.
+        bound.retryWhenKnown(viewModelScope) {
+            _state.update { it.copy(storeCurrency = bound.store?.defaultCurrency.orEmpty()) }
+        }
     }
 
-    fun setAppName(value: String) = _state.update { it.copy(appName = value, nameError = null) }
-    fun setTitle(value: String) = _state.update { it.copy(title = value) }
-    fun setDescription(value: String) = _state.update { it.copy(description = value) }
-    fun setDefaultView(value: PosView) = _state.update { it.copy(defaultView = value) }
-    fun setCurrency(value: String) = _state.update { it.copy(currency = value.uppercase()) }
-    fun setShowItems(value: Boolean) = _state.update { it.copy(showItems = value) }
-    fun setShowCustomAmount(value: Boolean) = _state.update { it.copy(showCustomAmount = value) }
-    fun setShowDiscount(value: Boolean) = _state.update { it.copy(showDiscount = value) }
-    fun setShowSearch(value: Boolean) = _state.update { it.copy(showSearch = value) }
-    fun setShowCategories(value: Boolean) = _state.update { it.copy(showCategories = value) }
-    fun setEnableTips(value: Boolean) = _state.update { it.copy(enableTips = value) }
-    fun setTipDraft(value: String) = _state.update { it.copy(tipDraft = value.filter(Char::isDigit)) }
-    fun setFixedButtonText(value: String) = _state.update { it.copy(fixedAmountPayButtonText = value) }
-    fun setCustomButtonText(value: String) = _state.update { it.copy(customAmountPayButtonText = value) }
-    fun setTipText(value: String) = _state.update { it.copy(tipText = value) }
-    fun setNotificationUrl(value: String) = _state.update { it.copy(notificationUrl = value) }
-    fun setRedirectUrl(value: String) = _state.update { it.copy(redirectUrl = value) }
-    fun setRedirectAutomatically(value: Boolean) = _state.update { it.copy(redirectAutomatically = value) }
-    fun setFormId(value: String) = _state.update { it.copy(formId = value) }
+    fun setAppName(value: String) = edit { it.copy(appName = value, nameError = null) }
+    fun setTitle(value: String) = edit { it.copy(title = value) }
+    fun setDescription(value: String) = edit { it.copy(description = value) }
+    fun setDefaultView(value: PosView) = edit { it.copy(defaultView = value) }
+    fun setCurrency(value: String) = edit { it.copy(currency = value.uppercase()) }
+    fun setShowItems(value: Boolean) = edit { it.copy(showItems = value) }
+    fun setShowCustomAmount(value: Boolean) = edit { it.copy(showCustomAmount = value) }
+    fun setShowDiscount(value: Boolean) = edit { it.copy(showDiscount = value) }
+    fun setShowSearch(value: Boolean) = edit { it.copy(showSearch = value) }
+    fun setShowCategories(value: Boolean) = edit { it.copy(showCategories = value) }
+    fun setEnableTips(value: Boolean) = edit { it.copy(enableTips = value) }
+    fun setTipDraft(value: String) = edit { it.copy(tipDraft = value.filter(Char::isDigit)) }
+    fun setFixedButtonText(value: String) = edit { it.copy(fixedAmountPayButtonText = value) }
+    fun setCustomButtonText(value: String) = edit { it.copy(customAmountPayButtonText = value) }
+    fun setTipText(value: String) = edit { it.copy(tipText = value) }
+    fun setNotificationUrl(value: String) = edit { it.copy(notificationUrl = value) }
+    fun setRedirectUrl(value: String) = edit { it.copy(redirectUrl = value) }
+    fun setRedirectAutomatically(value: Boolean) = edit { it.copy(redirectAutomatically = value) }
+    fun setFormId(value: String) = edit { it.copy(formId = value) }
     fun dismissError() = _state.update { it.copy(error = null) }
 
-    fun addTipPercentage() = _state.update { current ->
+    /** A change the user made, so leaving asks first. */
+    private fun edit(transform: (PointOfSaleEditState) -> PointOfSaleEditState) =
+        _state.update { transform(it).copy(dirty = true) }
+
+    fun addTipPercentage() = edit { current ->
         val value = current.tipDraft.toIntOrNull()
         if (value == null || value <= 0 || value in current.tipPercentages) {
             current.copy(tipDraft = "")
@@ -184,7 +247,7 @@ class PointOfSaleEditViewModel(
     }
 
     fun removeTipPercentage(value: Int) =
-        _state.update { it.copy(tipPercentages = it.tipPercentages - value) }
+        edit { it.copy(tipPercentages = it.tipPercentages - value) }
 
     // --- Item editor -------------------------------------------------------
 
@@ -201,22 +264,25 @@ class PointOfSaleEditViewModel(
 
     fun commitItem() = _state.update { current ->
         val draft = current.itemEditor ?: return@update current
-        if (draft.title.isBlank()) {
-            return@update current.copy(itemEditor = draft.copy(titleError = "An item needs a name."))
+        val titleError = "An item needs a name.".takeIf { draft.title.isBlank() }
+        val priceError = itemPriceProblem(draft.price, draft.priceType)
+        if (titleError != null || priceError != null) {
+            return@update current.copy(itemEditor = draft.copy(titleError = titleError, priceError = priceError))
         }
         val resolved = draft.copy(
             id = draft.id.ifBlank { slugify(draft.title) },
             titleError = null,
+            priceError = null,
         )
         val items = if (current.editingIndex >= 0) {
             current.items.toMutableList().apply { this[current.editingIndex] = resolved }
         } else {
             current.items + resolved
         }
-        current.copy(items = items, itemEditor = null, editingIndex = -1)
+        current.copy(items = items, itemEditor = null, editingIndex = -1, dirty = true)
     }
 
-    fun removeItem(index: Int) = _state.update { current ->
+    fun removeItem(index: Int) = edit { current ->
         current.copy(items = current.items.filterIndexed { i, _ -> i != index })
     }
 
@@ -226,33 +292,14 @@ class PointOfSaleEditViewModel(
         val id = appId ?: return
         viewModelScope.launch {
             _state.update { it.copy(loading = true, loadError = null) }
-            runCatching { graph.session.requireApi().pointOfSaleApp(id) }
-                .onSuccess { data ->
-                    _state.update {
-                        it.copy(
-                            loading = false,
-                            appName = data.appName,
-                            title = data.title.orEmpty(),
-                            description = data.description.orEmpty(),
-                            defaultView = if (data.defaultView == PosView.Unknown) PosView.Static else data.defaultView,
-                            currency = data.currency.orEmpty(),
-                            showItems = data.showItems,
-                            showCustomAmount = data.showCustomAmount,
-                            showDiscount = data.showDiscount,
-                            showSearch = data.showSearch,
-                            showCategories = data.showCategories,
-                            enableTips = data.enableTips,
-                            tipPercentages = data.customTipPercentages,
-                            fixedAmountPayButtonText = data.fixedAmountPayButtonText.orEmpty(),
-                            customAmountPayButtonText = data.customAmountPayButtonText.orEmpty(),
-                            tipText = data.tipText.orEmpty(),
-                            notificationUrl = data.notificationUrl.orEmpty(),
-                            redirectUrl = data.redirectUrl.orEmpty(),
-                            redirectAutomatically = data.redirectAutomatically,
-                            formId = data.formId.orEmpty(),
-                            items = data.items.map { item -> item.toDraft() },
-                        )
-                    }
+            runCatching {
+                val json = graph.session.requireApi().pointOfSaleAppJson(id)
+                json to json.decodeAs(PointOfSaleAppData.serializer())
+            }
+                .onSuccess { (json, data) ->
+                    raw = json
+                    rawItems = json.itemsById()
+                    _state.update { it.withLoaded(data).copy(loading = false, dirty = false) }
                 }
                 .onFailure { failure ->
                     _state.update { it.copy(loading = false, loadError = failure.asApiException()) }
@@ -261,61 +308,145 @@ class PointOfSaleEditViewModel(
     }
 
     fun save() {
-        val store = storeId ?: return
         val snapshot = _state.value
+        // Re-entrancy guard. `enabled` is one recomposition behind the click,
+        // so two taps in the same frame would both get through and create two
+        // apps.
+        if (snapshot.saving) return
         if (snapshot.appName.isBlank()) {
             _state.update { it.copy(nameError = "Give this app a name so you can find it again.") }
             return
         }
+        // An existing app is saved only on top of what was loaded; the form
+        // is not shown before that.
+        val loaded = raw
+        if (appId != null && loaded == null) return
 
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
-            val api = runCatching { graph.session.requireApi() }.getOrElse { failure ->
-                _state.update { it.copy(saving = false, error = failure.asApiException()) }
-                return@launch
-            }
-
-            val request = PointOfSaleAppRequest(
-                appName = snapshot.appName.trim(),
-                title = snapshot.title.trim().takeIf { it.isNotBlank() },
-                description = snapshot.description.takeIf { it.isNotBlank() },
-                defaultView = snapshot.defaultView,
-                showItems = snapshot.showItems,
-                showCustomAmount = snapshot.showCustomAmount,
-                showDiscount = snapshot.showDiscount,
-                showSearch = snapshot.showSearch,
-                showCategories = snapshot.showCategories,
-                enableTips = snapshot.enableTips,
-                currency = snapshot.currency.trim().takeIf { it.isNotBlank() },
-                fixedAmountPayButtonText = snapshot.fixedAmountPayButtonText.takeIf { it.isNotBlank() },
-                customAmountPayButtonText = snapshot.customAmountPayButtonText.takeIf { it.isNotBlank() },
-                tipText = snapshot.tipText.takeIf { it.isNotBlank() },
-                customTipPercentages = snapshot.tipPercentages,
-                notificationUrl = snapshot.notificationUrl.trim().takeIf { it.isNotBlank() },
-                redirectUrl = snapshot.redirectUrl.trim().takeIf { it.isNotBlank() },
-                redirectAutomatically = snapshot.redirectAutomatically,
-                formId = snapshot.formId.trim().takeIf { it.isNotBlank() },
-                // The read model hands back `items` as a real array, but the write
-                // model wants `template`: the same list, JSON-encoded into a
-                // string field. `encodeItemTemplate` is the only place that knows.
-                template = api.encodeItemTemplate(snapshot.items.map { item -> item.toAppItem() }),
-            )
-
             runCatching {
-                if (appId == null) {
-                    api.createPointOfSaleApp(store, request)
+                val api = graph.session.requireApi()
+                val request = snapshot.toRequest(itemsTemplate(snapshot.items))
+                if (appId != null && loaded != null) {
+                    api.updatePointOfSaleApp(appId, pointOfSaleBody(loaded, request))
                 } else {
-                    api.updatePointOfSaleApp(appId, request)
+                    api.createPointOfSaleApp(storeId ?: throw noStoreSelected(), request)
                 }
             }.onSuccess {
-                _state.update { it.copy(saving = false, finished = true) }
+                _state.update { it.copy(saving = false, finished = true, dirty = false) }
             }.onFailure { failure ->
-                _state.update { it.copy(saving = false, error = failure.asApiException()) }
+                val error = failure.asApiException()
+                _state.update { it.copy(saving = false, error = error) }
             }
         }
     }
 
+    /**
+     * The `template` string: each item's raw JSON with the edits on top. The
+     * read model returns `items` as an array, the write model wants the same
+     * list JSON-encoded into a string.
+     */
+    private fun itemsTemplate(items: List<PosItemDraft>): String = JsonArray(
+        items.map { draft -> mergeItem(draft.original?.let { rawItems[it.id] }, draft.toAppItem()) },
+    ).toString()
 }
+
+/** The form filled from the app as loaded. */
+internal fun PointOfSaleEditState.withLoaded(data: PointOfSaleAppData) = copy(
+    appName = data.appName,
+    title = data.title.orEmpty(),
+    description = data.description.orEmpty(),
+    // Kept even when Unknown: a view from a newer server goes back as the
+    // server sent it (ApiJson.editsOf).
+    defaultView = data.defaultView,
+    currency = data.currency.orEmpty(),
+    showItems = data.showItems,
+    showCustomAmount = data.showCustomAmount,
+    showDiscount = data.showDiscount,
+    showSearch = data.showSearch,
+    showCategories = data.showCategories,
+    enableTips = data.enableTips,
+    tipPercentages = data.customTipPercentages,
+    fixedAmountPayButtonText = data.fixedAmountPayButtonText.orEmpty(),
+    customAmountPayButtonText = data.customAmountPayButtonText.orEmpty(),
+    tipText = data.tipText.orEmpty(),
+    notificationUrl = data.notificationUrl.orEmpty(),
+    redirectUrl = data.redirectUrl.orEmpty(),
+    redirectAutomatically = data.redirectAutomatically,
+    formId = data.formId.orEmpty(),
+    items = data.items.map { item -> item.toDraft() },
+)
+
+/** The form as a typed request. Only what the form edits; [pointOfSaleBody] keeps the rest. */
+internal fun PointOfSaleEditState.toRequest(template: String) = PointOfSaleAppRequest(
+    appName = appName.trim(),
+    title = title.trim().takeIf { it.isNotBlank() },
+    description = description.takeIf { it.isNotBlank() },
+    defaultView = defaultView,
+    showItems = showItems,
+    showCustomAmount = showCustomAmount,
+    showDiscount = showDiscount,
+    showSearch = showSearch,
+    showCategories = showCategories,
+    enableTips = enableTips,
+    currency = currency.trim().takeIf { it.isNotBlank() },
+    fixedAmountPayButtonText = fixedAmountPayButtonText.takeIf { it.isNotBlank() },
+    customAmountPayButtonText = customAmountPayButtonText.takeIf { it.isNotBlank() },
+    tipText = tipText.takeIf { it.isNotBlank() },
+    customTipPercentages = tipPercentages,
+    notificationUrl = notificationUrl.trim().takeIf { it.isNotBlank() },
+    redirectUrl = redirectUrl.trim().takeIf { it.isNotBlank() },
+    redirectAutomatically = redirectAutomatically,
+    formId = formId.trim().takeIf { it.isNotBlank() },
+    template = template,
+)
+
+/**
+ * The body of a PoS update: the app as loaded, with the typed edits on top.
+ * Nulls in [request] mean "keep", except for the keys the form can clear.
+ */
+internal fun pointOfSaleBody(raw: JsonObject, request: PointOfSaleAppRequest): JsonObject =
+    raw.overlaid(ApiJson.editsOf(PointOfSaleAppRequest.serializer(), request, POS_CLEARABLE), drop = POS_DROP)
+
+/**
+ * One saved item: its raw JSON (null for a new item) with [edited] on top.
+ * The raw object keeps what [AppItem] does not model (payment methods, keys a
+ * newer server adds); an `Unknown` price type is left as the server wrote it.
+ */
+internal fun mergeItem(raw: JsonObject?, edited: AppItem): JsonObject =
+    (raw ?: JsonObject(emptyMap())).overlaid(ApiJson.editsOf(AppItem.serializer(), edited, ITEM_CLEARABLE))
+
+/**
+ * The field error for an item price, or null. The price must parse, and a
+ * Fixed or Minimum item must have one: an unparsed price used to be saved as
+ * no price while the card showed the typed text. Zero stays
+ * allowed for a Fixed item, which the server shows as free.
+ */
+internal fun itemPriceProblem(price: String, type: AppItemPriceType): String? {
+    Amounts.parseProblem(price)?.let { return it }
+    val value = Amounts.parse(price)
+    return when {
+        value != null && value.signum() < 0 -> "A price cannot be below zero."
+        type == AppItemPriceType.Fixed && value == null -> "Enter a price, or 0 for a free item."
+        type == AppItemPriceType.Minimum && (value == null || value.signum() == 0) -> "Enter a minimum price above zero."
+        else -> null
+    }
+}
+
+/** The GET's items by id, so each saved item can start from its own raw JSON. */
+private fun JsonObject.itemsById(): Map<String, JsonObject> =
+    (this["items"] as? JsonArray).orEmpty()
+        .filterIsInstance<JsonObject>()
+        .associateBy { (it["id"] as? JsonPrimitive)?.contentOrNull.orEmpty() }
+
+/** Decodes the raw GET into its typed model; a shape this app cannot read is a decoding failure. */
+internal fun <T> JsonObject.decodeAs(deserializer: DeserializationStrategy<T>): T =
+    try {
+        ApiJson.instance.decodeFromJsonElement(deserializer, this)
+    } catch (e: IllegalArgumentException) {
+        // SerializationException is an IllegalArgumentException.
+        throw ApiException.Decoding(e)
+    }
 
 private fun slugify(title: String): String {
     val base = title.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
@@ -328,14 +459,18 @@ private fun AppItem.toDraft(): PosItemDraft = PosItemDraft(
     id = id,
     title = title,
     description = description.orEmpty(),
-    price = price?.let { Amounts.trim(it, 8) }.orEmpty(),
-    priceType = if (priceType == AppItemPriceType.Unknown) AppItemPriceType.Fixed else priceType,
+    // `toInput`, so a loaded "1.125" is not refused as ambiguous on save.
+    price = price?.let { Amounts.toInput(it, 8) }.orEmpty(),
+    // Kept even when Unknown, for the reason given on [mergeItem].
+    priceType = priceType,
     inventory = inventory?.toString().orEmpty(),
     categories = categories.joinToString(", "),
     disabled = disabled,
+    original = this,
 )
 
-private fun PosItemDraft.toAppItem(): AppItem = AppItem(
+/** The loaded item with the edited fields replaced, so the ones the editor does not show survive. */
+private fun PosItemDraft.toAppItem(): AppItem = (original ?: AppItem()).copy(
     id = id,
     title = title.trim(),
     description = description.takeIf { it.isNotBlank() },
@@ -346,6 +481,15 @@ private fun PosItemDraft.toAppItem(): AppItem = AppItem(
     categories = categories.split(',').map(String::trim).filter(String::isNotEmpty),
 )
 
+/**
+ * The price as it will be saved, not as it was typed: a card that echoed
+ * the text hid a price that would not parse.
+ */
+private fun priceLabel(price: String, currency: String): String {
+    val value = Amounts.parse(price) ?: return "no price"
+    return if (currency.isBlank()) Amounts.trim(value, 8) else Amounts.format(value, currency)
+}
+
 @Composable
 fun PointOfSaleEditScreen(
     appId: String?,
@@ -353,6 +497,8 @@ fun PointOfSaleEditScreen(
 ) {
     val viewModel = appViewModel(key = "pos-$appId") { PointOfSaleEditViewModel(it, appId) }
     val state by viewModel.state.collectAsStateWithLifecycle()
+    // The toolbar and the system back both ask first once something changed.
+    val back = confirmDiscardChanges(state.dirty, onBack)
 
     LaunchedEffect(state.finished) {
         if (state.finished) onBack()
@@ -370,29 +516,20 @@ fun PointOfSaleEditScreen(
 
     AppScreen(
         title = if (appId == null) "New point of sale" else "Edit point of sale",
-        onBack = onBack,
+        onBack = back,
         bottomBar = {
-            Surface(tonalElevation = 3.dp) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
+            ActionBar {
+                // The spinner pushes the Save button aside rather than
+                // appearing over it, so the bar reads as one control that
+                // has become busy.
+                AnimatedVisibility(
+                    visible = state.saving,
+                    enter = expandHorizontally(Motion.spatialSize) + fadeIn(Motion.effects),
+                    exit = shrinkHorizontally(Motion.spatialSize) + fadeOut(Motion.effectsFast),
                 ) {
-                    // The spinner pushes the Save button aside rather than
-                    // appearing over it, so the bar reads as one control that
-                    // has become busy.
-                    AnimatedVisibility(
-                        visible = state.saving,
-                        enter = expandHorizontally(Motion.spatialSize) + fadeIn(Motion.effects),
-                        exit = shrinkHorizontally(Motion.spatialSize) + fadeOut(Motion.effectsFast),
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(Modifier.size(20.dp))
-                            Spacer(Modifier.width(16.dp))
-                        }
-                    }
-                    Button(onClick = viewModel::save, enabled = !state.saving) { Text("Save") }
+                    CircularProgressIndicator(Modifier.padding(end = 8.dp).size(20.dp))
                 }
+                Button(onClick = viewModel::save, enabled = !state.saving) { Text("Save") }
             }
         },
     ) { padding ->
@@ -465,7 +602,7 @@ private fun PosForm(
                         PosView.Cart -> "Cart — items with a basket"
                         PosView.Light -> "Light — keypad only"
                         PosView.Print -> "Print — a printable list"
-                        PosView.Unknown -> "Unknown"
+                        PosView.Unknown -> "Set on the server"
                     }
                 },
             )
@@ -563,6 +700,7 @@ private fun PosForm(
 
         ItemsSection(
             items = state.items,
+            currency = state.currency.ifBlank { state.storeCurrency },
             onAdd = viewModel::newItem,
             onEdit = viewModel::editItem,
             onRemove = viewModel::removeItem,
@@ -606,6 +744,7 @@ private fun PosForm(
 @Composable
 private fun ItemsSection(
     items: List<PosItemDraft>,
+    currency: String,
     onAdd: () -> Unit,
     onEdit: (Int) -> Unit,
     onRemove: (Int) -> Unit,
@@ -647,7 +786,7 @@ private fun ItemsSection(
                                     )
                                     Text(
                                         text = buildString {
-                                            append(item.price.ifBlank { "no price" })
+                                            append(priceLabel(item.price, currency))
                                             if (item.priceType != AppItemPriceType.Fixed) {
                                                 append(" · ${item.priceType.name}")
                                             }
@@ -715,28 +854,31 @@ private fun ItemEditorSheet(
             FormField(
                 label = "Price",
                 value = draft.price,
-                onValueChange = { value -> onChange { it.copy(price = value) } },
-                supportingText = "In the app's currency. Leave blank for a free item.",
+                onValueChange = { value -> onChange { it.copy(price = value, priceError = null) } },
+                supportingText = "In the app's currency. Type 0 for a free item.",
+                error = draft.priceError,
                 keyboardType = KeyboardType.Decimal,
             )
             FormDropdown(
                 label = "Price type",
                 options = PRICE_TYPES,
                 selected = draft.priceType,
-                onSelect = { value -> onChange { it.copy(priceType = value) } },
+                onSelect = { value -> onChange { it.copy(priceType = value, priceError = null) } },
                 optionLabel = { type ->
                     when (type) {
                         AppItemPriceType.Fixed -> "Fixed — exactly the price"
                         AppItemPriceType.Minimum -> "Minimum — the price or more"
                         AppItemPriceType.Topup -> "Top-up — the buyer decides"
-                        AppItemPriceType.Unknown -> "Unknown"
+                        AppItemPriceType.Unknown -> "Set on the server"
                     }
                 },
             )
             FormField(
                 label = "Inventory",
                 value = draft.inventory,
-                onValueChange = { value -> onChange { it.copy(inventory = value.filter(Char::isDigit)) } },
+                // Nine digits always fit the server's Int. A longer number was
+                // saved as no limit while the card showed it as the stock.
+                onValueChange = { value -> onChange { it.copy(inventory = value.filter(Char::isDigit).take(9)) } },
                 supportingText = "Leave blank for unlimited stock.",
                 keyboardType = KeyboardType.Number,
             )

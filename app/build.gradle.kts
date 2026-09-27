@@ -24,10 +24,23 @@ val releaseKeystore: File? =
         ?.let(::File)
         ?.takeIf { it.isFile }
 
-// Lazy, so a debug build, a test run or an IDE sync never touches the Keychain.
-// The `releaseKeystore == null` short-circuit below keeps it untouched on a
-// machine with no keystore at all.
+// Only a build that asks for a release task, or for assemble, build or bundle
+// (which include one), reads the key. The signing block is evaluated on every
+// configuration, so without this a debug build, a debug test run or an IDE
+// sync on the release machine would read the Keychain for nothing. Gradle also
+// runs abbreviations (`aR` is assembleRelease), so a later word that is the
+// start of "Release" (R, Re, Rel, ...) counts too: a missed match gives an
+// unsigned APK, a false one only an extra Keychain read.
+val releaseRequested: Boolean = gradle.startParameter.taskNames.any { name ->
+    val task = name.substringAfterLast(':')
+    val laterWords = task.split(Regex("-|(?=\\p{Lu})")).drop(1).filter(String::isNotEmpty)
+    "release" in task.lowercase() ||
+        task.lowercase() in setOf("assemble", "build", "bundle") ||
+        laterWords.any { "release".startsWith(it.lowercase()) }
+}
+
 val releaseKeystorePassword: String? by lazy {
+    if (!releaseRequested) return@lazy null
     val fromEnvironment = providers.environmentVariable("BTCPAYAPP_KEYSTORE_PASSWORD").orNull
     if (!fromEnvironment.isNullOrEmpty()) return@lazy fromEnvironment
     if (!providers.systemProperty("os.name").getOrElse("").startsWith("Mac")) return@lazy null
@@ -45,10 +58,14 @@ android {
         applicationId = "com.btcpayapp"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
-
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionName = "0.2.0"
+        // Derived, so a release can never ship a versionName bump with a stale
+        // versionCode: Android installs an update only when the code grows.
+        // major.minor.patch -> major * 10000 + minor * 100 + patch.
+        versionCode = versionName!!.split('.').map(String::toInt).let { (major, minor, patch) ->
+            require(minor < 100 && patch < 100) { "minor and patch must stay below 100" }
+            major * 10_000 + minor * 100 + patch
+        }
     }
 
     buildFeatures {
@@ -66,7 +83,7 @@ android {
 
     signingConfigs {
         if (releaseKeystore == null || releaseKeystorePassword == null) {
-            logger.warn(
+            if (releaseRequested) logger.warn(
                 "No release signing material found — :app:assembleRelease will produce an " +
                     "UNSIGNED APK that no device will install.",
             )
@@ -114,6 +131,9 @@ android {
         // about 90 KB of download and saves reading 200 KB onto the heap on the
         // first channel row. See core/lightning/BundledNodeIndex.kt.
         noCompress.add("lnnodes.bin")
+        // The UI is English only. Without a filter every AndroidX library's
+        // translations ship too, for strings this app never shows.
+        localeFilters += listOf("en")
     }
 
     packaging {
@@ -197,9 +217,4 @@ dependencies {
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
-    androidTestImplementation(libs.androidx.junit)
-    androidTestImplementation(libs.androidx.espresso.core)
-    androidTestImplementation(platform(libs.compose.bom))
-    androidTestImplementation(libs.compose.ui.test.junit4)
-    debugImplementation(libs.compose.ui.test.manifest)
 }

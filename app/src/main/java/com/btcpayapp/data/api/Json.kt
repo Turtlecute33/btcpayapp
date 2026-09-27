@@ -3,6 +3,7 @@ package com.btcpayapp.data.api
 import com.btcpayapp.data.api.dto.LabelData
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.SerializationStrategy
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.MapSerializer
 import kotlinx.serialization.builtins.serializer
@@ -14,8 +15,12 @@ import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.math.BigDecimal
 
 /**
@@ -68,7 +73,37 @@ object ApiJson {
 
     /** Pretty printer used only for the developer-facing raw-response viewer. */
     val pretty: Json = Json(instance) { prettyPrint = true }
+
+    /**
+     * The fields of [value] a whole-object PUT should change, for [overlaid].
+     *
+     * Every null is removed first. `explicitNulls = false` already omits a null
+     * property, and what is left is an `Unknown` enum (see
+     * [FallbackEnumSerializer]): a value this app could not read, which the
+     * overlay must leave as the server sent it. Then each [clearable] key that
+     * is absent is sent as an explicit null. The list is explicit because an
+     * absent field must mean "keep", and only a field the user can empty on
+     * the screen may mean "clear".
+     */
+    fun <T> editsOf(serializer: SerializationStrategy<T>, value: T, clearable: Set<String> = emptySet()): JsonObject {
+        val edits = instance.encodeToJsonElement(serializer, value).jsonObject.filterValues { it !is JsonNull }
+        return JsonObject(edits + clearable.filter { it !in edits }.associateWith { JsonNull })
+    }
 }
+
+/**
+ * The server's own JSON with [edits] laid on top, minus the [drop] keys.
+ *
+ * Whole-object PUTs (apps, a payment method's config) replace every field,
+ * and the server resets whatever the body leaves out. A typed model only
+ * knows the fields of the release it was written for, so re-encoding it would
+ * wipe any field a newer server added. Starting from the raw object the server
+ * sent keeps those, and the edits win only where this app has something to
+ * say. Shallow on purpose: a nested object is replaced whole, like the server
+ * does.
+ */
+internal fun JsonObject.overlaid(edits: JsonObject, drop: Set<String> = emptySet()): JsonObject =
+    JsonObject((this - drop) + (edits - drop))
 
 /** Accepts `"1.23"` or `1.23`; always emits `"1.23"`. */
 internal object BigDecimalSerializer : KSerializer<BigDecimal> {
@@ -89,6 +124,40 @@ internal object BigDecimalSerializer : KSerializer<BigDecimal> {
 
     override fun serialize(encoder: Encoder, value: BigDecimal) {
         encoder.encodeString(value.toPlainString())
+    }
+}
+
+/**
+ * A decimal kept as the server's text: reads a JSON number or a string, and
+ * writes a string holding a plain `.` decimal.
+ *
+ * For fields the app shows and edits as text (a rate spread, a Lightning
+ * address limit) without doing arithmetic on them. The write is strict on
+ * purpose: Newtonsoft reads a decimal string with ',' allowed as a thousands
+ * separator, so `"0,5"` may become 5, a tenfold change nobody asked for.
+ * Anything that is not a plain decimal therefore fails the encode instead of
+ * reaching the server. Callers normalise user input with
+ * `Amounts.parse(...).toPlainString()`.
+ */
+internal object DecimalTextSerializer : KSerializer<String> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("DecimalText", PrimitiveKind.STRING)
+
+    override fun deserialize(decoder: Decoder): String =
+        (decoder as? JsonDecoder)?.decodeJsonElement()?.jsonPrimitive?.content ?: decoder.decodeString()
+
+    override fun serialize(encoder: Encoder, value: String) {
+        val decimal = try {
+            BigDecimal(value)
+        } catch (e: NumberFormatException) {
+            throw SerializationException("not a plain decimal")
+        }
+        // The same bound as [BigDecimalSerializer]: `toPlainString()` of 1e999999999
+        // is a billion characters.
+        if (decimal.scale() !in -1000..1000 || decimal.precision() > 1000) {
+            throw SerializationException("not a plain decimal")
+        }
+        encoder.encodeString(decimal.toPlainString())
     }
 }
 
@@ -144,6 +213,13 @@ internal object LabelListSerializer : KSerializer<List<LabelData>> {
 /**
  * Base for every API enum. An unrecognised value maps to [fallback] rather than
  * throwing, so a server upgrade cannot brick a list screen.
+ *
+ * The fallback is written back as JSON null, never as its own name: "Unknown"
+ * is not a wire value, and inventing one would make the server reject the
+ * whole save. BTCPay's store merge ignores a null and keeps its value;
+ * [ApiJson.editsOf] removes such nulls from an overlay so the server's raw
+ * value survives; anywhere else the server rejects the null, which is the safe
+ * failure.
  */
 internal abstract class FallbackEnumSerializer<T : Enum<T>>(
     serialName: String,
@@ -167,7 +243,10 @@ internal abstract class FallbackEnumSerializer<T : Enum<T>>(
         return values.firstOrNull { it.name.equals(raw, ignoreCase = true) } ?: fallback
     }
 
-    override fun serialize(encoder: Encoder, value: T) = encoder.encodeString(value.name)
+    override fun serialize(encoder: Encoder, value: T) {
+        if (value == fallback && encoder is JsonEncoder) encoder.encodeJsonElement(JsonNull)
+        else encoder.encodeString(value.name)
+    }
 }
 
 // DTO files opt in with a file-level

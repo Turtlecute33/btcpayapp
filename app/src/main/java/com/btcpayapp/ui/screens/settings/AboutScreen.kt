@@ -117,9 +117,13 @@ fun AboutScreen(onBack: () -> Unit) {
                 "nothing is sent anywhere.", Modifier.arrive(2))
             Claim("No Google Play services and no push service. Payment alerts come from polling " +
                 "your own server, so no third party learns when you are paid.", Modifier.arrive(3))
-            Claim("Credentials are sealed with a hardware-backed Keystore key. The bytes never " +
-                "leave the secure element, so a copy of the app's storage is useless without " +
-                "the device.", Modifier.arrive(4))
+            // "Where the phone has it": the Keystore falls back from StrongBox to
+            // the TEE, and to software on some devices, without telling the app.
+            // An unconditional "secure element" would promise more
+            // than many phones give.
+            Claim("Credentials are sealed with an Android Keystore key, held in secure hardware " +
+                "where the phone has it. A copy of the app's storage is useless without this " +
+                "phone.", Modifier.arrive(4))
             Claim("User-installed certificate authorities are not trusted. An MDM profile or a " +
                 "sideloaded root cannot intercept the connection; a private server certificate " +
                 "is pinned per account instead.", Modifier.arrive(5))

@@ -3,26 +3,33 @@ package com.btcpayapp.core.net
 import com.btcpayapp.BuildConfig
 import com.btcpayapp.core.util.Log
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CoroutineStart
-import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.io.InputStream
+import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.net.UnknownServiceException
+import java.security.cert.CertPathValidatorException
+import java.security.cert.CertificateExpiredException
+import java.security.cert.CertificateNotYetValidException
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLException
-import kotlin.coroutines.coroutineContext
+import javax.net.ssl.SSLPeerUnverifiedException
 
 /**
  * The entire HTTP layer, built on the platform's `HttpURLConnection`.
@@ -45,6 +52,9 @@ import kotlin.coroutines.coroutineContext
  *  - Cookies are never sent or stored.
  *  - The `User-Agent` carries the app name and version only — no device model,
  *    no OS build, nothing that helps fingerprint the operator.
+ *  - Every failure is an [HttpFailure] with fixed, plain text. The platform's
+ *    own exception text ("ECONNREFUSED", "Trust anchor for certification path
+ *    not found") stays in the cause and the debug log.
  */
 // `open` for one reason: it is the only seam at which a test can assert what the
 // API layer actually put on the wire — which request, carrying which headers —
@@ -61,35 +71,38 @@ open class HttpEngine {
     ): HttpResponse {
         val response = executeOnce(request, options)
         if (response.code !in REDIRECT_CODES) return response
-        if (hop >= MAX_REDIRECTS) throw HttpFailure.Transport("too many redirects")
+        if (hop >= MAX_REDIRECTS) throw redirectRefused("more than $MAX_REDIRECTS redirects")
 
-        val location = response.header("Location")
-            ?: throw HttpFailure.Transport("redirect without a Location header")
+        val location = response.header("Location") ?: throw redirectRefused("no Location header")
         val target = runCatching { URL(request.url, location) }
-            .getOrElse { throw HttpFailure.Transport("malformed redirect target") }
+            .getOrElse { throw redirectRefused("a malformed Location header") }
 
         if (!isSameOrigin(request.url, target)) {
             // Refusing rather than stripping credentials: a BTCPay instance has
             // no legitimate reason to bounce an API call to another origin, so
             // this is either a misconfiguration or an attack.
-            throw HttpFailure.Transport(
-                "refused a cross-origin redirect from ${request.url.host} to ${target.host}",
-            )
+            throw redirectRefused("cross-origin, from ${request.url.host} to ${target.host}")
         }
 
         return executeFollowingRedirects(redirectedRequest(request, response.code, target), options, hop + 1)
     }
 
     private suspend fun executeOnce(request: HttpRequest, options: TransportOptions): HttpResponse = coroutineScope {
-        coroutineContext.ensureActive()
+        currentCoroutineContext().ensureActive()
 
         val proxy = options.proxy?.toJavaProxy() ?: Proxy.NO_PROXY
         val connection = try {
             request.url.openConnection(proxy) as HttpURLConnection
         } catch (e: IOException) {
-            throw HttpFailure.Transport("could not open a connection", e)
+            currentCoroutineContext().ensureActive()
+            throw failureOf(e, requestSent = false)
         }
 
+        // Set once `connect()` returns: from then on the server may have the
+        // request, so a failure is no longer proof that nothing happened. The
+        // client needs that line to tell "never sent, retry is safe" from "a
+        // payment POST may have gone through".
+        var connected = false
         val succeeded = AtomicBoolean(false)
         // Blocking socket I/O does not observe coroutine deadlines on its own.
         val cancellation = launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
@@ -120,8 +133,15 @@ open class HttpEngine {
                 connection.doOutput = true
                 connection.setFixedLengthStreamingMode(request.body.size)
                 request.contentType?.let { connection.setRequestProperty("Content-Type", it) }
-                connection.outputStream.use { it.write(request.body) }
             }
+
+            // Explicit, so that DNS, the proxy, TCP and the whole TLS handshake
+            // (chain, pin and hostname checks) finish here, before a byte of
+            // the request body exists on the wire.
+            connection.connect()
+            connected = true
+
+            if (request.body != null) connection.outputStream.use { it.write(request.body) }
 
             val code = connection.responseCode
             val stream = if (code in 200..399) connection.inputStream else connection.errorStream
@@ -134,24 +154,22 @@ open class HttpEngine {
             // after the body has been fully drained by `readCapped`, which
             // closes the stream — would make keep-alive impossible and force a
             // new TCP connect and TLS handshake on every single API call.
-            coroutineContext.ensureActive()
+            currentCoroutineContext().ensureActive()
             succeeded.set(true)
             HttpResponse(code = code, headers = connection.headerFields.orEmpty(), body = body)
         } catch (e: CancellationException) {
             throw e
-        } catch (e: HttpFailure) {
-            // Already classified (the response cap, a bad redirect target).
-            // Without this clause the `IOException` catch below would flatten a
-            // `Tls` or `Timeout` back down to a generic `Transport`.
-            throw e
-        } catch (e: SSLException) {
-            throw HttpFailure.Tls(e.message ?: "TLS handshake failed", e)
-        } catch (e: UnknownHostException) {
-            throw HttpFailure.Transport("host not found: ${request.url.host}", e)
-        } catch (e: SocketTimeoutException) {
-            throw HttpFailure.Timeout("the server did not respond in time", e)
         } catch (e: IOException) {
-            throw HttpFailure.Transport(e.message ?: "network error", e)
+            // A cancelled caller disconnects the socket (above), and the blocked
+            // read then fails with an IOException. That is the cancellation, not
+            // a network fault, and it must stay one: a real exception thrown here
+            // would win over it and reach the caller as an ordinary failure.
+            currentCoroutineContext().ensureActive()
+            // An `HttpFailure` is already classified: the response cap, raised
+            // while reading an answer we did receive, keeps requestSent = false.
+            if (e is HttpFailure) throw e
+            Log.e("Http", e) { "request failed" }
+            throw failureOf(e, requestSent = connected, viaProxy = options.proxy != null)
         } finally {
             // Only on the failure path, where the body was not drained and the
             // socket is not reusable anyway.
@@ -174,21 +192,12 @@ open class HttpEngine {
                 val read = input.read(chunk)
                 if (read == -1) break
                 total += read
-                if (total > cap) throw HttpFailure.Transport("response exceeded $cap bytes")
+                if (total > cap) throw HttpFailure.Transport("The server's answer was too large for this app.")
                 buffer.write(chunk, 0, read)
             }
             return buffer.toByteArray()
         }
     }
-
-    private fun isSameOrigin(from: URL, to: URL): Boolean {
-        if (!from.host.equals(to.host, ignoreCase = true)) return false
-        if (!from.protocol.equals(to.protocol, ignoreCase = true)) return false
-        return from.effectivePort() == to.effectivePort()
-    }
-
-    private fun URL.effectivePort(): Int =
-        if (port != -1) port else if (protocol == "https") 443 else 80
 
     private companion object {
         val REDIRECT_CODES = setOf(301, 302, 303, 307, 308)
@@ -289,12 +298,87 @@ data class ProxySpec(
     }
 }
 
-/** Failures that happen below the API layer, before any response body exists. */
-internal sealed class HttpFailure(message: String, cause: Throwable? = null) : IOException(message, cause) {
-    class Transport(message: String, cause: Throwable? = null) : HttpFailure(message, cause)
-    class Timeout(message: String, cause: Throwable? = null) : HttpFailure(message, cause)
-    class Tls(message: String, cause: Throwable? = null) : HttpFailure(message, cause)
+/**
+ * Failures that happen below the API layer, before any response body exists.
+ *
+ * [message] is user text: fixed, plain, and never the platform's exception
+ * text, which stays in [cause].
+ *
+ * [requestSent] is true once the connection was open, so the server may have
+ * received the request and acted on it. It stays false for a failure raised
+ * while handling an answer we did receive (a refused redirect, the size cap):
+ * those are definite answers, not unknowns.
+ */
+internal sealed class HttpFailure(
+    message: String,
+    cause: Throwable?,
+    val requestSent: Boolean,
+) : IOException(message, cause) {
+    class Transport(message: String, cause: Throwable? = null, requestSent: Boolean = false) :
+        HttpFailure(message, cause, requestSent)
+
+    class Timeout(message: String, cause: Throwable? = null, requestSent: Boolean = false) :
+        HttpFailure(message, cause, requestSent)
+
+    /** Always before the connection opened: the handshake is part of `connect()`. */
+    class Tls(val problem: TlsProblem, cause: Throwable? = null) :
+        HttpFailure(problem.userMessage, cause, requestSent = false)
 }
+
+/**
+ * Maps a platform [IOException] to an [HttpFailure] with plain text.
+ *
+ * An `SSLException` is a certificate problem only before the connection
+ * opened. After it, the handshake is long over, and an `SSLException` is the
+ * TLS layer reporting a dropped or reset connection ("Read error", "Connection
+ * reset by peer"), which must count as a dropped connection with
+ * [HttpFailure.requestSent] so that a payment POST is not offered a plain retry.
+ *
+ * [viaProxy]: the request goes through a proxy, which is the only socket this
+ * app opens for it.
+ */
+internal fun failureOf(e: IOException, requestSent: Boolean, viaProxy: Boolean = false): HttpFailure = when {
+    e is SSLException && !requestSent -> HttpFailure.Tls(tlsProblemOf(e), e)
+    // Before the connection opened, a socket error through a proxy means the
+    // proxy refused the connection (the platform's SOCKS client reports that
+    // as a plain SocketException, not a ConnectException) or could not reach
+    // the server.
+    // The usual cause is Orbot not running, and the server texts below would
+    // send the user to check the server instead.
+    e is SocketException && viaProxy && !requestSent -> HttpFailure.Transport(PROXY_FAILED, e)
+    e is UnknownHostException -> HttpFailure.Transport("The server's address could not be found.", e, requestSent)
+    e is ConnectException -> HttpFailure.Transport("The server refused the connection.", e, requestSent)
+    e is SocketTimeoutException -> HttpFailure.Timeout("The server did not respond in time.", e, requestSent)
+    // What the platform throws when the network security config refuses cleartext.
+    e is UnknownServiceException -> HttpFailure.Transport(NEEDS_HTTPS, e, requestSent)
+    else -> HttpFailure.Transport("The connection to the server failed.", e, requestSent)
+}
+
+/** Shared with the client's own early check, so both paths say the same thing. */
+internal const val NEEDS_HTTPS = "This address needs https://. Only .onion addresses can use http://."
+
+internal const val PROXY_FAILED =
+    "Could not reach the server through the proxy. Check that Orbot (or your proxy) is running, then try again."
+
+/**
+ * Why a handshake failed, read from the exception and its causes. The platform
+ * wraps the trust manager's exception (often twice), so the whole chain is
+ * searched, and the order below goes from the most specific cause to the least.
+ */
+internal fun tlsProblemOf(e: Throwable): TlsProblem {
+    val chain = generateSequence(e) { it.cause?.takeIf { cause -> cause !== it } }.take(MAX_CAUSES).toList()
+    return when {
+        chain.any { it is SSLPeerUnverifiedException } -> TlsProblem.HostnameMismatch
+        chain.any { it is CertificateExpiredException || it is CertificateNotYetValidException } -> TlsProblem.Expired
+        chain.any { it is PinMismatchException } -> TlsProblem.KeyChanged
+        chain.any { it is CertPathValidatorException || it.message?.contains("Trust anchor", ignoreCase = true) == true } ->
+            TlsProblem.UntrustedIssuer
+        else -> TlsProblem.Other
+    }
+}
+
+/** A guard against a cause chain that loops; real chains are two or three deep. */
+private const val MAX_CAUSES = 16
 
 /** Builds a URL, percent-encoding every component and supporting repeated keys. */
 internal fun buildUrl(baseUrl: String, path: String, query: List<Pair<String, Any?>> = emptyList()): URL {
@@ -315,7 +399,7 @@ internal fun buildUrl(baseUrl: String, path: String, query: List<Pair<String, An
         URL(url)
     } catch (e: Exception) {
         Log.e("Http", e) { "malformed URL for path $suffix" }
-        throw HttpFailure.Transport("malformed server URL")
+        throw HttpFailure.Transport("The server address is not valid.")
     }
 }
 

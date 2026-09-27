@@ -1,6 +1,8 @@
 package com.btcpayapp.data.api.endpoints
 
+import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.BtcPayApi
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.ApiKeyData
 import com.btcpayapp.data.api.dto.ApplicationUserData
 import com.btcpayapp.data.api.dto.CreateApiKeyRequest
@@ -38,6 +40,26 @@ import com.btcpayapp.data.api.dto.UpdateNotificationSettingsRequest
 internal suspend fun BtcPayApi.health(): HealthData = get("api/v1/health", authenticate = false)
 
 internal suspend fun BtcPayApi.serverInfo(): ServerInfoData = get("api/v1/server/info")
+
+/**
+ * [serverInfo], refused below [ServerVersion.MINIMUM].
+ *
+ * Pairing calls this so an old server is turned away with its cause named,
+ * instead of being saved and then failing screen by screen with bare 404s. The
+ * message quotes the parsed version, never the raw server text. A version this
+ * app cannot parse passes: the server then decides route by route.
+ */
+internal suspend fun BtcPayApi.requireSupportedServer(): ServerInfoData {
+    val info = serverInfo()
+    val version = ServerVersion.parse(info.version)
+    if (version != null && version < ServerVersion.MINIMUM) {
+        throw ApiException.Unsupported(
+            "This app needs BTCPay Server 2.2 or later. This server runs $version. " +
+                "Update the server, then connect again.",
+        )
+    }
+    return info
+}
 
 internal suspend fun BtcPayApi.serverRoles(): List<RoleData> = get("api/v1/server/roles")
 

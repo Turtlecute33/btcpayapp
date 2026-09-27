@@ -1,11 +1,11 @@
 package com.btcpayapp.data.api
 
 import android.security.NetworkSecurityPolicy
-import android.util.Base64
 import com.btcpayapp.core.net.HttpEngine
 import com.btcpayapp.core.net.HttpFailure
 import com.btcpayapp.core.net.HttpRequest
 import com.btcpayapp.core.net.HttpResponse
+import com.btcpayapp.core.net.NEEDS_HTTPS
 import com.btcpayapp.core.net.TransportOptions
 import com.btcpayapp.core.net.buildUrl
 import com.btcpayapp.core.util.Log
@@ -13,14 +13,16 @@ import com.btcpayapp.data.api.dto.ApiErrorBody
 import com.btcpayapp.data.api.dto.ApiValidationError
 import com.btcpayapp.data.model.Credential
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import java.io.IOException
+import java.util.Locale
 
 /**
  * Turns an [HttpRequest] into a typed result, and every failure into an
@@ -55,15 +57,35 @@ class BtcPayClient(
             throw ApiException.Transport(e.message ?: "The server address is not valid.", e)
         }
 
-        // The platform blocks cleartext per the network security config. Check
-        // first so the user gets an actionable message instead of a bare
-        // "cleartext not permitted" IOException three layers down.
-        if (url.protocol.equals("http", ignoreCase = true) &&
-            !NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(url.host)
-        ) {
+        val cleartext = url.protocol.equals("http", ignoreCase = true)
+
+        // The platform blocks cleartext per the network security config, and
+        // says so at connect time with the same text. Checking first answers
+        // before anything is opened. `getInstance()` is null only under the JVM
+        // unit-test stubs, where the check is skipped; the SDK declares it
+        // non-null, hence the explicit type.
+        val policy: NetworkSecurityPolicy? = NetworkSecurityPolicy.getInstance()
+        if (cleartext && policy?.isCleartextTrafficPermitted(url.host) == false) {
+            throw ApiException.Transport(NEEDS_HTTPS)
+        }
+
+        // The cleartext rule is checked against the target, not the proxy hop.
+        // Plain HTTP through a proxy on another machine therefore crosses the
+        // Wi-Fi with the key in clear text. Refused, never rerouted: sending it
+        // somewhere the user did not choose would be worse.
+        //
+        // What stays: an .onion request reaches the proxy on this phone in
+        // clear text too (Orbot's 127.0.0.1:9050 by default), and Tor encrypts
+        // it only from there. While Orbot is stopped, any app can listen on
+        // that port and read the key; for an https server it cannot read the
+        // key, but it learns the server's name and can connect from this
+        // phone's address. No public Orbot API lets this app prove who holds
+        // the port, so nothing here can check it.
+        val proxy = endpoint.transport.proxy
+        if (cleartext && proxy != null && !isOnThisPhone(proxy.host)) {
             throw ApiException.Transport(
-                "This build only allows unencrypted HTTP to .onion and loopback addresses. " +
-                    "Use https:// for ${url.host}, or reach it over Tor.",
+                "This account's proxy is not on this phone, so the key would travel unencrypted. " +
+                    "Change the proxy in the account settings.",
             )
         }
 
@@ -77,31 +99,36 @@ class BtcPayClient(
         }
 
         val transport = endpoint.transport
+        // Only a POST can do something twice. The other verbs set a state, so
+        // they keep the plain Timeout and Transport answers, whose retry is safe.
+        val unsafeToRepeat = method.equals("POST", ignoreCase = true)
         val response = try {
             // `readTimeout` is per-read, so a server dribbling one byte every
             // 29s keeps a coroutine alive forever. This is the whole-call
-            // deadline that bounds it.
-            withTimeout(transport.connectTimeoutMs + transport.readTimeoutMs * 2L) {
+            // deadline that bounds it. `OrNull`, so that null is unmistakably
+            // this deadline: an outer one (a job's time limit) arrives as a
+            // cancellation and must stay one.
+            withTimeoutOrNull(transport.connectTimeoutMs + transport.readTimeoutMs * 2L) {
                 engine.execute(
                     HttpRequest(method = method, url = url, headers = headers, body = body, contentType = contentType),
                     transport,
                 )
             }
-        } catch (e: TimeoutCancellationException) {
-            throw ApiException.Timeout(e)
-        } catch (e: HttpFailure.Tls) {
-            throw ApiException.Tls(e.message ?: "The server's certificate was rejected.", e)
-        } catch (e: HttpFailure.Timeout) {
-            throw ApiException.Timeout(e)
-        } catch (e: HttpFailure) {
-            throw ApiException.Transport(e.message ?: "Could not reach the server.", e)
         } catch (e: IOException) {
-            // Backstop: nothing below this layer may surface a raw IOException.
-            throw ApiException.Transport(e.message ?: "Could not reach the server.", e)
-        }
+            // A cancelled caller's disconnect surfaces as an IOException, and it
+            // wins over the cancellation unless it is rethrown as one here.
+            currentCoroutineContext().ensureActive()
+            throw e.toApiException(unsafeToRepeat)
+        } ?: throw if (unsafeToRepeat) ApiException.OutcomeUnknown() else ApiException.Timeout()
 
         if (!response.isSuccess) {
-            throw withContext(Dispatchers.Default) { response.toApiException(json) }
+            val failure = withContext(Dispatchers.Default) { response.toApiException(json) }
+            // A proxy's answer, not BTCPay's: BTCPay may still have done the
+            // request, so a POST must not be offered as a plain retry. The
+            // answer stays the cause, for a caller that knows its POST changes
+            // nothing and shows the real failure.
+            if (unsafeToRepeat && response.code in GATEWAY_LOST_ANSWER) throw ApiException.OutcomeUnknown(failure)
+            throw failure
         }
         return response
     }
@@ -130,6 +157,38 @@ class BtcPayClient(
         }
 }
 
+/**
+ * [unsafeToRepeat]: a POST that failed after the connection opened may have
+ * been done, so it becomes [ApiException.OutcomeUnknown] instead of a failure
+ * the user would retry.
+ */
+private fun IOException.toApiException(unsafeToRepeat: Boolean): ApiException {
+    // Backstop: nothing below this layer may surface a raw IOException, or its text.
+    val failure = this as? HttpFailure ?: return ApiException.Transport("The connection to the server failed.", this)
+    if (unsafeToRepeat && failure.requestSent) return ApiException.OutcomeUnknown(failure)
+    return when (failure) {
+        is HttpFailure.Tls -> ApiException.Tls(failure.problem, failure)
+        is HttpFailure.Timeout -> ApiException.Timeout(failure)
+        is HttpFailure.Transport -> ApiException.Transport(failure.message ?: "The connection to the server failed.", failure)
+    }
+}
+
+/**
+ * Whether a proxy [host] is this phone. Literal names only: a name is never
+ * resolved to decide this, because a lookup is what an attacker on the network
+ * would answer. The account screen checks with the same list before it saves.
+ */
+internal fun isOnThisPhone(host: String): Boolean = host.lowercase(Locale.ROOT) in LOOPBACK_HOSTS
+
+private val LOOPBACK_HOSTS = setOf("127.0.0.1", "::1", "[::1]", "localhost")
+
+/**
+ * Bad gateway, gateway timeout, and Cloudflare's "unknown error" and "a
+ * timeout occurred": a proxy in front of BTCPay has no answer to pass on, and
+ * BTCPay may have received the request.
+ */
+private val GATEWAY_LOST_ANSWER = setOf(502, 504, 520, 524)
+
 /** Where to send a request and how to authenticate it. */
 data class Endpoint(
     val baseUrl: String,
@@ -139,10 +198,6 @@ data class Endpoint(
 
 private fun Credential.toHeaderValue(): String = when (this) {
     is Credential.ApiKey -> "token $key"
-    is Credential.Basic -> {
-        val raw = "$username:$password".toByteArray(Charsets.UTF_8)
-        "Basic " + Base64.encodeToString(raw, Base64.NO_WRAP).also { raw.fill(0) }
-    }
 }
 
 /**
@@ -171,6 +226,7 @@ private fun HttpResponse.toApiException(json: Json): ApiException {
         403 -> ApiException.Forbidden(error?.missingPermission)
         404 -> ApiException.NotFound(
             error?.message?.takeIf { it.isNotBlank() } ?: "Not found on this server.",
+            code = error?.code?.takeIf { it.isNotBlank() },
         )
         410 -> ApiException.Unsupported(
             error?.message?.takeIf { it.isNotBlank() }

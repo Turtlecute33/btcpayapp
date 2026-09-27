@@ -1,5 +1,6 @@
 package com.btcpayapp.data.api
 
+import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.data.api.dto.ApiValidationError
 import kotlinx.coroutines.CancellationException
 
@@ -25,12 +26,33 @@ sealed class ApiException(
         ApiException("The server did not respond in time.", cause)
 
     /**
-     * The certificate could not be validated. The onboarding flow catches this
-     * specifically to offer trust-on-first-use pinning; everywhere else it is a
-     * hard failure, because a pin that changes mid-session is an attack.
+     * A POST whose result is not known, so the server may have done it: no
+     * answer in time, a connection dropped after it opened, the whole-call
+     * deadline, a proxy that lost BTCPay's answer (502, 504, 520, 524), or a
+     * success answer this app could not read. For those last two an answer did
+     * arrive, and its [ApiException] is the [cause].
+     *
+     * Only POST produces this. GET, PUT, PATCH and DELETE set a state rather
+     * than add one, so repeating them is safe, and for them the same failures
+     * stay [Timeout], [Transport], [Server] or [Decoding].
+     * A money screen that gets this must never offer a plain retry: it locks the
+     * submit and has the user check the result first, because a second send can
+     * pay twice.
      */
-    class Tls(message: String, cause: Throwable? = null) :
-        ApiException(message, cause)
+    class OutcomeUnknown(cause: Throwable? = null) : ApiException(
+        "No clear answer came from the server, so this may have gone through. Check before you try again.",
+        cause,
+    )
+
+    /**
+     * The certificate could not be validated, and [problem] says why. The
+     * message is fixed per problem, never the platform's text. Onboarding may
+     * offer trust-on-first-use only for [TlsProblem.UntrustedIssuer]; everywhere
+     * else it is a hard failure, because a pin that changes mid-session is what
+     * an attack looks like.
+     */
+    class Tls(val problem: TlsProblem = TlsProblem.Other, cause: Throwable? = null) :
+        ApiException(problem.userMessage, cause)
 
     /** 401. The key was revoked, or the instance was re-provisioned. */
     class Unauthorized :
@@ -45,8 +67,12 @@ sealed class ApiException(
         },
     )
 
-    /** 404. */
-    class NotFound(message: String = "Not found on this server.") : ApiException(message)
+    /**
+     * 404. [code] is the Greenfield error code when the body carries one (for
+     * example `transaction-not-found`), and null for an empty 404, which means
+     * the route itself is missing.
+     */
+    class NotFound(message: String = "Not found on this server.", val code: String? = null) : ApiException(message)
 
     /**
      * 410 `unsupported-in-v2`, or any other route the instance has retired.
@@ -80,6 +106,18 @@ sealed class ApiException(
 }
 
 /**
+ * Whether a request that makes or moves something (a payment, a channel, a
+ * refund, a payout, a pull payment) may still have been done despite this
+ * failure, so it must not be offered again until the user has checked. No
+ * clear answer is the plain case. Any 5xx is too: the server may have failed
+ * after it did the work (a refund saves its pull payment before the link to
+ * the invoice, a proxy gives up waiting). A 4xx is a refusal before anything
+ * was done.
+ */
+fun ApiException.mayHaveGoneThrough(): Boolean =
+    this is ApiException.OutcomeUnknown || (this is ApiException.Server && status >= 500)
+
+/**
  * Converts a caught failure into an [ApiException] for display.
  *
  * **Rethrows [CancellationException].** This is the important part, and the
@@ -98,4 +136,16 @@ sealed class ApiException(
 fun Throwable.asApiException(): ApiException {
     if (this is CancellationException) throw this
     return this as? ApiException ?: ApiException.Transport(message ?: "Unexpected failure")
+}
+
+/**
+ * `runCatching` that lets a cancellation through, for a failure that is not
+ * turned into an [ApiException]. See [asApiException] for why it must.
+ */
+inline fun <T> attempt(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (e: CancellationException) {
+    throw e
+} catch (e: Throwable) {
+    Result.failure(e)
 }

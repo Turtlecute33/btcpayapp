@@ -40,6 +40,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,13 +50,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithCache
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
@@ -229,18 +230,23 @@ fun AnimatedValue(
         label = "value",
     ) { shown ->
         // `maxLines` defaults to one because the usual subject is a figure,
-        // and a figure that wraps has already gone wrong. It is a parameter
-        // rather than a constant because some of these lines are sentences
-        // with a number in them — a node's sync status, say — and silently
-        // clamping those truncates the end of the sentence at a small width
-        // or a raised font scale.
-        Text(
-            text = shown,
-            style = style,
-            color = color,
-            maxLines = maxLines,
-            overflow = TextOverflow.Ellipsis,
-        )
+        // and a figure that wraps has already gone wrong: it shrinks to fit
+        // instead ([FigureText]). It is a parameter rather than a
+        // constant because some of these lines are sentences with a number in
+        // them — a node's sync status, say — and silently clamping those
+        // truncates the end of the sentence at a small width or a raised font
+        // scale.
+        if (maxLines == 1) {
+            FigureText(text = shown, style = style, color = color)
+        } else {
+            Text(
+                text = shown,
+                style = style,
+                color = color,
+                maxLines = maxLines,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
@@ -319,12 +325,18 @@ fun Modifier.arrive(index: Int = 0, enabled: Boolean = true): Modifier {
  *
  * The sweep is a `tween`, not a spring, and deliberately so: it is a loop with
  * a period, not a response to anything.
+ *
+ * [phase] lets a group of bars share one sweep ([rememberSkeletonPhase]);
+ * without it the bar runs its own. It is read only while drawing, so the
+ * sweep redraws the bar on each frame and never recomposes it, and the
+ * gradient is built once per size rather than once per frame.
  */
 @Composable
 fun Skeleton(
     modifier: Modifier = Modifier,
     height: Dp = 16.dp,
     shape: Shape = RoundedCornerShape(6.dp),
+    phase: (() -> Float)? = null,
 ) {
     val base = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
     val highlight = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
@@ -334,16 +346,7 @@ fun Skeleton(
         return
     }
 
-    val transition = rememberInfiniteTransition(label = "skeleton")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(Motion.SHIMMER_PERIOD_MS, easing = Motion.emphasised),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "sweep",
-    )
+    val sweep = phase ?: rememberSkeletonPhase()
 
     Box(
         modifier
@@ -354,33 +357,64 @@ fun Skeleton(
                 // fully off one edge before it reappears at the other and
                 // there is no visible restart.
                 val span = size.width * 2f
-                val start = -span + phase * (size.width + span)
                 val brush = Brush.linearGradient(
                     colors = listOf(base, highlight, base),
-                    start = Offset(start, 0f),
-                    end = Offset(start + span, 0f),
+                    start = Offset.Zero,
+                    end = Offset(span, 0f),
                 )
-                onDrawBehind { drawRect(brush) }
+                onDrawBehind {
+                    // The band moves by moving the brush: the canvas is
+                    // shifted and the rectangle shifted back, so only the
+                    // gradient travels.
+                    val start = -span + sweep() * (size.width + span)
+                    translate(left = start) { drawRect(brush, topLeft = Offset(-start, 0f), size = size) }
+                }
             },
     )
 }
 
 /** A skeleton in the shape of one list row: an icon, two lines and an amount. */
 @Composable
-fun SkeletonRow(modifier: Modifier = Modifier) {
+fun SkeletonRow(modifier: Modifier = Modifier, phase: (() -> Float)? = null) {
+    // One sweep for the row's four bars when no list hands one down.
+    val sweep = phase ?: rememberSkeletonPhase()
     Row(
         modifier = modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Skeleton(Modifier.size(36.dp), height = 36.dp, shape = RoundedCornerShape(12.dp))
+        Skeleton(Modifier.size(36.dp), height = 36.dp, shape = RoundedCornerShape(12.dp), phase = sweep)
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Skeleton(Modifier.fillMaxWidth(0.55f), height = 14.dp)
-            Skeleton(Modifier.fillMaxWidth(0.32f), height = 11.dp)
+            Skeleton(Modifier.fillMaxWidth(0.55f), height = 14.dp, phase = sweep)
+            Skeleton(Modifier.fillMaxWidth(0.32f), height = 11.dp, phase = sweep)
         }
-        Skeleton(Modifier.width(64.dp), height = 14.dp)
+        Skeleton(Modifier.width(64.dp), height = 14.dp, phase = sweep)
     }
 }
+
+/**
+ * One skeleton sweep, 0 to 1 and round again, for several [Skeleton]s to share.
+ *
+ * Read it only in a draw or layer block. With reduced motion there is no
+ * animation at all, and a skeleton does not read the phase.
+ */
+@Composable
+internal fun rememberSkeletonPhase(): () -> Float {
+    if (LocalReducedMotion.current) return NoSweep
+    val transition = rememberInfiniteTransition(label = "skeleton")
+    val phase = transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(Motion.SHIMMER_PERIOD_MS, easing = Motion.emphasised),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "sweep",
+    )
+    return remember(phase) { { phase.value } }
+}
+
+private val NoSweep: () -> Float = { 0f }
 
 /**
  * A dot that breathes, for "this is live and still connected".
@@ -388,6 +422,10 @@ fun SkeletonRow(modifier: Modifier = Modifier) {
  * Opacity only, never size. A pulsing dot that changes size reflows nothing,
  * but it draws the eye on every beat, and this indicator sits next to a
  * balance the user is trying to read.
+ *
+ * The animated value is read inside `graphicsLayer`, so each beat changes a
+ * layer property and nothing recomposes. Read in the body, it would recompose
+ * the dot on every frame for as long as a screen waits for a payment.
  */
 @Composable
 fun PulsingDot(
@@ -395,11 +433,10 @@ fun PulsingDot(
     modifier: Modifier = Modifier,
     size: Dp = 8.dp,
 ) {
-    val alpha = if (LocalReducedMotion.current) {
-        1f
+    val pulse: State<Float>? = if (LocalReducedMotion.current) {
+        null
     } else {
-        val transition = rememberInfiniteTransition(label = "pulse")
-        val animated by transition.animateFloat(
+        rememberInfiniteTransition(label = "pulse").animateFloat(
             initialValue = 1f,
             targetValue = 0.35f,
             animationSpec = infiniteRepeatable(
@@ -408,12 +445,11 @@ fun PulsingDot(
             ),
             label = "alpha",
         )
-        animated
     }
     Box(
         modifier
             .size(size)
-            .graphicsLayer { this.alpha = alpha }
+            .graphicsLayer { alpha = pulse?.value ?: 1f }
             .clip(CircleShape)
             .background(color),
     )
@@ -574,6 +610,10 @@ fun Modifier.continuity(key: Any): Modifier {
  * For cards and rows, not for buttons: a Material button already has a state
  * layer and a shape small enough for the ripple to fill, and scale on top of
  * that feels rubbery.
+ *
+ * The spring is read inside `graphicsLayer`. This function returns a value
+ * rather than emitting UI, so a read here would recompose the caller — the
+ * whole card, row or keypad key — on every frame of the spring.
  */
 @Composable
 fun Modifier.pressScale(
@@ -593,10 +633,13 @@ fun Modifier.pressScale(
         }
     }
 
-    val factor by animateFloatAsState(
+    val factor = animateFloatAsState(
         targetValue = if (pressed && !reduced) scale else 1f,
         animationSpec = Motion.spatialFast,
         label = "press",
     )
-    return scale(factor)
+    return graphicsLayer {
+        scaleX = factor.value
+        scaleY = factor.value
+    }
 }

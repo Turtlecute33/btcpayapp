@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,10 +52,12 @@ import com.btcpayapp.data.api.dto.UpdateEmailSettingsRequest
 import com.btcpayapp.data.api.endpoints.sendStoreEmail
 import com.btcpayapp.data.api.endpoints.storeEmailSettings
 import com.btcpayapp.data.api.endpoints.updateStoreEmailSettings
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppCard
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.FormField
@@ -63,13 +66,14 @@ import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SecretField
 import com.btcpayapp.ui.components.ThinDivider
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.confirmDiscardChanges
+import com.btcpayapp.ui.components.rememberSpendGate
 import com.btcpayapp.ui.theme.Motion
+import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -90,12 +94,20 @@ data class StoreEmailForm(
     val passwordSet: Boolean = false,
 )
 
+private fun StoreEmailForm.route() = SmtpRoute.of(server, port, login, disableCertificateCheck)
+
 data class StoreEmailState(
     val form: StoreEmailForm? = null,
+    /** The route the server holds, to tell a new one from it. */
+    val saved: SmtpRoute = SmtpRoute(),
+    /** A new route waiting for the user's yes; see [SmtpReviewDialog]. */
+    val review: SmtpRoute? = null,
+    val passwordError: String? = null,
     val loading: Boolean = false,
     val saving: Boolean = false,
     val sending: Boolean = false,
     val showTest: Boolean = false,
+    val dirty: Boolean = false,
     val error: ApiException? = null,
     val message: String? = null,
 )
@@ -105,38 +117,47 @@ class StoreEmailViewModel(private val graph: AppGraph) : ViewModel() {
     private val _state = MutableStateFlow(StoreEmailState())
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
+    /**
+     * The store this screen was opened in (see [StoreBinding]). The shell
+     * closes this screen when the store changes, so a save always goes to the
+     * store whose settings were loaded, never to whichever store is active by
+     * the time the user taps Save.
+     */
+    private val bound = StoreBinding(graph.session)
+    private val storeId: String? get() = bound.id
 
     /** Pre-fills the test recipient; the signed-in user is the only address we know. */
     val ownEmail: String get() = graph.session.user.value?.email.orEmpty()
 
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { load() }
-        }
+        load()
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun load() {
         val store = storeId
         if (store == null) {
-            _state.update { it.copy(loading = false, error = ApiException.NotFound("No store is selected.")) }
+            _state.update { it.copy(loading = false, error = ApiException.NoAccount()) }
             return
         }
         viewModelScope.launch {
             _state.update { it.copy(loading = it.form == null, error = null) }
             runCatching { graph.session.requireApi().storeEmailSettings(store) }
                 .onSuccess { settings ->
-                    _state.update { it.copy(form = settings.toForm(), loading = false, error = null) }
+                    val form = settings.toForm()
+                    _state.update {
+                        it.copy(form = form, saved = form.route(), dirty = false, loading = false, error = null)
+                    }
                 }
                 .onFailure { failure -> _state.update { it.copy(loading = false, error = failure.asApiException()) } }
         }
     }
 
-    fun edit(transform: (StoreEmailForm) -> StoreEmailForm) =
-        _state.update { current -> current.copy(form = current.form?.let(transform)) }
+    fun edit(transform: (StoreEmailForm) -> StoreEmailForm) = _state.update { current ->
+        current.copy(form = current.form?.let(transform), dirty = current.form != null, passwordError = null)
+    }
+
+    fun dismissReview() = _state.update { it.copy(review = null) }
 
     fun showTest(show: Boolean) = _state.update { it.copy(showTest = show) }
 
@@ -144,9 +165,28 @@ class StoreEmailViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun clearMessage() = _state.update { it.copy(message = null) }
 
-    fun save() {
+    /**
+     * [reviewed] is the route the user confirmed in [SmtpReviewDialog] and the
+     * spend gate. The save goes ahead only for that exact route.
+     */
+    fun save(reviewed: SmtpRoute? = null) {
         val store = storeId ?: return
-        val form = _state.value.form ?: return
+        val snapshot = _state.value
+        val form = snapshot.form ?: return
+        val route = form.route()
+        when (smtpSave(snapshot.saved, route, passwordTyped = form.password.isNotBlank(), passwordSet = form.passwordSet)) {
+            SmtpSave.RetypePassword -> {
+                // Also as a snackbar: Save sits far from the password field,
+                // which the keyboard often hides.
+                _state.update { it.copy(passwordError = SMTP_RETYPE_PASSWORD, message = SMTP_RETYPE_PASSWORD) }
+                return
+            }
+            SmtpSave.Review -> if (route != reviewed) {
+                _state.update { it.copy(review = route) }
+                return
+            }
+            SmtpSave.Go -> Unit
+        }
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
             runCatching {
@@ -163,7 +203,18 @@ class StoreEmailViewModel(private val graph: AppGraph) : ViewModel() {
                     ),
                 )
             }.onSuccess { settings ->
-                _state.update { it.copy(form = settings.toForm(), saving = false, message = "Email settings saved.") }
+                _state.update {
+                    // Edits typed while the request ran stay in the form, unsaved.
+                    val unchanged = it.form == form
+                    val stored = settings.toForm()
+                    it.copy(
+                        form = if (unchanged) stored else it.form,
+                        saved = stored.route(),
+                        dirty = !unchanged,
+                        saving = false,
+                        message = "Email settings saved.",
+                    )
+                }
             }.onFailure { failure ->
                 _state.update { it.copy(saving = false, error = failure.asApiException()) }
             }
@@ -210,6 +261,23 @@ fun StoreEmailScreen(onBack: () -> Unit) {
     val viewModel = appViewModel { StoreEmailViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val guardedBack = confirmDiscardChanges(state.dirty, onBack)
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
+
+    state.review?.let { route ->
+        SmtpReviewDialog(
+            route = route,
+            mail = "this store's emails",
+            onConfirm = {
+                viewModel.dismissReview()
+                scope.afterSpendGate(gate, "Confirm email server", route.host, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.save(reviewed = route)
+                }
+            },
+            onDismiss = viewModel::dismissReview,
+        )
+    }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -220,7 +288,7 @@ fun StoreEmailScreen(onBack: () -> Unit) {
 
     AppScreen(
         title = "Email",
-        onBack = onBack,
+        onBack = guardedBack,
         snackbarHostState = snackbarHostState,
         actions = {
             val action = when {
@@ -232,7 +300,7 @@ fun StoreEmailScreen(onBack: () -> Unit) {
                 when (shown) {
                     EmailSaveAction.Busy ->
                         CircularProgressIndicator(Modifier.padding(end = 16.dp).size(20.dp), strokeWidth = 2.dp)
-                    EmailSaveAction.Ready -> TextButton(onClick = viewModel::save) { Text("Save") }
+                    EmailSaveAction.Ready -> TextButton(onClick = { viewModel.save() }) { Text("Save") }
                     EmailSaveAction.None -> Unit
                 }
             }
@@ -315,6 +383,7 @@ fun StoreEmailScreen(onBack: () -> Unit) {
                                 } else {
                                     "No password is stored for this store yet."
                                 },
+                                error = state.passwordError,
                             )
                         }
 
@@ -470,5 +539,72 @@ private fun TestEmailDialog(
             }
         },
         dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
+    )
+}
+
+/**
+ * Where SMTP settings send mail: the host, port and login, and whether the
+ * host must prove who it is. Whoever runs the host or holds the login can read
+ * every message sent that way, and the server's own mail carries
+ * password-reset links. So a new route is confirmed like a new webhook
+ * target. Build it with [of].
+ */
+data class SmtpRoute(
+    val host: String = "",
+    val port: String = "",
+    val login: String = "",
+    val skipCertificateCheck: Boolean = false,
+) {
+    companion object {
+        /** Trimmed, with the host in lower case, so typing the same values again is no change. */
+        fun of(host: String, port: String, login: String, skipCertificateCheck: Boolean) =
+            SmtpRoute(host.trim().lowercase(Locale.ROOT), port.trim(), login.trim(), skipCertificateCheck)
+    }
+}
+
+/** What a save of SMTP settings needs first. */
+internal enum class SmtpSave { Go, RetypePassword, Review }
+
+/**
+ * Compares the [route] in the form with the [saved] one.
+ *
+ * BTCPay keeps the stored password when a login comes without one, whatever
+ * the host. So a new host would sign in with the old host's password, unless
+ * the user types a password for it.
+ */
+internal fun smtpSave(saved: SmtpRoute, route: SmtpRoute, passwordTyped: Boolean, passwordSet: Boolean): SmtpSave =
+    when {
+        // No host sends no mail, so clearing the settings gives nobody anything.
+        route.host.isEmpty() -> SmtpSave.Go
+        route.host != saved.host && route.login.isNotEmpty() && passwordSet && !passwordTyped -> SmtpSave.RetypePassword
+        route.host != saved.host || route.port != saved.port || route.login != saved.login -> SmtpSave.Review
+        // With the check off, anyone on the network path can read the mail and the password.
+        route.skipCertificateCheck && !saved.skipCertificateCheck -> SmtpSave.Review
+        else -> SmtpSave.Go
+    }
+
+internal const val SMTP_RETYPE_PASSWORD = "Type the password for this host. The stored one is not sent to a new host."
+
+/**
+ * Asks before mail goes a new way. The caller runs the spend gate on a yes,
+ * so someone with the unlocked phone cannot move the mail to a host or an
+ * account of their own.
+ */
+@Composable
+internal fun SmtpReviewDialog(route: SmtpRoute, mail: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val account = if (route.login.isEmpty()) "" else ", signed in as ${route.login}"
+    val readers = if (route.login.isEmpty()) "Whoever runs it" else "Whoever runs it or holds that login"
+    val unchecked = if (route.skipCertificateCheck) {
+        " Certificate checks are off, so anyone on the network path can read them too, and the SMTP password."
+    } else {
+        ""
+    }
+    ConfirmDialog(
+        title = "Send mail through ${route.host}?",
+        message = "From now on $mail go through this host$account. $readers can read them.$unchecked",
+        confirmLabel = "Save",
+        destructive = route.skipCertificateCheck,
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
     )
 }

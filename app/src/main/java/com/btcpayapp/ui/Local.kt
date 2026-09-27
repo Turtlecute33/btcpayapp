@@ -41,6 +41,21 @@ val LocalSettings = compositionLocalOf { AppSettings() }
 /** True while the app-lock overlay is up; screens use it to pause polling. */
 val LocalIsLocked = compositionLocalOf { false }
 
+/**
+ * Opens a route in a given store: switches to `storeId`, waits until the shell
+ * has dropped the old store's screens, then navigates. A store this account
+ * cannot see is ignored. While a payment runs or its result is on screen, the
+ * switch is refused with a message, as a manual switch is, so the result stays
+ * on screen.
+ *
+ * The one way into another store's screen. Navigating first and switching
+ * after would leave a screen open on a store it was not opened for, or have
+ * the switch pop it straight away.
+ */
+val LocalOpenInStore = staticCompositionLocalOf<(storeId: String, route: Any) -> Unit> {
+    error("LocalOpenInStore is provided by AppShell")
+}
+
 @Composable
 inline fun <reified VM : ViewModel> appViewModel(
     key: String? = null,

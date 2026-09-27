@@ -7,21 +7,25 @@ import java.net.URLEncoder
  */
 object Pairing {
 
-    /** Shown on the server's own authorize page, so it must match the launcher label. */
-    const val APPLICATION_NAME = "BtcPayServer for Android"
+    /**
+     * Shown on the server's own authorize page. Equal to the launcher label
+     * (`app_name` in `res/values/strings.xml`), so the consent page names the
+     * app the user sees on the home screen. Change both together.
+     */
+    const val APPLICATION_NAME = "BtcPayServer"
     const val APPLICATION_IDENTIFIER = "com.btcpayapp"
 
     /**
      * What the app asks for by default.
      *
-     * Deliberately not `unrestricted`. A merchant terminal needs to read and
-     * create invoices, move payouts and see the wallet; it does not need to
-     * modify server settings or manage users, and asking for those would make
-     * the consent screen alarming for no benefit. Server administration is
-     * available as an opt-in extra set below.
+     * Deliberately not `unrestricted`, but still store-admin: it can change
+     * store settings and where the store receives funds, sign and broadcast
+     * on-chain, and pay from the store's Lightning node. It does not modify
+     * server settings or manage users; server administration is an opt-in
+     * extra set below. [POINT_OF_SALE_PERMISSIONS] is the least-privilege set.
      *
-     * `strict=true` is sent alongside these, so the user sees exactly this list
-     * and the server refuses to grant anything broader.
+     * `strict=false` is sent alongside these, so the user can untick any of
+     * them on the consent page.
      */
     val DEFAULT_PERMISSIONS: List<String> = listOf(
         "btcpay.store.canviewstoresettings",
@@ -44,6 +48,26 @@ object Pairing {
         "btcpay.store.canviewlightninginvoice",
         "btcpay.store.cancreatelightninginvoice",
         "btcpay.store.webhooks.canmodifywebhooks",
+        "btcpay.user.canviewprofile",
+        "btcpay.user.canviewnotificationsforuser",
+        "btcpay.user.canmanagenotificationsforuser",
+    )
+
+    /**
+     * Enough to take payments and nothing more: view and create invoices
+     * (on-chain and Lightning), read the store settings those need, the
+     * profile, and the user's notifications, which it may mark as seen or
+     * delete (the notifications screen does both, and needs the manage
+     * permission for it). No spend, payout, webhook or store configuration
+     * power, so a lost till phone cannot move funds or change where the store
+     * is paid.
+     */
+    val POINT_OF_SALE_PERMISSIONS: List<String> = listOf(
+        "btcpay.store.canviewinvoices",
+        "btcpay.store.cancreateinvoice",
+        "btcpay.store.canviewstoresettings",
+        "btcpay.store.canviewlightninginvoice",
+        "btcpay.store.cancreatelightninginvoice",
         "btcpay.user.canviewprofile",
         "btcpay.user.canviewnotificationsforuser",
         "btcpay.user.canmanagenotificationsforuser",
@@ -78,13 +102,17 @@ object Pairing {
      * [selectiveStores] adds a store picker to the consent screen, which is what
      * lets someone grant access to one store out of several. The returned
      * permissions then carry a `:storeId` suffix.
+     *
+     * [strict] = false (the default) lets the user untick permissions on the
+     * consent page. BTCPay draws every requested box disabled under
+     * `strict=true`, so the user could only take the whole list or nothing.
      */
     fun authorizeUrl(
         baseUrl: String,
         redirectUri: String,
         permissions: List<String>,
         selectiveStores: Boolean = true,
-        strict: Boolean = true,
+        strict: Boolean = false,
     ): String {
         val query = buildList {
             permissions.forEach { add("permissions" to it) }
@@ -118,13 +146,14 @@ object Pairing {
      * nowhere to POST the grant, so it shows the new key on the page for the
      * user to copy — which is the whole point: the permissions arrive already
      * ticked, so nobody has to reproduce a 23-box list by hand on a phone.
+     * Sent with `strict=false`, like [authorizeUrl], so the user can untick.
      */
     fun manualAuthorizeUrl(baseUrl: String, permissions: List<String>): String {
         val query = buildList {
             permissions.forEach { add("permissions" to it) }
             add("applicationName" to APPLICATION_NAME)
             add("applicationIdentifier" to APPLICATION_IDENTIFIER)
-            add("strict" to "true")
+            add("strict" to "false")
             add("selectiveStores" to "true")
         }.joinToString("&") { (key, value) -> "$key=${value.encode()}" }
 

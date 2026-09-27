@@ -67,6 +67,11 @@ internal suspend fun BtcPayApi.openLightningChannel(
     call("POST", "${scope.path(cryptoCode)}/channels", body(request))
 }
 
+/**
+ * [offsetIndex] is not a page cursor. BTCPay passes it to the node as is: LND
+ * reads an `add_index`, CLN a pay index. Without it LND returns its **oldest**
+ * invoices and CLN its whole list, so this is no source of recent history.
+ */
 internal suspend fun BtcPayApi.lightningInvoices(
     scope: LightningScope,
     pendingOnly: Boolean? = null,
@@ -89,13 +94,34 @@ internal suspend fun BtcPayApi.createLightningInvoice(
     cryptoCode: String = "BTC",
 ): LightningInvoiceData = post("${scope.path(cryptoCode)}/invoices", body(request))
 
-/** The route is `/invoices/pay`; there is no bare `/pay`. */
+/**
+ * The route is `/invoices/pay`; there is no bare `/pay`.
+ *
+ * The server holds its answer for up to `sendTimeout` seconds (30 when unset)
+ * while the node tries routes. With the account's usual 30 s read timeout the
+ * socket gave up first, and a payment still in flight was shown as failed. So
+ * this one call waits longer ([payReadTimeoutMs]).
+ */
 internal suspend fun BtcPayApi.payLightningInvoice(
     scope: LightningScope,
     request: PayLightningInvoiceRequest,
     cryptoCode: String = "BTC",
-): LightningPaymentData = post("${scope.path(cryptoCode)}/invoices/pay", body(request))
+): LightningPaymentData = withReadTimeout(payReadTimeoutMs(request.sendTimeout))
+    .post("${scope.path(cryptoCode)}/invoices/pay", body(request))
 
+/**
+ * `sendTimeout` (BTCPay's default of 30 s when unset) plus 30 s for the server's
+ * status lookup and the trip back. Capped at a day, so a typed value cannot
+ * overflow the millis.
+ */
+private fun payReadTimeoutMs(sendTimeoutSeconds: Int?): Int =
+    ((sendTimeoutSeconds ?: 30).coerceIn(0, 86_400) + 30) * 1000
+
+/**
+ * [offsetIndex] is not a page cursor: LND and CLN read it as a `createdAt`
+ * filter in milliseconds (payments at or after that time). A list size sent here
+ * matches every payment, so paging with it repeats the whole history.
+ */
 internal suspend fun BtcPayApi.lightningPayments(
     scope: LightningScope,
     includePending: Boolean? = null,

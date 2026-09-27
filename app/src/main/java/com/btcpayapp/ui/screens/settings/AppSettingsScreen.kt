@@ -1,5 +1,6 @@
 package com.btcpayapp.ui.screens.settings
 
+import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -22,10 +23,13 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.activity.compose.LocalActivity
 import androidx.fragment.app.FragmentActivity
 import androidx.compose.runtime.setValue
@@ -33,19 +37,24 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
+import com.btcpayapp.core.security.AuthOutcome
 import com.btcpayapp.core.security.BiometricAvailability
 import com.btcpayapp.core.security.Biometrics
-import com.btcpayapp.core.sync.SyncScheduler
+import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.attempt
 import com.btcpayapp.data.model.AppLockMode
 import com.btcpayapp.data.model.AppSettings
 import com.btcpayapp.data.model.BitcoinUnit
 import com.btcpayapp.data.model.ThemeMode
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.CONFIRM_PAYMENTS_LABEL
 import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.FormDropdown
@@ -53,6 +62,7 @@ import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -60,28 +70,26 @@ import kotlinx.coroutines.launch
 class AppSettingsViewModel(private val graph: AppGraph) : ViewModel() {
 
     val settings = graph.settings.settings
+    val vault = graph.accounts.vault
 
     private val _wiped = MutableStateFlow(false)
     val wiped = _wiped.asStateFlow()
-    private val _error = MutableStateFlow<com.btcpayapp.data.api.ApiException?>(null)
+    private val _error = MutableStateFlow<ApiException?>(null)
     val error = _error.asStateFlow()
     fun dismissError() { _error.value = null }
-    fun authenticationFailed() { _error.value = com.btcpayapp.data.api.ApiException.Transport("Authenticate to change this security setting.") }
+    fun authenticationFailed() { _error.value = ApiException.Transport("Not confirmed, so nothing was changed.") }
 
+    /** The repository never throws here; false means the change was not stored. */
     fun update(transform: (AppSettings) -> AppSettings) {
         viewModelScope.launch {
-            runCatching { graph.settings.update(transform) }.onFailure {
-                if (it is kotlinx.coroutines.CancellationException) throw it
-                _error.value = com.btcpayapp.data.api.ApiException.Transport("Could not save settings. Check device storage and try again.")
-            }
+            if (!graph.settings.update(transform)) _error.value = ApiException.Transport("Could not save the setting.")
         }
     }
 
     fun wipe() {
         viewModelScope.launch {
-            runCatching { graph.wipe() }.onSuccess { _wiped.value = true }.onFailure {
-                if (it is kotlinx.coroutines.CancellationException) throw it
-                _error.value = com.btcpayapp.data.api.ApiException.Transport("Could not remove all data. Try again or clear app storage in Android Settings.")
+            attempt { graph.wipe() }.onSuccess { _wiped.value = true }.onFailure {
+                _error.value = ApiException.Transport("Could not remove all data. Try again or clear app storage in Android Settings.")
             }
         }
     }
@@ -95,42 +103,43 @@ fun AppSettingsScreen(
 ) {
     val viewModel = appViewModel { AppSettingsViewModel(it) }
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val vault by viewModel.vault.collectAsStateWithLifecycle()
+    // An http:// onion account sends its API key in clear text to Orbot's
+    // port on this phone, in the background too.
+    val cleartextOnion = vault.accounts.any { it.isOnion && it.baseUrl.startsWith("http://", ignoreCase = true) }
     val wiped by viewModel.wiped.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val activity = LocalActivity.current as? FragmentActivity
-    val scope = rememberCoroutineScope()
-    var authenticating by remember { mutableStateOf(false) }
-    val secureUpdate: ((AppSettings) -> AppSettings) -> Unit = { transform ->
-        if (!authenticating) {
-            authenticating = true
-            scope.launch {
-                try {
-                    if (activity != null && Biometrics.authenticate(activity, "Change security settings")) viewModel.update(transform)
-                    else viewModel.authenticationFailed()
-                } finally { authenticating = false }
-            }
-        }
+    // The lock switches, raising "Lock after", letting screenshots through,
+    // showing amounts and erasing everything.
+    val owner = rememberOwnerCheck(onFailed = viewModel::authenticationFailed)
+    val authenticating = owner.busy
+    // Only changes that weaken protection ask; tightening one never does.
+    val secureUpdate: (weakens: Boolean, transform: (AppSettings) -> AppSettings) -> Unit = { weakens, transform ->
+        if (weakens) owner.confirm("Change security settings") { viewModel.update(transform) } else viewModel.update(transform)
     }
 
     var confirmWipe by remember { mutableStateOf(false) }
 
-    val biometrics = remember { Biometrics.availability(context) }
+    // Read again on every return: the no-screen-lock text sends the user to
+    // the phone's settings, and the switches must follow what they did there.
+    var biometrics by remember { mutableStateOf(Biometrics.availability(context)) }
+    var screenLock by remember { mutableStateOf(Biometrics.hasScreenLock(context)) }
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        biometrics = Biometrics.availability(context)
+        screenLock = Biometrics.hasScreenLock(context)
+    }
     val biometricsUsable = biometrics == BiometricAvailability.Available
+    // Confirm payments is on, but nothing can confirm one.
+    val paymentsBlocked = settings.confirmSpendsWithBiometrics && !screenLock
 
     LaunchedEffect(wiped) {
         if (wiped) onBack()
     }
 
-    // The job is re-armed here rather than inside the repository so the settings
-    // document stays a plain value object with no Android dependency.
-    LaunchedEffect(settings.backgroundSync, settings.syncIntervalMinutes, settings.syncOnUnmeteredOnly) {
-        if (settings.backgroundSync) {
-            SyncScheduler.schedule(context, settings.syncIntervalMinutes, settings.syncOnUnmeteredOnly)
-        } else {
-            SyncScheduler.cancel(context)
-        }
-    }
+    // No job scheduling here. BtcPayApplication follows the three sync
+    // settings already, and a second schedule() each time this screen opens
+    // would stop a sync that is running.
 
     AppScreen(title = "Settings", onBack = onBack, large = true) { padding ->
         Column(
@@ -142,7 +151,7 @@ fun AppSettingsScreen(
             // --- Appearance -------------------------------------------------
             ErrorBanner(error, onDismiss = viewModel::dismissError)
 
-            // Each group arrives as a group. This page is four headings and
+            // Each group arrives as a group. This page is five headings and
             // twenty controls, and fading it in as one sheet gives the eye no
             // clue where the headings are.
             FormSection(title = "Appearance", modifier = Modifier.arrive(0)) {
@@ -197,8 +206,12 @@ fun AppSettingsScreen(
                 FormSwitch(
                     title = "Privacy mode",
                     checked = settings.privacyMode,
-                    onCheckedChange = { value -> viewModel.update { it.copy(privacyMode = value) } },
-                    description = "Masks every amount until you tap it.",
+                    // Off also puts amounts and store names back in alerts on
+                    // the lock screen when the app lock is off, so it asks.
+                    onCheckedChange = { value -> secureUpdate(!value) { it.copy(privacyMode = value) } },
+                    enabled = !authenticating,
+                    // There is no tap-to-reveal, so the text must not promise one.
+                    description = "Hides amounts on screen and in alerts. Turn it off to see them.",
                 )
             }
 
@@ -211,7 +224,9 @@ fun AppSettingsScreen(
                     title = "Lock the app",
                     checked = settings.appLock != AppLockMode.Off,
                     onCheckedChange = { value ->
-                        secureUpdate {
+                        // Turning it on asks too: it proves the prompt works
+                        // before the app depends on it to open.
+                        secureUpdate(true) {
                             it.copy(appLock = if (value) AppLockMode.Biometric else AppLockMode.Off)
                         }
                     },
@@ -223,29 +238,73 @@ fun AppSettingsScreen(
                     label = "Lock after",
                     options = LOCK_DELAYS,
                     selected = settings.lockAfterSeconds,
-                    onSelect = { seconds -> viewModel.update { it.copy(lockAfterSeconds = seconds) } },
-                    enabled = biometricsUsable && settings.appLock != AppLockMode.Off,
+                    onSelect = { seconds ->
+                        secureUpdate(seconds > settings.lockAfterSeconds) { it.copy(lockAfterSeconds = seconds) }
+                    },
+                    enabled = biometricsUsable && settings.appLock != AppLockMode.Off && !authenticating,
+                    // The Terminal and the payment-code screens keep the screen
+                    // on, so the app never leaves them; time without a touch
+                    // then counts too (see AppLock.armIdleLock).
+                    supportingText = "Locks after this long away from the app. On the Terminal, also " +
+                        "after this long without a touch (at least a minute). While a payment code " +
+                        "is showing, after 15 minutes without a touch.",
                     optionLabel = ::lockDelayLabel,
                 )
 
                 FormSwitch(
                     title = "Block screenshots",
                     checked = settings.blockScreenCapture,
-                    onCheckedChange = { value -> viewModel.update { it.copy(blockScreenCapture = value) } },
+                    onCheckedChange = { value -> secureUpdate(!value) { it.copy(blockScreenCapture = value) } },
+                    enabled = !authenticating,
                     description = "Stops screen recording and blanks the app in the recents switcher. " +
                         "The recents thumbnail is the easiest place to read a takings list over your " +
-                        "shoulder.",
+                        "shoulder. On Android 12 and older, the app lock also blocks screenshots and " +
+                        "recording.",
                 )
 
                 FormSwitch(
-                    title = "Confirm spending",
+                    title = CONFIRM_PAYMENTS_LABEL,
                     checked = settings.confirmSpendsWithBiometrics,
                     onCheckedChange = { value ->
-                        secureUpdate { it.copy(confirmSpendsWithBiometrics = value) }
+                        secureUpdate(true) { it.copy(confirmSpendsWithBiometrics = value) }
                     },
-                    enabled = biometricsUsable && !authenticating,
-                    description = "Asks for your fingerprint or PIN before a send or a payout, even " +
-                        "when the app is already unlocked.",
+                    // Turning it on needs a working prompt. Turning it off stays
+                    // open on a phone with no screen lock, where the gate refuses
+                    // every payment and no prompt could ever confirm the change.
+                    enabled = !authenticating && (biometricsUsable || paymentsBlocked),
+                    description = if (paymentsBlocked) {
+                        "This phone has no screen lock, so payments cannot be confirmed. Set a screen " +
+                            "lock in the phone's settings, or turn this off."
+                    } else {
+                        "Asks for your fingerprint, face or PIN before any action that sends funds, " +
+                            "changes where the store receives funds or sends its events or email, accepts less " +
+                            "as paid, or gives someone control of the store."
+                    },
+                )
+            }
+
+            ThinDivider()
+
+            // --- Terminal ---------------------------------------------------
+
+            // These were read by the Terminal but had no switch.
+            FormSection(title = "Terminal", modifier = Modifier.arrive(2)) {
+                FormSwitch(
+                    title = "Keep the screen on",
+                    checked = settings.terminalKeepScreenOn,
+                    onCheckedChange = { value -> viewModel.update { it.copy(terminalKeepScreenOn = value) } },
+                    description = "At the terminal and while a customer pays.",
+                )
+                FormSwitch(
+                    title = "Vibrate when paid",
+                    checked = settings.terminalVibrateOnPaid,
+                    onCheckedChange = { value -> viewModel.update { it.copy(terminalVibrateOnPaid = value) } },
+                )
+                FormSwitch(
+                    title = "Ask for a tip",
+                    checked = settings.terminalAskForTip,
+                    onCheckedChange = { value -> viewModel.update { it.copy(terminalAskForTip = value) } },
+                    description = "Offers 10, 15 or 20 % before charging.",
                 )
             }
 
@@ -257,13 +316,19 @@ fun AppSettingsScreen(
             // service. Firebase would be less battery-hungry, but it would put
             // a third party — and Google's servers — in the path of every
             // payment event, which is the opposite of the point of self-hosting.
-            FormSection(title = "Background", modifier = Modifier.arrive(2)) {
+            FormSection(title = "Background", modifier = Modifier.arrive(3)) {
                 FormSwitch(
                     title = "Check for activity in the background",
                     checked = settings.backgroundSync,
                     onCheckedChange = { value -> viewModel.update { it.copy(backgroundSync = value) } },
                     description = "The app polls your server directly. No push service is involved, " +
-                        "so no third party learns when you are paid.",
+                        "so no third party learns when you are paid." +
+                        if (cleartextOnion && settings.backgroundSync) {
+                            " While Orbot is off, another app can take its port and read your .onion " +
+                                "account's API key. Keep Orbot always on, or turn this off."
+                        } else {
+                            ""
+                        },
                 )
 
                 FormDropdown(
@@ -323,7 +388,7 @@ fun AppSettingsScreen(
 
             // --- Data -------------------------------------------------------
 
-            FormSection(title = "Data", modifier = Modifier.arrive(3)) {
+            FormSection(title = "Data", modifier = Modifier.arrive(4)) {
                 LinkRow(
                     title = "Accounts",
                     description = "Servers, keys and certificates.",
@@ -339,7 +404,8 @@ fun AppSettingsScreen(
             Spacer(Modifier.height(16.dp))
             OutlinedButton(
                 onClick = { confirmWipe = true },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).arrive(4),
+                enabled = !authenticating,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).arrive(5),
             ) {
                 Icon(
                     imageVector = Icons.Rounded.DeleteForever,
@@ -364,11 +430,65 @@ fun AppSettingsScreen(
             destructive = true,
             onConfirm = {
                 confirmWipe = false
-                viewModel.wipe()
+                owner.confirm("Erase everything", viewModel::wipe)
             },
             onDismiss = { confirmWipe = false },
         )
     }
+}
+
+/**
+ * Runs an action only once the owner has proved who they are: a change that
+ * weakens the app's protection, or one that deletes what it holds. Someone
+ * holding the unlocked phone for a moment must not be able to weaken the lock
+ * for later or throw accounts away. Shared with the account screen.
+ *
+ * It asks whenever the phone has a screen lock, whatever [CONFIRM_PAYMENTS_LABEL]
+ * says. With no screen lock nothing can prove it, so the tap (and the action's
+ * own dialog) is all it takes: a switch that needs an impossible prompt to turn
+ * off is a trap. [busy] is true while a prompt is on its way or showing, so a
+ * second tap cannot start another.
+ */
+@Stable
+internal class OwnerCheck(
+    private val context: Context,
+    private val activity: FragmentActivity?,
+    private val scope: CoroutineScope,
+    private val onFailed: State<() -> Unit>,
+) {
+    var busy by mutableStateOf(false)
+        private set
+
+    fun confirm(title: String, action: () -> Unit) {
+        when {
+            busy -> Unit
+            !Biometrics.hasScreenLock(context) -> action()
+            else -> {
+                busy = true
+                scope.launch {
+                    try {
+                        when (activity?.let { Biometrics.prompt(it, title) }) {
+                            is AuthOutcome.Success -> action()
+                            is AuthOutcome.Cancelled -> Unit
+                            else -> onFailed.value()
+                        }
+                    } finally {
+                        busy = false
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** The [OwnerCheck] for this screen. [onFailed] runs when a prompt did not confirm. */
+@Composable
+internal fun rememberOwnerCheck(onFailed: () -> Unit): OwnerCheck {
+    val context = LocalContext.current
+    val activity = LocalActivity.current as? FragmentActivity
+    val scope = rememberCoroutineScope()
+    val failed = rememberUpdatedState(onFailed)
+    return remember(context, activity, scope) { OwnerCheck(context, activity, scope, failed) }
 }
 
 @Composable

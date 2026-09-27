@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Payments
@@ -26,11 +27,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -40,6 +44,8 @@ import com.btcpayapp.data.api.dto.PaymentMethodData
 import com.btcpayapp.data.api.dto.UpdatePaymentMethodRequest
 import com.btcpayapp.data.api.endpoints.paymentMethods
 import com.btcpayapp.data.api.endpoints.updatePaymentMethod
+import com.btcpayapp.data.session.StoreBinding
+import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
@@ -49,14 +55,14 @@ import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.ThinDivider
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.rememberSpendGate
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * The store's payment methods, grouped by kind.
@@ -65,33 +71,38 @@ import kotlinx.coroutines.launch
  * They replaced the 1.x names — `BTC` for on-chain and `BTC_LightningLike` for
  * Lightning — so the kind has to be read off the suffix rather than assumed
  * from the crypto code, and an unrecognised suffix is shown rather than hidden.
+ *
+ * The route lists only configured methods, so a new store showed nothing to
+ * set up. The methods the server supports (`server/info`) that this store
+ * lacks are listed too, as "Not set up", and open the editor's setup flow.
  */
 data class PaymentMethodsState(
     val methods: List<PaymentMethodData> = emptyList(),
-    val loading: Boolean = false,
+    // True from the start: the first load runs on the first resume.
+    val loading: Boolean = true,
     val refreshing: Boolean = false,
     val busy: Set<String> = emptySet(),
     val error: ApiException? = null,
+    /** A method waiting for its review before it is turned on. */
+    val enable: EnableReview? = null,
 )
 
 class PaymentMethodsViewModel(private val graph: AppGraph) : ViewModel() {
 
+    private val bound = StoreBinding(graph.session)
     private val _state = MutableStateFlow(PaymentMethodsState())
     val state = _state.asStateFlow()
 
+    // The screen loads on every resume, so a change made in the editor shows
+    // on return; this covers a cold start, where the store comes later.
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { load() }
-        }
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun load(refreshing: Boolean = false) {
-        val storeId = graph.session.activeStore.value?.id
+        val storeId = bound.id
         if (storeId == null) {
-            _state.update { it.copy(loading = false, error = ApiException.NotFound("No store is selected.")) }
+            _state.update { it.copy(loading = false, refreshing = false, error = ApiException.NoAccount()) }
             return
         }
         viewModelScope.launch {
@@ -114,26 +125,64 @@ class PaymentMethodsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
+    /** For the review and the prompt: turning a method on must say which store it hits. */
+    val storeName: String get() = bound.name
+
+    /**
+     * Turning off saves at once. Turning on sends payments to the saved wallet
+     * or node, which the row does not show, so it first reads where the method
+     * pays ([enableReview]) for the review; [enable] runs after it and the
+     * spend gate. LNURL too: it pays to the node of the Lightning method.
+     */
     fun setEnabled(paymentMethodId: String, enabled: Boolean) {
-        val storeId = graph.session.activeStore.value?.id ?: return
+        if (!enabled) return put(paymentMethodId, enabled)
+        val storeId = bound.id ?: return
+        viewModelScope.launch {
+            _state.update { it.copy(busy = it.busy + paymentMethodId, error = null) }
+            runCatching { graph.session.requireApi().enableReview(storeId, paymentMethodId, graph.client.json) }
+                .onSuccess { review ->
+                    _state.update { it.copy(busy = it.busy - paymentMethodId, enable = review) }
+                }
+                .onFailure { failure ->
+                    _state.update { it.copy(busy = it.busy - paymentMethodId, error = failure.asReadFailure()) }
+                }
+        }
+    }
+
+    fun dismissEnable() = _state.update { it.copy(enable = null) }
+
+    /** Call only after the review and the spend gate. */
+    fun enable(review: EnableReview) {
+        _state.update { it.copy(enable = null) }
+        put(review.paymentMethodId, enabled = true)
+    }
+
+    /** Marked as a payment in flight, as in the editor: turning a method on changes where the store is paid. */
+    private fun put(paymentMethodId: String, enabled: Boolean) {
+        val storeId = bound.id ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = it.busy + paymentMethodId, error = null) }
             runCatching {
                 // Only `enabled` is sent: a null field on this request means
                 // "leave unchanged", so an omitted config cannot wipe the wallet.
-                graph.session.requireApi().updatePaymentMethod(
-                    storeId = storeId,
-                    paymentMethodId = paymentMethodId,
-                    request = UpdatePaymentMethodRequest(enabled = enabled),
-                )
+                graph.session.spending {
+                    graph.session.requireApi().updatePaymentMethod(
+                        storeId = storeId,
+                        paymentMethodId = paymentMethodId,
+                        request = UpdatePaymentMethodRequest(enabled = enabled),
+                    )
+                }
             }.onSuccess { updated ->
-                graph.session.refreshPaymentMethods(storeId)
+                // The answer first, as in the editor, so the row shows the
+                // change as soon as it is applied. The session's list refresh
+                // runs in the app's scope, so leaving does not cancel it.
                 _state.update { current ->
                     current.copy(
                         methods = current.methods.map { if (it.paymentMethodId == paymentMethodId) updated else it },
                         busy = current.busy - paymentMethodId,
                     )
                 }
+                graph.scope.launch { graph.session.refreshPaymentMethods(storeId) }
             }.onFailure { failure ->
                 _state.update { it.copy(busy = it.busy - paymentMethodId, error = failure.asApiException()) }
             }
@@ -153,8 +202,16 @@ fun PaymentMethodsScreen(
     val viewModel = appViewModel { PaymentMethodsViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val serverInfo by LocalAppGraph.current.session.serverInfo.collectAsStateWithLifecycle()
+    val supported = serverInfo?.supportedPaymentMethods.orEmpty()
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
-    val groups = remember(state.methods) { groupPaymentMethods(state.methods) }
+    // Also on the way back from the editor, which the view model outlives: a
+    // removed or disabled method must not still read "Enabled".
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.load() }
+
+    val groups = remember(state.methods, supported) { groupPaymentMethods(state.methods, supported) }
 
     AppScreen(
         title = "Payment methods",
@@ -166,7 +223,7 @@ fun PaymentMethodsScreen(
         val phase = when {
             state.loading -> PaymentMethodsPhase.Loading
             state.error != null && state.methods.isEmpty() -> PaymentMethodsPhase.Error
-            state.methods.isEmpty() -> PaymentMethodsPhase.Empty
+            groups.isEmpty() -> PaymentMethodsPhase.Empty
             else -> PaymentMethodsPhase.Content
         }
 
@@ -208,6 +265,14 @@ fun PaymentMethodsScreen(
                                 )
                                 ThinDivider()
                             }
+                            group.missing.forEach { id ->
+                                MissingMethodRow(
+                                    paymentMethodId = id,
+                                    icon = group.kind.icon,
+                                    onClick = { onEdit(id) },
+                                )
+                                ThinDivider()
+                            }
                         }
                     }
 
@@ -215,6 +280,21 @@ fun PaymentMethodsScreen(
                 }
             }
         }
+    }
+
+    state.enable?.let { review ->
+        EnableReviewDialog(
+            review = review,
+            storeName = viewModel.storeName,
+            onConfirm = {
+                viewModel.dismissEnable()
+                val subject = "${review.paymentMethodId} · ${viewModel.storeName}"
+                scope.afterSpendGate(gate, ENABLE_PROMPT, subject, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.enable(review)
+                }
+            },
+            onDismiss = viewModel::dismissEnable,
+        )
     }
 }
 
@@ -267,6 +347,39 @@ private fun PaymentMethodRow(
     }
 }
 
+/** A method the server supports and this store has not set up. */
+@Composable
+private fun MissingMethodRow(
+    paymentMethodId: String,
+    icon: ImageVector,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(paymentMethodId, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "Not set up",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Icon(
+            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Grouping
 // ---------------------------------------------------------------------------
@@ -278,7 +391,12 @@ enum class PaymentMethodKind(val title: String, val icon: ImageVector) {
     Other("Other", Icons.Rounded.Payments),
 }
 
-data class PaymentMethodGroup(val kind: PaymentMethodKind, val methods: List<PaymentMethodData>)
+/** [missing]: supported ids this store has not set up. */
+data class PaymentMethodGroup(
+    val kind: PaymentMethodKind,
+    val methods: List<PaymentMethodData>,
+    val missing: List<String> = emptyList(),
+)
 
 /** `-LNURL` is tested before `-LN` only for readability; the two never overlap. */
 internal fun paymentMethodKind(paymentMethodId: String): PaymentMethodKind = when {
@@ -288,9 +406,18 @@ internal fun paymentMethodKind(paymentMethodId: String): PaymentMethodKind = whe
     else -> PaymentMethodKind.Other
 }
 
-private fun groupPaymentMethods(methods: List<PaymentMethodData>): List<PaymentMethodGroup> =
-    PaymentMethodKind.entries.mapNotNull { kind ->
-        methods.filter { paymentMethodKind(it.paymentMethodId) == kind }
-            .takeIf { it.isNotEmpty() }
-            ?.let { PaymentMethodGroup(kind, it) }
+/**
+ * Unset kinds this app cannot set up ([PaymentMethodKind.Other], usually a
+ * plugin's) are left out: their editor could only say "not found".
+ */
+private fun groupPaymentMethods(methods: List<PaymentMethodData>, supported: List<String>): List<PaymentMethodGroup> {
+    val configured = methods.mapTo(HashSet()) { it.paymentMethodId.uppercase(Locale.ROOT) }
+    val missing = supported.distinct().sorted().filter {
+        it.uppercase(Locale.ROOT) !in configured && paymentMethodKind(it) != PaymentMethodKind.Other
     }
+    return PaymentMethodKind.entries.mapNotNull { kind ->
+        val own = methods.filter { paymentMethodKind(it.paymentMethodId) == kind }
+        val absent = missing.filter { paymentMethodKind(it) == kind }
+        if (own.isEmpty() && absent.isEmpty()) null else PaymentMethodGroup(kind, own, absent)
+    }
+}

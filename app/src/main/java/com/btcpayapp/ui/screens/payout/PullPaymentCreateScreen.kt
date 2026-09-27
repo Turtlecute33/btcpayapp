@@ -1,14 +1,9 @@
 package com.btcpayapp.ui.screens.payout
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -22,23 +17,18 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DatePicker
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -47,24 +37,32 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Amounts
-import com.btcpayapp.core.util.Dates
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.mayHaveGoneThrough
 import com.btcpayapp.data.api.dto.CreatePullPaymentRequest
 import com.btcpayapp.data.api.endpoints.createPullPayment
+import com.btcpayapp.data.session.OutcomeHold
 import com.btcpayapp.data.session.SessionManager
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.ConfirmDialog
+import com.btcpayapp.ui.components.DateRow
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.FormField
+import com.btcpayapp.ui.components.FormProblem
 import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.arrive
-import com.btcpayapp.ui.theme.Motion
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
+import com.btcpayapp.data.session.StoreBinding
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.coroutines.launch
 
 // ---------------------------------------------------------------------------
@@ -107,20 +105,47 @@ data class PullPaymentCreateState(
     val startsAt: Long? = null,
     val expiresAt: Long? = null,
     val autoApproveClaims: Boolean = false,
+    /** An auto-approving request waiting for its confirmation. */
+    val confirming: CreatePullPaymentRequest? = null,
     val submitting: Boolean = false,
+    /** A create may have been made ([mayHaveGoneThrough]). Stays set: a second try could be a second claimable link. */
+    val outcomeUnknown: Boolean = false,
     val error: ApiException? = null,
     val nameError: String? = null,
     val amountError: String? = null,
     val notice: String? = null,
     val createdId: String? = null,
-)
+) {
+    /** What the amount is in, and is sent as: BTC while the currency field is blank. */
+    val amountCurrency: String
+        get() = currency.trim().ifBlank { "BTC" }
+}
 
 class PullPaymentCreateViewModel(private val graph: AppGraph) : ViewModel() {
+
+    /** The store this screen was opened in (see [StoreBinding]). */
+    private val bound = StoreBinding(graph.session)
+
+    /** Whose funds the claims take, for the confirmation. */
+    val storeName: String get() = bound.name
 
     private val _state = MutableStateFlow(
         PullPaymentCreateState(currency = graph.session.activeStore.value?.defaultCurrency.orEmpty()),
     )
     val state = _state.asStateFlow()
+
+    /**
+     * Held while [PullPaymentCreateState.outcomeUnknown] is on screen, so a store
+     * or account switch cannot close it before it is read: a second try could
+     * make a second claimable link. Owned here and not by the composable, so a
+     * tab switch or a screen on top does not release it. It ends when this
+     * screen is closed.
+     */
+    private val outcomeHold = OutcomeHold(graph.session).also(::addCloseable)
+
+    /** Changes the state and the hold together. Use it for every change that can set [PullPaymentCreateState.outcomeUnknown]. */
+    private fun edit(transform: (PullPaymentCreateState) -> PullPaymentCreateState) =
+        outcomeHold.set(_state.updateAndGet(transform).outcomeUnknown)
 
     init {
         viewModelScope.launch {
@@ -143,7 +168,8 @@ class PullPaymentCreateViewModel(private val graph: AppGraph) : ViewModel() {
     fun setName(value: String) = _state.update { it.copy(name = value, nameError = null) }
     fun setDescription(value: String) = _state.update { it.copy(description = value) }
     fun setAmount(value: String) = _state.update { it.copy(amount = value, amountError = null) }
-    fun setCurrency(value: String) = _state.update { it.copy(currency = value.uppercase()) }
+    // Clears the amount error too: how many decimals are allowed depends on the currency.
+    fun setCurrency(value: String) = _state.update { it.copy(currency = value.uppercase(), amountError = null) }
     fun setExpirationDays(value: String) = _state.update { it.copy(bolt11ExpirationDays = value.filter(Char::isDigit)) }
     fun setStartsAt(value: Long?) = _state.update { it.copy(startsAt = value) }
     fun setExpiresAt(value: Long?) = _state.update { it.copy(expiresAt = value) }
@@ -163,29 +189,41 @@ class PullPaymentCreateViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun clearNotice() = _state.update { it.copy(notice = null) }
 
+    fun reportNotice(text: String) = _state.update { it.copy(notice = text) }
+
+    fun dismissConfirm() = _state.update { it.copy(confirming = null) }
+
+    /**
+     * Checks the form. A pull payment that approves its own claims pays
+     * whoever holds the link with no one reviewing the claim, so that one is
+     * confirmed first and then passes the spend prompt; any other is
+     * created straight away, since each claim still waits for approval.
+     */
     fun submit() {
         val snapshot = _state.value
         // Re-entrancy guard. The composable's `enabled` is one
         // recomposition behind the click, so two taps in the same
         // frame would both get through and create two of whatever this is.
-        if (snapshot.submitting) return
-        val amount = Amounts.parse(snapshot.amount)
+        if (snapshot.submitting || snapshot.outcomeUnknown) return
+        val currency = snapshot.amountCurrency
+        val amount = Amounts.inCurrency(snapshot.amount, currency)
 
         if (snapshot.name.isBlank()) {
             _state.update { it.copy(nameError = "Give this pull payment a name.") }
             return
         }
-        if (amount == null || amount.signum() <= 0) {
-            _state.update { it.copy(amountError = "Enter an amount greater than zero.") }
+        if (amount == null) {
+            _state.update {
+                it.copy(amountError = Amounts.inCurrencyProblem(snapshot.amount, currency) ?: "Enter an amount greater than zero.")
+            }
             return
         }
         if (snapshot.selectedMethods.isEmpty()) {
             _state.update { it.copy(notice = "Choose at least one payout method.") }
             return
         }
-        val store = graph.session.activeStore.value?.id
-        if (store == null) {
-            _state.update { it.copy(notice = "Select a store first.") }
+        if (bound.id == null) {
+            _state.update { it.copy(notice = ApiException.NoAccount().userMessage) }
             return
         }
 
@@ -193,30 +231,46 @@ class PullPaymentCreateViewModel(private val graph: AppGraph) : ViewModel() {
             name = snapshot.name.trim(),
             description = snapshot.description.trim().ifBlank { null },
             amount = amount,
-            currency = snapshot.currency.trim().ifBlank { "BTC" },
+            currency = currency,
             BOLT11Expiration = snapshot.bolt11ExpirationDays.toIntOrNull() ?: 30,
             startsAt = snapshot.startsAt,
             expiresAt = snapshot.expiresAt,
             payoutMethods = snapshot.selectedMethods.toList(),
             autoApproveClaims = snapshot.autoApproveClaims,
         )
+        if (request.autoApproveClaims) _state.update { it.copy(confirming = request) } else create(request)
+    }
 
+    /**
+     * Marked as a payment in flight, as a refund is: a store switch must not
+     * cancel a create whose answer decides whether it is safe to try again.
+     */
+    fun create(request: CreatePullPaymentRequest) {
+        val snapshot = _state.value
+        if (snapshot.submitting || snapshot.outcomeUnknown) return
+        val store = bound.id ?: return
+        _state.update { it.copy(submitting = true, error = null, confirming = null) }
         viewModelScope.launch {
-            _state.update { it.copy(submitting = true, error = null) }
-            runCatching { graph.session.requireApi().createPullPayment(store, request) }
+            runCatching {
+                graph.session.spending { graph.session.requireApi().createPullPayment(store, request) }
+            }
                 .onSuccess { created -> _state.update { it.copy(submitting = false, createdId = created.id) } }
                 .onFailure { failure ->
-                    _state.update {
-                        it.copy(
-                            submitting = false,
-                            error = failure as? ApiException
-                                ?: ApiException.Transport(failure.message ?: "Unexpected failure"),
-                        )
+                    val error = failure.asApiException()
+                    edit {
+                        if (error.mayHaveGoneThrough()) {
+                            it.copy(submitting = false, outcomeUnknown = true)
+                        } else {
+                            it.copy(submitting = false, error = error)
+                        }
                     }
                 }
         }
     }
 }
+
+private const val OUTCOME_UNKNOWN =
+    "The pull payment may have been created. Check Pull payments before you try again."
 
 /**
  * Creating a pull payment.
@@ -236,6 +290,8 @@ fun PullPaymentCreateScreen(
     val viewModel = appViewModel { PullPaymentCreateViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(state.createdId) { state.createdId?.let(onCreated) }
 
@@ -246,16 +302,20 @@ fun PullPaymentCreateScreen(
         }
     }
 
+    // Leaving would cancel the create with the view model and lose its answer,
+    // which says whether it is safe to try again. So back waits for it.
+    BackHandler(enabled = state.submitting) {}
+
     AppScreen(
         title = "New pull payment",
-        onBack = onBack,
+        onBack = { if (!state.submitting) onBack() },
         snackbarHostState = snackbarHostState,
         actions = {
             AnimatedSwap(state.submitting, label = "submit") { busy ->
                 if (busy) {
                     CircularProgressIndicator(Modifier.padding(horizontal = 16.dp).size(20.dp))
                 } else {
-                    IconButton(onClick = viewModel::submit) {
+                    IconButton(onClick = viewModel::submit, enabled = !state.outcomeUnknown) {
                         Icon(Icons.Rounded.Check, contentDescription = "Create")
                     }
                 }
@@ -269,6 +329,7 @@ fun PullPaymentCreateScreen(
                 .verticalScroll(rememberScrollState()),
         ) {
             ErrorBanner(state.error, onDismiss = viewModel::dismissError)
+            FormProblem(OUTCOME_UNKNOWN.takeIf { state.outcomeUnknown })
 
             FormSection(title = "Details", modifier = Modifier.arrive(0)) {
                 FormField(
@@ -284,8 +345,10 @@ fun PullPaymentCreateScreen(
                     onValueChange = viewModel::setDescription,
                     singleLine = false,
                 )
+                // Read in the currency below whatever the sat/BTC setting, so
+                // the label names it: in BTC, "50000" is 50,000 BTC, not sats.
                 FormField(
-                    label = "Amount",
+                    label = "Amount (${state.amountCurrency})",
                     value = state.amount,
                     onValueChange = viewModel::setAmount,
                     keyboardType = KeyboardType.Decimal,
@@ -337,8 +400,18 @@ fun PullPaymentCreateScreen(
                     keyboardType = KeyboardType.Number,
                     supportingText = "How long a claimed Lightning invoice stays payable.",
                 )
-                DateRow(label = "Starts at", epochSeconds = state.startsAt, onPick = viewModel::setStartsAt)
-                DateRow(label = "Expires at", epochSeconds = state.expiresAt, onPick = viewModel::setExpiresAt)
+                DateRow(
+                    label = "Starts at",
+                    epochSeconds = state.startsAt,
+                    endOfDay = false,
+                    onPick = viewModel::setStartsAt,
+                )
+                DateRow(
+                    label = "Expires at",
+                    epochSeconds = state.expiresAt,
+                    endOfDay = true,
+                    onPick = viewModel::setExpiresAt,
+                )
                 FormSwitch(
                     title = "Auto-approve claims",
                     checked = state.autoApproveClaims,
@@ -350,52 +423,26 @@ fun PullPaymentCreateScreen(
             Spacer(Modifier.height(32.dp))
         }
     }
-}
 
-@Composable
-private fun DateRow(label: String, epochSeconds: Long?, onPick: (Long?) -> Unit) {
-    var picking by remember { mutableStateOf(false) }
-
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(label, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = epochSeconds?.let(Dates::date) ?: "Not set",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        // "Clear" only exists once a date has been chosen, and it appears right
-        // beside the button that was just tapped to choose one.
-        AnimatedVisibility(
-            visible = epochSeconds != null,
-            enter = expandHorizontally(Motion.spatialSize) + fadeIn(Motion.effects),
-            exit = shrinkHorizontally(Motion.spatialSize) + fadeOut(Motion.effectsFast),
-        ) {
-            TextButton(onClick = { onPick(null) }) { Text("Clear") }
-        }
-        TextButton(onClick = { picking = true }) { Text("Choose") }
-    }
-
-    if (picking) {
-        val picker = rememberDatePickerState(initialSelectedDateMillis = epochSeconds?.times(1000))
-        DatePickerDialog(
-            onDismissRequest = { picking = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        // BTCPay wants unix seconds; the picker returns millis.
-                        onPick(picker.selectedDateMillis?.div(1000))
-                        picking = false
-                    },
-                ) { Text("Set") }
+    // Not masked in privacy mode: this is where the operator reads the amount
+    // before anyone with the link can claim it unreviewed.
+    // The methods are named, because "BTC" alone does not say on-chain or Lightning.
+    state.confirming?.let { request ->
+        val amount = Amounts.format(request.amount, request.currency)
+        val methods = request.payoutMethods.joinToString(", ", transform = ::payoutMethodLabel)
+        ConfirmDialog(
+            title = "Create this pull payment?",
+            message = "Amount: $amount from ${viewModel.storeName}.\nPaid out over: $methods.\n" +
+                "Claims will be paid without approval.",
+            confirmLabel = "Create",
+            onDismiss = viewModel::dismissConfirm,
+            onConfirm = {
+                viewModel.dismissConfirm()
+                val subtitle = "$amount from ${viewModel.storeName}"
+                scope.afterSpendGate(gate, "Confirm pull payment", subtitle, viewModel::reportNotice) {
+                    viewModel.create(request)
+                }
             },
-            dismissButton = { TextButton(onClick = { picking = false }) { Text("Cancel") } },
-        ) {
-            DatePicker(state = picker)
-        }
+        )
     }
 }

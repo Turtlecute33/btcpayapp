@@ -66,7 +66,7 @@ data class WalletUtxoData(
     val comment: String = "",
     val amount: BigDecimal = BigDecimal.ZERO,
     val link: String? = null,
-    /** `{txid}:{vout}` — the form the coin selector expects back. */
+    /** `{txid}-{vout}`: NBitcoin's `OutPoint.ToString`, which Greenfield writes and parses back. */
     val outpoint: String = "",
     val timestamp: Long = 0,
     val keyPath: String = "",
@@ -84,8 +84,10 @@ data class CreateTransactionRequest(
     val feerate: Double? = null,
     val proceedWithPayjoin: Boolean = true,
     /**
-     * False returns a signed-but-unbroadcast transaction, which is what the
-     * review-before-send flow uses so the operator sees the real fee first.
+     * False returns the signed transaction as hex without broadcasting it, so
+     * the fee and outputs can be checked first. It does **not** stop payjoin,
+     * which the server runs (and broadcasts) before this check; turn
+     * [proceedWithPayjoin] off too, as `signTransaction` does.
      */
     val proceedWithBroadcast: Boolean = true,
     /** False returns an unsigned PSBT for an external signer. */

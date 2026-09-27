@@ -15,15 +15,27 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.btcpayapp.MainActivity
 import com.btcpayapp.R
+import com.btcpayapp.core.util.toHex
+import java.security.MessageDigest
 
 /**
  * System notifications.
  *
  * Separate channels so a merchant can silence server chatter without losing
- * payment alerts. Nothing sensitive goes in the ticker text: the amount and the
- * store name are shown, never an address, a BOLT11 invoice or a key.
+ * payment alerts. A notification shows at most an amount, the account label and
+ * the server's own feed text, never an address, a BOLT11 invoice or a key.
+ *
+ * Each one is tagged with a hash of its account id, so removing an account
+ * can take its notifications out of the shade ([cancelAccount]). Each one also
+ * carries a public version with only a title that names no amount, store or
+ * server text, and with `concealed` set (app lock or privacy mode on) the
+ * notification itself is that title: the lock screen then shows none of them,
+ * whatever the user's system setting is. Those posted in full before either
+ * turned on are removed ([cancelRevealing]).
+ *
+ * `open` for one reason: SyncEngine's JVM test records what would be posted.
  */
-class Notifier(private val context: Context) {
+open class Notifier(private val context: Context) {
 
     private val manager = NotificationManagerCompat.from(context)
 
@@ -72,7 +84,7 @@ class Notifier(private val context: Context) {
      * through 12, and the whole polling subsystem would run, advance its
      * watermarks and spend battery without ever showing the merchant anything.
      */
-    fun canPost(): Boolean {
+    open fun canPost(): Boolean {
         val permitted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
@@ -85,35 +97,74 @@ class Notifier(private val context: Context) {
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
 
-    fun paymentReceived(invoiceId: String, accountId: String, storeId: String, title: String, body: String) {
+    /**
+     * [title] is the payment's status from [paymentTitle]. It names no amount
+     * or store, so it is also the concealed and lock-screen title. A generic
+     * "Payment received" there would show an unconfirmed or partial payment
+     * as a full one, and the merchant could hand over the goods for it.
+     */
+    open fun paymentReceived(
+        invoiceId: String,
+        accountId: String,
+        storeId: String,
+        title: String,
+        body: String,
+        concealed: Boolean = false,
+    ) {
         post(
+            accountId = accountId,
             id = "$accountId|$storeId|invoice|$invoiceId".hashCode(),
             channel = CHANNEL_PAYMENTS,
             title = title,
             body = body,
+            publicTitle = title,
+            concealed = concealed,
             deepLink = scopedLink("invoice", invoiceId, accountId, storeId),
             category = Notification.CATEGORY_EVENT,
         )
     }
 
-    fun payoutWaiting(payoutId: String, accountId: String, storeId: String, title: String, body: String) {
+    open fun payoutWaiting(
+        payoutId: String,
+        accountId: String,
+        storeId: String,
+        title: String,
+        body: String,
+        concealed: Boolean = false,
+    ) {
         post(
+            accountId = accountId,
             id = "$accountId|$storeId|payout|$payoutId".hashCode(),
             channel = CHANNEL_PAYOUTS,
             title = title,
             body = body,
+            publicTitle = "Payout awaiting approval",
+            concealed = concealed,
             deepLink = scopedLink("payout", payoutId, accountId, storeId),
         )
     }
 
-    fun serverIssue(accountId: String, title: String, body: String) {
+    /**
+     * One per account. SyncEngine posts it once per outage, and an update of a
+     * notification still showing makes no sound. [clearServerIssue] removes it
+     * when the server answers again.
+     */
+    open fun serverIssue(accountId: String, title: String, body: String, concealed: Boolean = false) {
         post(
-            id = accountId.hashCode(),
+            accountId = accountId,
+            id = serverIssueId(accountId),
             channel = CHANNEL_SERVER,
             title = title,
             body = body,
+            publicTitle = "Server issue",
+            concealed = concealed,
             deepLink = "btcpayapp://settings/connections",
+            onlyAlertOnce = true,
         )
+    }
+
+    open fun clearServerIssue(accountId: String) {
+        runCatching { manager.cancel(tagOf(accountId), serverIssueId(accountId)) }
     }
 
     /**
@@ -123,7 +174,15 @@ class Notifier(private val context: Context) {
      * the entry's link travels with it. It is resolved on arrival, against the
      * account the link names, and not here.
      */
-    fun serverNotification(notificationId: String, accountId: String, storeId: String?, link: String?, title: String, body: String) {
+    open fun serverNotification(
+        notificationId: String,
+        accountId: String,
+        storeId: String?,
+        link: String?,
+        title: String,
+        body: String,
+        concealed: Boolean = false,
+    ) {
         val deepLink = Uri.Builder()
             .scheme("btcpayapp").authority("notification").appendPath(notificationId)
             .appendQueryParameter("account", accountId)
@@ -133,17 +192,59 @@ class Notifier(private val context: Context) {
             }
             .build().toString()
         post(
+            accountId = accountId,
             id = "$accountId|feed|$notificationId".hashCode(),
             channel = CHANNEL_FEED,
             title = title,
             body = body,
+            publicTitle = "BTCPay notification",
+            concealed = concealed,
             deepLink = deepLink,
         )
+    }
+
+    /** Removes every notification posted for [accountId], found by its tag. */
+    open fun cancelAccount(accountId: String) {
+        val tag = tagOf(accountId)
+        runCatching {
+            context.getSystemService(NotificationManager::class.java)
+                ?.activeNotifications
+                ?.filter { it.tag == tag }
+                ?.forEach { manager.cancel(it.tag, it.id) }
+        }
+    }
+
+    /**
+     * Removes every notification posted in full, not concealed. Only those
+     * have a body text ([post]).
+     */
+    fun cancelRevealing() {
+        runCatching {
+            context.getSystemService(NotificationManager::class.java)
+                ?.activeNotifications
+                ?.filter { it.notification.extras?.getCharSequence(Notification.EXTRA_TEXT) != null }
+                ?.forEach { manager.cancel(it.tag, it.id) }
+        }
+    }
+
+    /** Removes every notification of this app, for "Erase everything". */
+    fun cancelAll() {
+        runCatching { manager.cancelAll() }
     }
 
     private fun scopedLink(kind: String, id: String, accountId: String, storeId: String) = Uri.Builder()
         .scheme("btcpayapp").authority(kind).appendPath(id)
         .appendQueryParameter("account", accountId).appendQueryParameter("store", storeId).build().toString()
+
+    private fun serverIssueId(accountId: String) = "$accountId|server".hashCode()
+
+    /**
+     * Not the account id itself: any app with notification access reads tags,
+     * and the id is what a `btcpayapp://…?account=` link needs to switch this
+     * app to another account.
+     */
+    private fun tagOf(accountId: String): String =
+        MessageDigest.getInstance("SHA-256").digest(accountId.toByteArray(Charsets.UTF_8)).toHex()
 
     // `canPost()` performs exactly the check lint is asking for, but it lives in
     // its own function so the detector cannot follow it. The `notify` call is
@@ -151,12 +252,16 @@ class Notifier(private val context: Context) {
     // that disagrees cannot crash a background sync either.
     @SuppressLint("MissingPermission")
     private fun post(
+        accountId: String,
         id: Int,
         channel: String,
         title: String,
         body: String,
+        publicTitle: String,
+        concealed: Boolean,
         deepLink: String,
         category: String = Notification.CATEGORY_STATUS,
+        onlyAlertOnce: Boolean = false,
     ) {
         if (!canPost()) return
 
@@ -172,20 +277,35 @@ class Notifier(private val context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        val notification = Notification.Builder(context, channel)
+        // What a secure lock screen shows when the user chose "hide sensitive
+        // content": that something happened, not how much, where or from whom.
+        val publicVersion = Notification.Builder(context, channel)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setStyle(Notification.BigTextStyle().bigText(body))
+            .setContentTitle(publicTitle)
+            .setCategory(category)
+            .build()
+
+        val builder = Notification.Builder(context, channel)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(pending)
             .setAutoCancel(true)
             .setCategory(category)
-            // Keeps the content off a locked screen; the title alone is enough
-            // to know something arrived.
+            .setOnlyAlertOnce(onlyAlertOnce)
+            // PRIVATE swaps in the public version only under "hide sensitive
+            // content". Under Android's default, "show all content", the lock
+            // screen shows the full notification, which is why a concealed one
+            // holds nothing but the public title.
             .setVisibility(Notification.VISIBILITY_PRIVATE)
-            .build()
+            .setPublicVersion(publicVersion)
+        if (concealed) {
+            builder.setContentTitle(publicTitle)
+        } else {
+            builder.setContentTitle(title)
+                .setContentText(body)
+                .setStyle(Notification.BigTextStyle().bigText(body))
+        }
 
-        runCatching { manager.notify(id, notification) }
+        runCatching { manager.notify(tagOf(accountId), id, builder.build()) }
     }
 
     companion object {

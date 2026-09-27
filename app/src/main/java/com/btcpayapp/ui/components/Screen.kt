@@ -5,11 +5,22 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.calculateEndPadding
+import androidx.compose.foundation.layout.calculateStartPadding
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.union
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -18,24 +29,32 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.keepScreenOn
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.dp
+import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.theme.Motion
 import androidx.compose.ui.text.style.TextOverflow
 
@@ -74,6 +93,12 @@ fun AppScreen(
         modifier = modifier
             .nestedScroll(scrollBehavior.nestedScrollConnection)
             .nestedScroll(fabVisibility.connection),
+        // The keyboard is part of the content insets. The window is edge to
+        // edge, so the system no longer shrinks it for the keyboard; without
+        // this, a scrolling form keeps its full height, a focused lower field
+        // counts as visible while it sits under the keyboard, and the submit
+        // button cannot be reached without closing it.
+        contentWindowInsets = ScaffoldDefaults.contentWindowInsets.union(WindowInsets.ime),
         topBar = {
             val titleContent: @Composable () -> Unit = {
                 Column2(title = title, subtitle = subtitle)
@@ -120,16 +145,77 @@ fun AppScreen(
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         if (onRefresh != null) {
+            // The top inset goes on the box so the indicator appears under the
+            // app bar, and the bottom one to the content so it can scroll
+            // behind the navigation bar. The sides go on the box too: in
+            // landscape the navigation bar can sit on either side.
+            val direction = LocalLayoutDirection.current
             PullToRefreshBox(
                 isRefreshing = refreshing == true,
                 onRefresh = onRefresh,
-                modifier = Modifier.fillMaxSize().padding(top = padding.calculateTopPadding()),
+                modifier = Modifier.fillMaxSize().padding(
+                    top = padding.calculateTopPadding(),
+                    start = padding.calculateStartPadding(direction),
+                    end = padding.calculateEndPadding(direction),
+                ),
             ) {
                 content(PaddingValues(bottom = padding.calculateBottomPadding()))
             }
         } else {
             Box(Modifier.fillMaxSize()) { content(padding) }
         }
+    }
+}
+
+/**
+ * The bottom bar of an edit screen: its actions, right-aligned.
+ *
+ * A Scaffold does not inset a custom bottom bar, so this pads for the
+ * navigation bar and the keyboard itself. Without it, the Save button of a
+ * detail screen (where the shell hides its own navigation) sits under the
+ * system's three buttons, and taps on it go to Recents.
+ */
+@Composable
+fun ActionBar(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
+    Surface(modifier = modifier, tonalElevation = 3.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+            verticalAlignment = Alignment.CenterVertically,
+            content = content,
+        )
+    }
+}
+
+/**
+ * Keeps the display on while this is composed.
+ *
+ * `Modifier.keepScreenOn` is counted by the host view, so two screens that
+ * overlap during a transition — the Terminal handing over to Checkout — do not
+ * switch it off for each other.
+ *
+ * It also arms the app's idle lock for as long as it is composed: a phone
+ * that never sleeps must still lock after a while without a touch. The lock
+ * follows the user's delay, at least a minute (the Terminal). A screen a
+ * customer reads to pay, such as a checkout, passes [customerFacing]: the
+ * lock then waits at least 15 minutes without a touch, so it does not lock
+ * while a customer pays, and a checkout left on the counter still locks. See
+ * [com.btcpayapp.core.security.AppLock.armIdleLock].
+ *
+ * It emits an empty layout. In a column with `spacedBy` that adds one more
+ * gap, so put it in a `Box`.
+ */
+@Composable
+fun KeepScreenOn(customerFacing: Boolean = false) {
+    Spacer(Modifier.keepScreenOn())
+    val appLock = LocalAppGraph.current.appLock
+    DisposableEffect(appLock, customerFacing) {
+        val release = appLock.armIdleLock(customerFacing)
+        onDispose { release() }
     }
 }
 

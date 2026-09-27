@@ -48,11 +48,18 @@
         android:usesCleartextTraffic="false"
         tools:targetApi="34">
 
+        <!--
+          taskAffinity="": the system finds this task by its activity, not by
+          the package name. On older Android versions another app can claim
+          the package name as its own affinity and so put its screen, a fake
+          lock or key form, in front when the user opens this app.
+        -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|fontScale|smallestScreenSize"
             android:exported="true"
             android:launchMode="singleTask"
+            android:taskAffinity=""
             android:theme="@style/Theme.BtcPayApp.Starting"
             android:windowSoftInputMode="adjustResize">
 
@@ -62,15 +69,15 @@
             </intent-filter>
 
             <!--
-              Private scheme used only to receive the API-key grant redirect
-              from the server's own authorize page. It carries a one-time
-              nonce that the app generated moments earlier; a redirect without
-              a matching nonce is discarded.
+              Private scheme for notification taps and launcher shortcuts.
+              Both send explicit intents, so the filter is not BROWSABLE: a web
+              page cannot fire it. Any installed app still can, so the shell
+              treats every link as untrusted and asks before it opens a web
+              address from one.
             -->
             <intent-filter android:autoVerify="false">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="btcpayapp" />
             </intent-filter>
 

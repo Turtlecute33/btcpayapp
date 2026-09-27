@@ -30,12 +30,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
-import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.dto.WalletUtxoData
 import com.btcpayapp.data.api.endpoints.walletUtxos
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AmountText
@@ -47,6 +47,7 @@ import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.SkeletonList
+import com.btcpayapp.ui.components.maskedIfPrivate
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -84,11 +85,16 @@ class UtxoViewModel(
     private val paymentMethodId: String,
 ) : ViewModel() {
 
+    /** The store this screen was opened in (see [StoreBinding]); the shell drops it on a switch. */
+    private val store = StoreBinding(graph.session)
+    private val storeId: String? get() = store.id
+
     private val _state = MutableStateFlow(UtxoState())
     val state = _state.asStateFlow()
 
     init {
         load(refreshing = false)
+        store.retryWhenKnown(viewModelScope) { load(refreshing = false) }
     }
 
     fun refresh() = load(refreshing = true)
@@ -98,7 +104,7 @@ class UtxoViewModel(
     fun dismissError() = _state.update { it.copy(error = null) }
 
     private fun load(refreshing: Boolean) {
-        val storeId = graph.session.activeStore.value?.id ?: return
+        val storeId = storeId ?: return _state.update { it.copy(error = ApiException.NoAccount()) }
         viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.utxos.isEmpty(), refreshing = refreshing, error = null)
@@ -130,14 +136,13 @@ fun UtxoScreen(paymentMethodId: String, onBack: () -> Unit) {
     val settings = LocalSettings.current
     val cryptoCode = remember(paymentMethodId) { cryptoCodeOf(paymentMethodId) }
 
-    val subtitle = remember(state.utxos, settings.bitcoinUnit, settings.privacyMode) {
-        val count = state.utxos.size
-        val noun = if (count == 1) "coin" else "coins"
-        val total = formatOnChain(state.total, cryptoCode, settings.bitcoinUnit)
-        // The app bar is the one amount the component library cannot mask for
-        // us, and a wallet total is exactly what privacy mode exists to hide.
-        "$count $noun · ${if (settings.privacyMode) Amounts.masked(total) else total}"
+    val total = remember(state.utxos, settings.bitcoinUnit) {
+        formatOnChain(state.total, cryptoCode, settings.bitcoinUnit)
     }
+    val count = state.utxos.size
+    // The app bar is the one amount the component library cannot mask for
+    // us, and a wallet total is exactly what privacy mode exists to hide.
+    val subtitle = "$count ${if (count == 1) "coin" else "coins"} · ${maskedIfPrivate(total)}"
 
     AppScreen(
         title = "Coins",

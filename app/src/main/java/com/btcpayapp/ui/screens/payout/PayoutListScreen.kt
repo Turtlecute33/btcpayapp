@@ -1,6 +1,6 @@
 package com.btcpayapp.ui.screens.payout
 
-import androidx.activity.compose.LocalActivity
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Cancel
@@ -23,6 +25,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Done
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Payments
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -33,6 +36,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,27 +46,28 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
-import com.btcpayapp.core.security.AuthOutcome
-import com.btcpayapp.core.security.Biometrics
 import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.attempt
 import com.btcpayapp.data.api.dto.PayoutData
 import com.btcpayapp.data.api.dto.PayoutState
 import com.btcpayapp.data.api.endpoints.approvePayout
 import com.btcpayapp.data.api.endpoints.cancelPayout
 import com.btcpayapp.data.api.endpoints.markPayoutPaid
 import com.btcpayapp.data.api.endpoints.payouts
+import com.btcpayapp.data.api.endpoints.rates
+import com.btcpayapp.data.model.BitcoinUnit
 import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AmountText
@@ -73,13 +78,19 @@ import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.PayoutStatusChip
+import com.btcpayapp.ui.components.ReviewLine
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.ThinDivider
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.reviewDestination
+import com.btcpayapp.ui.components.afterSpendGate
+import com.btcpayapp.data.session.StoreBinding
+import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
+import com.btcpayapp.ui.theme.MonospaceStyle
+import java.math.BigDecimal
+import java.math.RoundingMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -92,6 +103,9 @@ private val FILTERS: List<PayoutState?> = listOf(
     PayoutState.Cancelled,
 )
 
+/** The policy behind approve, mark paid, cancel and create. */
+internal const val MANAGE_PAYOUTS = "btcpay.store.canmanagepayouts"
+
 /**
  * What the body of the screen is showing.
  *
@@ -103,6 +117,25 @@ private enum class PayoutsPhase { NoStore, Loading, Error, Empty, Content }
 /** What sits at the end of a payout row: a spinner, a menu, or nothing. */
 private enum class PayoutRowTail { Busy, Menu, None }
 
+enum class PayoutAction { Approve, MarkPaid, Cancel }
+
+/** An action waiting for its confirmation dialog. */
+data class PendingPayoutAction(val action: PayoutAction, val payout: PayoutData)
+
+/**
+ * The store's rate now for a payout priced in another currency than the coin
+ * it pays: the rate an approval locks sets how much it pays. [rate] is null
+ * when the server gave none.
+ */
+data class ApproveRate(val payoutId: String, val rate: BigDecimal?)
+
+/** The pair whose rate sets what approving [payout] pays, or null when it is priced in the coin it pays. */
+internal fun approveRatePair(payout: PayoutData): String? {
+    val coin = cryptoCodeOf(payout.payoutMethodId)
+    if (coin.isBlank() || payout.originalCurrency.isBlank() || coin.equals(payout.originalCurrency, ignoreCase = true)) return null
+    return "${coin.uppercase()}_${payout.originalCurrency.uppercase()}"
+}
+
 data class PayoutListState(
     val payouts: List<PayoutData> = emptyList(),
     val loading: Boolean = false,
@@ -111,7 +144,8 @@ data class PayoutListState(
     val error: ApiException? = null,
     val filter: PayoutState? = null,
     val storeMissing: Boolean = false,
-    val pendingCancel: PayoutData? = null,
+    val pending: PendingPayoutAction? = null,
+    val approveRate: ApproveRate? = null,
     val message: String? = null,
 ) {
     val visible: List<PayoutData>
@@ -120,20 +154,34 @@ data class PayoutListState(
 
 class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
 
-    private val _state = MutableStateFlow(PayoutListState())
+    /** Every approval goes to the store whose payouts are on screen (see [StoreBinding]). */
+    private val bound = StoreBinding(graph.session)
+
+    /** Whose funds an approval commits, for the review and the prompt. */
+    val storeName: String get() = bound.name
+
+    /** False hides New and every row action, which the server would refuse with a 403. */
+    val canManage: Boolean
+        get() = bound.id?.let { graph.session.hasPermission(MANAGE_PAYOUTS, it) } == true
+
+    // Loading from the start: the first read waits for the screen to resume,
+    // and until then "no payouts yet" would be a claim nobody has checked.
+    private val _state = MutableStateFlow(PayoutListState(storeMissing = bound.id == null, loading = bound.id != null))
     val state = _state.asStateFlow()
 
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { id ->
-                    _state.update { it.copy(storeMissing = id == null) }
-                    if (id != null) load()
-                }
+        bound.retryWhenKnown(viewModelScope) {
+            _state.update { it.copy(storeMissing = false, loading = true) }
+            load()
         }
     }
+
+    /**
+     * Loads on every return to the screen, so a payout approved or paid
+     * elsewhere (the web UI, a processor) does not sit on screen in its old
+     * state waiting for a pull to refresh.
+     */
+    fun onResume() = load()
 
     fun setFilter(filter: PayoutState?) {
         _state.update { it.copy(filter = filter) }
@@ -148,9 +196,19 @@ class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun reportMessage(text: String) = _state.update { it.copy(message = text) }
 
-    fun requestCancel(payout: PayoutData) = _state.update { it.copy(pendingCancel = payout) }
+    fun request(action: PayoutAction, payout: PayoutData) {
+        _state.update { it.copy(pending = PendingPayoutAction(action, payout), approveRate = null) }
+        val store = bound.id ?: return
+        val pair = approveRatePair(payout)?.takeIf { action == PayoutAction.Approve } ?: return
+        viewModelScope.launch {
+            val rate = attempt { graph.session.requireApi().rates(store, listOf(pair)) }.getOrNull()
+                ?.firstOrNull { it.currencyPair.equals(pair, ignoreCase = true) && it.errors.isEmpty() }
+                ?.rate?.takeIf { it.signum() > 0 }
+            _state.update { if (it.pending?.payout?.id == payout.id) it.copy(approveRate = ApproveRate(payout.id, rate)) else it }
+        }
+    }
 
-    fun dismissCancel() = _state.update { it.copy(pendingCancel = null) }
+    fun dismissPending() = _state.update { it.copy(pending = null) }
 
     /**
      * The revision is the server's optimistic-concurrency guard: it moves every
@@ -158,27 +216,30 @@ class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
      * A rejection means the row on screen is stale, not that the approval was
      * wrong — which is why the failure path reloads instead of retrying.
      */
-    fun approve(payout: PayoutData) = act(payout.id, "Payout approved") {
-        graph.session.requireApi().approvePayout(payout.id, payout.revision)
+    fun approve(payout: PayoutData) = act(payout.id, "Payout approved") { store ->
+        graph.session.requireApi().approvePayout(store, payout.id, payout.revision)
     }
 
-    fun markPaid(payout: PayoutData) = act(payout.id, "Marked as paid") {
-        graph.session.requireApi().markPayoutPaid(payout.id)
+    fun markPaid(payout: PayoutData) = act(payout.id, "Marked as paid") { store ->
+        graph.session.requireApi().markPayoutPaid(store, payout.id)
     }
 
-    fun confirmCancel() {
-        val target = _state.value.pendingCancel ?: return
-        _state.update { it.copy(pendingCancel = null) }
-        act(target.id, "Payout cancelled") {
-            graph.session.requireApi().cancelPayout(target.id)
-        }
+    fun cancel(payout: PayoutData) = act(payout.id, "Payout cancelled") { store ->
+        graph.session.requireApi().cancelPayout(store, payout.id)
     }
 
-    private fun act(payoutId: String, success: String, block: suspend () -> Unit) {
+    /**
+     * Runs one row action, marked as a payment in flight. Each one decides
+     * whether a payout is paid: approving commits the store to paying (a
+     * processor may pay at once), and mark paid and cancel stop it for good.
+     * So a store switch must not cancel the request and lose its answer.
+     */
+    private fun act(payoutId: String, success: String, block: suspend (storeId: String) -> Unit) {
+        val store = bound.id ?: return
         if (_state.value.busyId != null) return
         _state.update { it.copy(busyId = payoutId) }
         viewModelScope.launch {
-            runCatching { block() }
+            runCatching { graph.session.spending { block(store) } }
                 .onSuccess {
                     _state.update { it.copy(busyId = null, message = success) }
                     load(refreshing = true)
@@ -186,18 +247,24 @@ class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
                 .onFailure { failure ->
                     val api = failure.asApiException()
                     _state.update { it.copy(busyId = null, message = explain(api)) }
-                    if ((api as? ApiException.Server)?.code == "old-revision") load(refreshing = true)
+                    // Both settle by reading the list again: a stale row, or a
+                    // request that may have gone through. Never by a resend.
+                    if (api is ApiException.OutcomeUnknown || (api as? ApiException.Server)?.code == "old-revision") {
+                        load(refreshing = true)
+                    }
                 }
         }
     }
 
     private fun load(refreshing: Boolean = false) {
-        val store = graph.session.activeStore.value?.id ?: return
+        val store = bound.id ?: return
         val filter = _state.value.filter
         viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.payouts.isEmpty(), refreshing = refreshing, error = null)
             }
+            // Unpaged on the server (GetStorePayouts has no skip/take), so a
+            // very large store gets the plain "answer too large" error here.
             runCatching {
                 graph.session.requireApi().payouts(
                     storeId = store,
@@ -226,16 +293,22 @@ class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
 }
 
 /** Server codes, rendered as something a merchant can act on. */
-private fun explain(error: ApiException): String = when ((error as? ApiException.Server)?.code) {
-    "old-revision" ->
-        "That payout changed while it was on screen. The list has been reloaded — check it and try again."
-    "rate-unavailable" ->
-        "No exchange rate is available for that currency right now. Try again in a moment."
-    "amount-too-low" ->
-        "That amount is below the minimum this payout method accepts."
-    "invalid-state" ->
-        "That payout is no longer in a state that allows this."
-    else -> error.userMessage
+private fun explain(error: ApiException): String {
+    if (error is ApiException.OutcomeUnknown) {
+        return "No clear answer came from the server, so this may have gone through. " +
+            "The list has been reloaded. Check the payout before you try again."
+    }
+    return when ((error as? ApiException.Server)?.code) {
+        "old-revision" ->
+            "That payout changed while it was on screen. The list has been reloaded — check it and try again."
+        "rate-unavailable" ->
+            "No exchange rate is available for that currency right now. Try again in a moment."
+        "amount-too-low" ->
+            "That amount is below the minimum this payout method accepts."
+        "invalid-state" ->
+            "That payout is no longer in a state that allows this."
+        else -> error.userMessage
+    }
 }
 
 @Composable
@@ -247,8 +320,10 @@ fun PayoutListScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
-    val activity = LocalActivity.current as? FragmentActivity
-    val confirmSpends = LocalSettings.current.confirmSpendsWithBiometrics
+    val gate = rememberSpendGate()
+    val unit = LocalSettings.current.bitcoinUnit
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -257,47 +332,25 @@ fun PayoutListScreen(
         }
     }
 
-    val approve: (PayoutData) -> Unit = { payout ->
-        scope.launch {
-            // Approving locks in a rate and commits the store to sending money,
-            // so it sits behind the same prompt as a spend — and fails closed.
-            // A null `activity` refuses rather than skipping the prompt, which
-            // would approve the payout with no prompt whatsoever.
-            if (!confirmSpends) {
-                viewModel.approve(payout)
-                return@launch
-            }
-            if (activity == null) {
-                viewModel.reportMessage(
-                    "This device cannot show the confirmation prompt, so the payout was not " +
-                        "approved. Turn off “Confirm spends” in Settings to approve without it.",
-                )
-                return@launch
-            }
-            when (Biometrics.prompt(
-                activity = activity,
-                title = "Approve payout",
-                subtitle = Amounts.format(payout.originalAmount, payout.originalCurrency),
-            )) {
-                is AuthOutcome.Success -> viewModel.approve(payout)
-                is AuthOutcome.Cancelled -> Unit
-                else -> viewModel.reportMessage("Not authenticated, so the payout was not approved.")
-            }
-        }
-    }
+    // Leaving would cancel a row action with the view model and lose its
+    // answer, which says whether it went through. So back waits for it.
+    val busy = state.busyId != null
+    BackHandler(enabled = busy) {}
 
     AppScreen(
         title = "Payouts",
-        onBack = onBack,
+        onBack = { if (!busy) onBack() },
         refreshing = state.refreshing,
         onRefresh = viewModel::refresh,
         snackbarHostState = snackbarHostState,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onCreate,
-                icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
-                text = { Text("New") },
-            )
+            if (viewModel.canManage) {
+                ExtendedFloatingActionButton(
+                    onClick = onCreate,
+                    icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                    text = { Text("New") },
+                )
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -350,13 +403,16 @@ fun PayoutListScreen(
                         ErrorState(error = it, onRetry = viewModel::refresh)
                     }
 
-                    PayoutsPhase.Empty -> EmptyState(
-                        title = if (state.filter == null) "No payouts yet" else "Nothing under this filter",
-                        description = "Payouts are outgoing payments, either claimed from a pull payment or made here.",
-                        icon = Icons.Rounded.Payments,
-                        actionLabel = "Create one".takeIf { state.filter == null },
-                        onAction = onCreate.takeIf { state.filter == null },
-                    )
+                    PayoutsPhase.Empty -> {
+                        val offerCreate = state.filter == null && viewModel.canManage
+                        EmptyState(
+                            title = if (state.filter == null) "No payouts yet" else "Nothing under this filter",
+                            description = "Payouts are outgoing payments, either claimed from a pull payment or made here.",
+                            icon = Icons.Rounded.Payments,
+                            actionLabel = "Create one".takeIf { offerCreate },
+                            onAction = onCreate.takeIf { offerCreate },
+                        )
+                    }
 
                     PayoutsPhase.Content -> LazyColumn(Modifier.fillMaxSize()) {
                         items(state.visible, key = { it.id }) { payout ->
@@ -366,9 +422,8 @@ fun PayoutListScreen(
                                 PayoutRow(
                                     payout = payout,
                                     busy = state.busyId == payout.id,
-                                    onApprove = { approve(payout) },
-                                    onMarkPaid = { viewModel.markPaid(payout) },
-                                    onCancel = { viewModel.requestCancel(payout) },
+                                    canManage = viewModel.canManage,
+                                    onAction = { action -> viewModel.request(action, payout) },
                                 )
                                 ThinDivider()
                             }
@@ -379,16 +434,71 @@ fun PayoutListScreen(
         }
     }
 
-    state.pendingCancel?.let { target ->
-        ConfirmDialog(
-            title = "Cancel payout?",
-            message = "${TextUtil.middleEllipsis(target.destination, 14, 10)} will not be paid. " +
-                "This cannot be undone.",
-            confirmLabel = "Cancel payout",
-            onConfirm = viewModel::confirmCancel,
-            onDismiss = viewModel::dismissCancel,
-            destructive = true,
-        )
+    state.pending?.let { (action, payout) ->
+        val store = "Store" to viewModel.storeName
+        val source = "Source" to (payout.pullPaymentId?.let { "Pull payment $it" } ?: "Direct payout")
+        when (action) {
+            // Approving commits the store to paying, and a processor may pay
+            // at once. So the whole destination is shown first, then the same
+            // prompt as a send, which fails closed.
+            PayoutAction.Approve -> PayoutReviewDialog(
+                title = "Approve this payout?",
+                amount = payout.originalAmount,
+                currency = payout.originalCurrency,
+                payoutMethodId = payout.payoutMethodId,
+                destination = payout.destination,
+                details = listOf(store, source) + approveRateLines(payout, state.approveRate, unit),
+                confirmLabel = "Approve",
+                // Not before the rate is known or known to be missing: it
+                // sets how much the approval pays.
+                confirmEnabled = approveRatePair(payout) == null || state.approveRate?.payoutId == payout.id,
+                onDismiss = viewModel::dismissPending,
+                onConfirm = {
+                    viewModel.dismissPending()
+                    val subtitle = payoutPrompt(
+                        reviewAmount(payout.originalAmount, payout.originalCurrency, unit),
+                        viewModel.storeName,
+                        payout.destination,
+                    )
+                    scope.afterSpendGate(gate, "Confirm payout", subtitle, viewModel::reportMessage) {
+                        viewModel.approve(payout)
+                    }
+                },
+            )
+
+            // Irreversible: the server refuses any later change to a
+            // completed payout, so a processor will never pay it. Reviewed as
+            // an approval is, so a tap on the wrong row shows whose it is.
+            PayoutAction.MarkPaid -> PayoutReviewDialog(
+                title = "Mark as paid?",
+                message = "The server records this payout as paid and will not send it. This cannot be undone.",
+                amount = payout.originalAmount,
+                currency = payout.originalCurrency,
+                payoutMethodId = payout.payoutMethodId,
+                destination = payout.destination,
+                details = listOf(store, source),
+                confirmLabel = "Mark paid",
+                destructive = true,
+                onDismiss = viewModel::dismissPending,
+                onConfirm = {
+                    viewModel.dismissPending()
+                    viewModel.markPaid(payout)
+                },
+            )
+
+            PayoutAction.Cancel -> ConfirmDialog(
+                title = "Cancel payout?",
+                message = "${TextUtil.middleEllipsis(payout.destination, 14, 10)} will not be paid. " +
+                    "This cannot be undone.",
+                confirmLabel = "Cancel payout",
+                onConfirm = {
+                    viewModel.dismissPending()
+                    viewModel.cancel(payout)
+                },
+                onDismiss = viewModel::dismissPending,
+                destructive = true,
+            )
+        }
     }
 }
 
@@ -396,14 +506,15 @@ fun PayoutListScreen(
 private fun PayoutRow(
     payout: PayoutData,
     busy: Boolean,
-    onApprove: () -> Unit,
-    onMarkPaid: () -> Unit,
-    onCancel: () -> Unit,
+    canManage: Boolean,
+    onAction: (PayoutAction) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     val canApprove = payout.state == PayoutState.AwaitingApproval
     val canMarkPaid = payout.state == PayoutState.AwaitingPayment || payout.state == PayoutState.InProgress
-    val canCancel = canApprove || canMarkPaid
+    // Not InProgress: a transaction is already out, and the server refuses to
+    // cancel it.
+    val canCancel = canApprove || payout.state == PayoutState.AwaitingPayment
 
     Row(
         modifier = Modifier.fillMaxWidth().padding(start = 16.dp, top = 12.dp, bottom = 12.dp),
@@ -454,7 +565,7 @@ private fun PayoutRow(
         // for it, which is the one moment on this row worth animating.
         val tail = when {
             busy -> PayoutRowTail.Busy
-            canCancel -> PayoutRowTail.Menu
+            canManage && (canApprove || canMarkPaid || canCancel) -> PayoutRowTail.Menu
             else -> PayoutRowTail.None
         }
 
@@ -474,7 +585,7 @@ private fun PayoutRow(
                                 leadingIcon = { Icon(Icons.Rounded.Check, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
-                                    onApprove()
+                                    onAction(PayoutAction.Approve)
                                 },
                             )
                         }
@@ -484,18 +595,20 @@ private fun PayoutRow(
                                 leadingIcon = { Icon(Icons.Rounded.Done, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
-                                    onMarkPaid()
+                                    onAction(PayoutAction.MarkPaid)
                                 },
                             )
                         }
-                        DropdownMenuItem(
-                            text = { Text("Cancel") },
-                            leadingIcon = { Icon(Icons.Rounded.Cancel, contentDescription = null) },
-                            onClick = {
-                                menuOpen = false
-                                onCancel()
-                            },
-                        )
+                        if (canCancel) {
+                            DropdownMenuItem(
+                                text = { Text("Cancel") },
+                                leadingIcon = { Icon(Icons.Rounded.Cancel, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    onAction(PayoutAction.Cancel)
+                                },
+                            )
+                        }
                     }
                 }
 
@@ -503,4 +616,94 @@ private fun PayoutRow(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The payout review, shared with PayoutCreateScreen
+// ---------------------------------------------------------------------------
+
+/**
+ * [amount] as a payout review and its spend prompt show it: BTC in the user's
+ * unit, any other currency in its own. Never masked, not even in privacy mode:
+ * the review is where the operator reads the amount before it is committed,
+ * as on the send screens.
+ */
+internal fun reviewAmount(amount: BigDecimal, currency: String, unit: BitcoinUnit): String =
+    if (currency.equals("BTC", ignoreCase = true)) Amounts.formatBitcoin(amount, unit) else Amounts.format(amount, currency)
+
+/**
+ * The review lines for the rate of a payout priced in another currency than
+ * the coin it pays: the store's rate now and about what the approval pays at
+ * it. Empty when the payout is priced in its coin.
+ */
+private fun approveRateLines(payout: PayoutData, known: ApproveRate?, unit: BitcoinUnit): List<Pair<String, String>> {
+    if (approveRatePair(payout) == null) return emptyList()
+    val coin = cryptoCodeOf(payout.payoutMethodId).uppercase()
+    val rate = known?.takeIf { it.payoutId == payout.id } ?: return listOf("Rate now" to "Loading…")
+    val value = rate.rate ?: return listOf("Rate now" to "Not known")
+    return listOf(
+        "Rate now" to "1 $coin = ${Amounts.format(value, payout.originalCurrency)}",
+        "About" to reviewAmount(payout.originalAmount.divide(value, 8, RoundingMode.HALF_UP), coin, unit),
+    )
+}
+
+/** The spend prompt's subtitle for a payout: what it pays, from which store, and to whom, as the review showed them. */
+internal fun payoutPrompt(amount: String, store: String, destination: String): String =
+    "Pay $amount from $store to ${TextUtil.middleEllipsis(destination, 8, 6)}"
+
+/**
+ * The review in front of every payout this app approves, marks paid or
+ * creates: amount, method, [details] and the full destination, after
+ * [message] when the title alone does not say what happens. The content
+ * scrolls, so a 300-character BOLT11 is readable to its end on a small phone.
+ */
+@Composable
+internal fun PayoutReviewDialog(
+    title: String,
+    amount: BigDecimal,
+    currency: String,
+    payoutMethodId: String,
+    destination: String,
+    details: List<Pair<String, String>>,
+    confirmLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    message: String? = null,
+    destructive: Boolean = false,
+    confirmEnabled: Boolean = true,
+) {
+    val unit = LocalSettings.current.bitcoinUnit
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                message?.let { Text(it) }
+                ReviewLine("Amount") {
+                    Text(reviewAmount(amount, currency, unit), style = MaterialTheme.typography.titleMedium)
+                }
+                ReviewLine("Method") { Text(payoutMethodLabel(payoutMethodId), style = MaterialTheme.typography.bodyLarge) }
+                details.forEach { (label, value) ->
+                    ReviewLine(label) { Text(value, style = MaterialTheme.typography.bodyLarge) }
+                }
+                ReviewLine("Destination") { Text(reviewDestination(destination), style = MonospaceStyle) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm, enabled = confirmEnabled) {
+                Text(
+                    text = confirmLabel,
+                    color = when {
+                        !confirmEnabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                        destructive -> MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.primary
+                    },
+                )
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

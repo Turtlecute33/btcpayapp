@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,15 +46,22 @@ import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.dto.InvoiceAdditionalStatus
 import com.btcpayapp.data.api.dto.InvoiceData
 import com.btcpayapp.data.api.dto.InvoicePaymentMethodData
 import com.btcpayapp.data.api.dto.InvoiceStatus
+import com.btcpayapp.data.api.dto.PaymentData
+import com.btcpayapp.data.api.dto.PaymentStatus
 import com.btcpayapp.data.api.endpoints.archiveInvoice
-import com.btcpayapp.data.api.endpoints.invoice
+import com.btcpayapp.data.api.endpoints.invoiceWithPaymentMethods
 import com.btcpayapp.data.api.endpoints.markInvoiceStatus
 import com.btcpayapp.data.api.endpoints.unarchiveInvoice
+import com.btcpayapp.data.model.BitcoinUnit
+import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
+import com.btcpayapp.ui.components.AmountText
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppCard
 import com.btcpayapp.ui.components.AppScreen
@@ -67,9 +75,14 @@ import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.StatusChip
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.components.continuity
+import com.btcpayapp.ui.components.maskedIfPrivate
+import com.btcpayapp.ui.components.rememberSpendGate
 import com.btcpayapp.ui.theme.AppTheme
+import java.math.BigDecimal
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterNotNull
@@ -82,6 +95,8 @@ import kotlinx.serialization.json.JsonPrimitive
 data class InvoiceDetailState(
     val invoice: InvoiceData? = null,
     val loading: Boolean = true,
+    /** A pull to refresh is running; before, the indicator snapped back at once. */
+    val refreshing: Boolean = false,
     val working: Boolean = false,
     val error: ApiException? = null,
 )
@@ -94,32 +109,40 @@ class InvoiceDetailViewModel(
     private val _state = MutableStateFlow(InvoiceDetailState())
     val state = _state.asStateFlow()
 
-    val baseUrl: String? get() = graph.session.activeAccount.value?.baseUrl
+    /**
+     * The store this screen was opened in, taken once.
+     *
+     * Waited for instead of silently given up on: `activeStore` starts null
+     * and only becomes non-null once `/stores` returns. Opening this screen
+     * from a payment notification or a launcher shortcut on a cold start would
+     * otherwise find no store, return from `load()` without clearing
+     * `loading`, and spin forever with no retry. Taken once, because the shell
+     * closes this screen when the store changes: a later store is one this
+     * invoice is not in.
+     */
+    private val storeId = viewModelScope.async { graph.session.activeStore.filterNotNull().first().id }
 
     init {
         load()
     }
 
-    /**
-     * Waits for the store instead of silently giving up.
-     *
-     * `activeStore` starts null and only becomes non-null once `/stores`
-     * returns. Opening this screen from a payment notification or a launcher
-     * shortcut on a cold start would otherwise find no store, return from
-     * `load()` without clearing `loading`, and spin forever with no retry.
-     */
-    private suspend fun awaitStoreId(): String =
-        graph.session.activeStore.filterNotNull().first().id
+    /** Pull to refresh: the same read, with the indicator up until it lands. */
+    fun refresh() {
+        _state.update { it.copy(refreshing = true) }
+        load()
+    }
 
     fun load() {
         viewModelScope.launch {
-            val storeId = awaitStoreId()
             runCatching {
-                graph.session.requireApi().invoice(storeId, invoiceId, includePaymentMethods = true)
+                // With the payment methods on every 2.x; before 2.4.1 the
+                // flag alone brings none, and the payments below stay empty.
+                graph.session.requireApi().invoiceWithPaymentMethods(storeId.await(), invoiceId)
             }.onSuccess { data ->
-                _state.update { it.copy(invoice = data, loading = false, error = null) }
+                _state.update { it.copy(invoice = data, loading = false, refreshing = false, error = null) }
             }.onFailure { failure ->
-                _state.update { it.copy(loading = false, error = failure.asApiException()) }
+                val error = failure.asApiException()
+                _state.update { it.copy(loading = false, refreshing = false, error = error) }
             }
         }
     }
@@ -130,7 +153,6 @@ class InvoiceDetailViewModel(
 
     fun archive() = mutate { api, storeId ->
         api.archiveInvoice(storeId, invoiceId)
-        api.invoice(storeId, invoiceId, includePaymentMethods = true)
     }
 
     fun unarchive() = mutate { api, storeId ->
@@ -139,12 +161,26 @@ class InvoiceDetailViewModel(
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
-    private fun mutate(block: suspend (com.btcpayapp.data.api.BtcPayApi, String) -> Any?) {
-        val storeId = graph.session.activeStore.value?.id ?: return
+    /**
+     * The name of the store [invoice] is in, for a confirmation that must say
+     * whose invoice it changes. Found by the invoice's own store id: the
+     * invoice was loaded from the store every change goes to.
+     */
+    fun storeName(invoice: InvoiceData): String =
+        graph.session.stores.value.firstOrNull { it.id == invoice.storeId }?.name?.takeIf(String::isNotBlank)
+            ?: invoice.storeId.ifBlank { "this store" }
+
+    private fun mutate(block: suspend (BtcPayApi, String) -> Any?) {
+        // The menu stays open to taps while a change runs, so a second change
+        // is dropped here instead of being sent next to the first.
+        if (_state.value.working) return
+        _state.update { it.copy(working = true, error = null) }
         viewModelScope.launch {
-            _state.update { it.copy(working = true, error = null) }
-            runCatching { block(graph.session.requireApi(), storeId) }
-                .onFailure { failure -> _state.update { it.copy(error = failure.asApiException()) } }
+            runCatching { block(graph.session.requireApi(), storeId.await()) }
+                .onFailure { failure ->
+                    val error = failure.asApiException()
+                    _state.update { it.copy(error = error) }
+                }
             _state.update { it.copy(working = false) }
             load()
         }
@@ -171,6 +207,9 @@ fun InvoiceDetailScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
+    val unit = LocalSettings.current.bitcoinUnit
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     var menuOpen by remember { mutableStateOf(false) }
     var confirming by remember { mutableStateOf<InvoiceStatus?>(null) }
@@ -180,8 +219,8 @@ fun InvoiceDetailScreen(
         subtitle = TextUtil.middleEllipsis(invoiceId, 8, 6),
         onBack = onBack,
         snackbarHostState = snackbarHostState,
-        onRefresh = viewModel::load,
-        refreshing = state.working,
+        onRefresh = viewModel::refresh,
+        refreshing = state.refreshing || state.working,
         actions = {
             val invoice = state.invoice
             if (invoice?.isOpen == true) {
@@ -209,7 +248,7 @@ fun InvoiceDetailScreen(
                         },
                     )
                 }
-                if (invoice?.isSettled == true) {
+                if (invoice?.offersRefund == true) {
                     DropdownMenuItem(
                         text = { Text("Refund") },
                         leadingIcon = { Icon(Icons.AutoMirrored.Rounded.Undo, contentDescription = null) },
@@ -285,7 +324,7 @@ fun InvoiceDetailScreen(
                         DetailRow("Expires", Dates.full(invoice.expirationTime))
                         DetailRow("Monitoring until", Dates.full(invoice.monitoringExpiration))
                         DetailRow("Type", invoice.type.name)
-                        if (invoice.additionalStatus != com.btcpayapp.data.api.dto.InvoiceAdditionalStatus.None) {
+                        if (invoice.additionalStatus != InvoiceAdditionalStatus.None) {
                             DetailRow("Detail", TextUtil.sentenceCase(invoice.additionalStatus.name))
                         }
                         if (invoice.archived) DetailRow("Archived", "Yes")
@@ -308,57 +347,27 @@ fun InvoiceDetailScreen(
                         }
                     }
 
-                    val payments = invoice.paymentMethods.orEmpty().flatMap { it.payments }
-                    if (payments.isNotEmpty()) {
+                    // Under their method, each in its unit. Flattened into one
+                    // list, "0.00012" could be BTC on-chain, BTC over Lightning
+                    // or another chain, and a refund is decided on exactly
+                    // that.
+                    val paidMethods = invoice.paymentMethods.orEmpty().filter { it.payments.isNotEmpty() }
+                    if (paidMethods.isNotEmpty()) {
                         Column(Modifier.fillMaxWidth().arrive(3)) {
                             SectionHeader("Payments")
-                            payments.forEach { payment ->
-                                AppCard {
-                                    Column(Modifier.padding(16.dp)) {
-                                        Row(
-                                            Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Text(
-                                                text = Amounts.trim(payment.value, 8),
-                                                style = MaterialTheme.typography.titleMedium,
-                                            )
-                                            StatusPill(
-                                                label = payment.status.name,
-                                                container = when (payment.status) {
-                                                    com.btcpayapp.data.api.dto.PaymentStatus.Settled -> AppTheme.statusColors.settled
-                                                    com.btcpayapp.data.api.dto.PaymentStatus.Processing -> AppTheme.statusColors.pending
-                                                    else -> AppTheme.statusColors.invalid
-                                                },
-                                                content = when (payment.status) {
-                                                    com.btcpayapp.data.api.dto.PaymentStatus.Settled -> AppTheme.statusColors.onSettled
-                                                    com.btcpayapp.data.api.dto.PaymentStatus.Processing -> AppTheme.statusColors.onPending
-                                                    else -> AppTheme.statusColors.onInvalid
-                                                },
-                                            )
-                                        }
-                                        Spacer(Modifier.height(8.dp))
-                                        Text(
-                                            text = Dates.full(payment.receivedDate),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                        if (payment.destination.isNotBlank()) {
-                                            Spacer(Modifier.height(8.dp))
-                                            CopyableField(
-                                                label = "Destination",
-                                                value = payment.destination,
-                                                truncate = true,
-                                            )
-                                        }
-                                    }
-                                }
+                            paidMethods.forEach { method ->
+                                Text(
+                                    text = method.paymentMethodId,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                method.payments.forEach { payment -> PaymentCard(payment, method.currency) }
                             }
                         }
                     }
 
-                    if (invoice.isSettled) {
+                    if (invoice.offersRefund) {
                         Column(Modifier.fillMaxWidth().arrive(4)) {
                             Spacer(Modifier.height(16.dp))
                             OutlinedButton(
@@ -378,15 +387,42 @@ fun InvoiceDetailScreen(
         }
     }
 
-    confirming?.let { status ->
+    // The menu offers a mark only once the invoice has loaded, and it is never
+    // unloaded, so both are known here.
+    val status = confirming
+    val invoice = state.invoice
+    if (status != null && invoice != null) {
+        // Settled makes the invoice count as paid, and a shop or a webhook may
+        // then hand over the goods. So it is checked as a payment is: the
+        // invoice, amount and store in full, not masked in privacy mode, then
+        // the spend prompt.
+        val settles = status == InvoiceStatus.Settled
+        val amount = methodAmountText(invoice.amount, invoice.currency, unit)
+        val store = viewModel.storeName(invoice)
         ConfirmDialog(
             title = "Mark as ${status.name.lowercase()}?",
-            message = "This overrides what the server observed on chain. It cannot be undone from here.",
+            message = if (settles) {
+                "Invoice: ${invoice.id}\nAmount: $amount\nStore: $store\n\n" +
+                    "It then counts as paid, whatever the server has seen. It cannot be undone from here."
+            } else {
+                "This overrides what the server observed on chain. It cannot be undone from here."
+            },
             confirmLabel = "Mark",
             destructive = status == InvoiceStatus.Invalid,
             onConfirm = {
-                viewModel.mark(status)
-                confirming = null
+                // Two taps in one frame both land here. Only the first finds
+                // the mark still open, so one review never asks or sends twice.
+                if (confirming != null) {
+                    confirming = null
+                    if (settles) {
+                        val subtitle = "$amount, invoice ${TextUtil.middleEllipsis(invoice.id, 8, 6)}, $store"
+                        scope.afterSpendGate(gate, "Confirm settled invoice", subtitle, { snackbarHostState.showSnackbar(it) }) {
+                            viewModel.mark(status)
+                        }
+                    } else {
+                        viewModel.mark(status)
+                    }
+                }
             },
             onDismiss = { confirming = null },
         )
@@ -403,8 +439,12 @@ private fun Header(invoice: InvoiceData) {
         // built from the invoice id and the element's role, and must match the
         // row's exactly; a mismatch is not an error, it is a transition that
         // silently stops happening.
-        Text(
-            text = Amounts.format(invoice.amount, invoice.currency),
+        //
+        // Drawn by AmountText, like the row, so privacy mode masks it and the
+        // row's figure and this one are the same text.
+        AmountText(
+            amount = invoice.amount,
+            currency = invoice.currency,
             modifier = Modifier.continuity("invoice-amount-${invoice.id}"),
             style = MaterialTheme.typography.displaySmall,
         )
@@ -412,11 +452,13 @@ private fun Header(invoice: InvoiceData) {
         StatusChip(
             status = invoice.status,
             modifier = Modifier.continuity("invoice-status-${invoice.id}"),
+            detail = invoice.statusDetail(),
         )
         if (invoice.paidAmount.signum() > 0 && invoice.paidAmount.compareTo(invoice.amount) != 0) {
             Spacer(Modifier.height(8.dp))
-            Text(
-                text = "${Amounts.format(invoice.paidAmount, invoice.currency)} paid",
+            AmountPaid(
+                amount = invoice.paidAmount,
+                currency = invoice.currency,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -446,10 +488,14 @@ private fun MetadataSection(metadata: JsonObject) {
         )
     }
 
+    // The tip is the one amount this app writes into metadata (the Terminal
+    // does), so privacy mode masks it with the others.
+    val privacy = LocalSettings.current.privacyMode
     val entries = metadata.entries
         .mapNotNull { (key, value) ->
             (value as? JsonPrimitive)?.content
                 ?.takeIf { it.isNotBlank() && it != "null" }
+                ?.let { if (privacy && key == "tipAmount") Amounts.MASK else it }
                 ?.let { (known[key] ?: TextUtil.sentenceCase(key)) to it }
         }
 
@@ -461,6 +507,7 @@ private fun MetadataSection(metadata: JsonObject) {
 
 @Composable
 private fun PaymentMethodCard(method: InvoicePaymentMethodData, invoiceCurrency: String) {
+    val unit = LocalSettings.current.bitcoinUnit
     AppCard {
         Column(Modifier.padding(16.dp)) {
             Row(
@@ -478,13 +525,15 @@ private fun PaymentMethodCard(method: InvoicePaymentMethodData, invoiceCurrency:
                 }
             }
             Spacer(Modifier.height(8.dp))
-            DetailRow("Due", "${Amounts.trim(method.due, 8)} ${method.currency}")
-            DetailRow("Paid", "${Amounts.trim(method.totalPaid, 8)} ${method.currency}")
+            DetailRow("Due", maskedIfPrivate(methodAmountText(method.due, method.currency, unit)))
+            DetailRow("Paid", maskedIfPrivate(methodAmountText(method.totalPaid, method.currency, unit)))
             if (method.paymentMethodFee.signum() > 0) {
-                DetailRow("Network fee", "${Amounts.trim(method.paymentMethodFee, 8)} ${method.currency}")
+                val fee = methodAmountText(method.paymentMethodFee, method.currency, unit)
+                DetailRow("Network fee", maskedIfPrivate(fee))
             }
             if (method.rate.signum() > 0) {
-                DetailRow("Rate", "${Amounts.format(method.rate, invoiceCurrency)} / ${method.currency}")
+                val rate = maskedIfPrivate(Amounts.format(method.rate, invoiceCurrency))
+                DetailRow("Rate", "$rate / ${method.currency}")
             }
             if (method.destination.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
@@ -493,3 +542,77 @@ private fun PaymentMethodCard(method: InvoicePaymentMethodData, invoiceCurrency:
         }
     }
 }
+
+@Composable
+private fun PaymentCard(payment: PaymentData, currency: String) {
+    val unit = LocalSettings.current.bitcoinUnit
+    AppCard {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = maskedIfPrivate(methodAmountText(payment.value, currency, unit)),
+                    style = MaterialTheme.typography.titleMedium,
+                )
+                StatusPill(
+                    label = payment.status.name,
+                    container = when (payment.status) {
+                        PaymentStatus.Settled -> AppTheme.statusColors.settled
+                        PaymentStatus.Processing -> AppTheme.statusColors.pending
+                        else -> AppTheme.statusColors.invalid
+                    },
+                    content = when (payment.status) {
+                        PaymentStatus.Settled -> AppTheme.statusColors.onSettled
+                        PaymentStatus.Processing -> AppTheme.statusColors.onPending
+                        else -> AppTheme.statusColors.onInvalid
+                    },
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = Dates.full(payment.receivedDate),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (payment.destination.isNotBlank()) {
+                Spacer(Modifier.height(8.dp))
+                CopyableField(
+                    label = "Destination",
+                    value = payment.destination,
+                    truncate = true,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A payment method's figure in its own unit: BTC in the unit the user chose
+ * (sat by default, as on Home and in the wallet), any other chain with its
+ * code. Shared with the checkout, so one payment does not read "12,345 sat"
+ * on one screen and "0.00012345 BTC" on the next.
+ */
+internal fun methodAmountText(value: BigDecimal, cryptoCode: String, unit: BitcoinUnit): String =
+    if (cryptoCode.equals("BTC", ignoreCase = true)) {
+        Amounts.formatBitcoin(value, unit)
+    } else {
+        Amounts.format(value, cryptoCode)
+    }
+
+/**
+ * Whether the server will refund this invoice: its `InvoiceState.CanRefund()`
+ * allows settled and invalid invoices, and expired ones that still took money.
+ * When only settled invoices offered a refund, an underpayment (a wallet that
+ * took its fee out of the amount) could not be returned from the counter.
+ */
+internal val InvoiceData.offersRefund: Boolean
+    get() = when (status) {
+        InvoiceStatus.Settled, InvoiceStatus.Invalid -> true
+        InvoiceStatus.Expired -> additionalStatus == InvoiceAdditionalStatus.PaidPartial ||
+            additionalStatus == InvoiceAdditionalStatus.PaidLate ||
+            additionalStatus == InvoiceAdditionalStatus.PaidOver
+        InvoiceStatus.New, InvoiceStatus.Processing, InvoiceStatus.Unknown -> false
+    }

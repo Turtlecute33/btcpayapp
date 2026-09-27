@@ -162,15 +162,55 @@ class NodeDirectoryTest {
         }
     }
 
-    private fun fold(name: String) = name.lowercase().filter { it.isLetterOrDigit() }
+    @Test
+    fun `the shipped table is the one the manifest describes`() {
+        // An asset edited by hand, or regenerated without its manifest, would
+        // carry names nobody can trace back to a source and a script.
+        val manifest = repoFile("scripts/lnnodes.manifest.json").readText()
+        val expected = Regex("\"sha256\"\\s*:\\s*\"([0-9a-f]{64})\"").find(manifest)?.groupValues?.get(1)
+            ?: error("no sha256 in the manifest")
+        val actual = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(repoFile("app/src/main/assets/lnnodes.bin").readBytes())
+            .joinToString("") { "%02x".format(it) }
+        assertEquals(expected, actual)
+    }
+
+    @Test
+    fun `the comparison form sees through look-alike letters`() {
+        // Cyrillic К, full-width and mathematical bold: each reads as "Kraken".
+        listOf("\u041Araken", "Ｋｒａｋｅｎ", "𝐊𝐫𝐚𝐤𝐞𝐧", "K.R.A.K.E.N").forEach { name ->
+            assertEquals(name, "kraken", fold(name))
+        }
+    }
+
+    /**
+     * The generator's comparison form, `fold` in scripts/build-node-directory.rb:
+     * NFKC turns full-width and mathematical letters into ASCII, then the
+     * script's CONFUSABLES table folds the Cyrillic and Greek look-alikes that
+     * NFKC leaves alone, and only letters and digits stay (Ruby's [[:alnum:]]).
+     */
+    private fun fold(name: String): String =
+        java.text.Normalizer.normalize(name, java.text.Normalizer.Form.NFKC).lowercase()
+            .map { confusables[it] ?: it }.joinToString("")
+            .replace(Regex("[^\\p{IsAlphabetic}\\p{IsDigit}]"), "")
+
+    /** Read from the script, so the test cannot fold less than the generator does. */
+    private val confusables: Map<Char, Char> by lazy {
+        val table = repoFile("scripts/build-node-directory.rb").readText()
+            .substringAfter("CONFUSABLES = {").substringBefore("}.freeze")
+        Regex("'(.)' => '(.)'").findAll(table)
+            .associate { it.groupValues[1].single() to it.groupValues[2].single() }
+            .also { check(it.isNotEmpty()) { "no CONFUSABLES table in the generator" } }
+    }
 
     private fun shippedIndex(): NodeIndex {
-        val file = listOf(
-            File("src/main/assets/lnnodes.bin"),
-            File("app/src/main/assets/lnnodes.bin"),
-        ).firstOrNull { it.isFile } ?: error("lnnodes.bin not found")
+        val file = repoFile("app/src/main/assets/lnnodes.bin")
         return NodeIndex.parse(ByteBuffer.wrap(file.readBytes())) ?: error("unreadable directory")
     }
+
+    /** Unit tests run from the module directory under Gradle and from the root in some IDEs. */
+    private fun repoFile(path: String): File =
+        listOf(File("../$path"), File(path)).firstOrNull { it.isFile } ?: error("$path not found")
 
     // --- Normalisation -----------------------------------------------------
 

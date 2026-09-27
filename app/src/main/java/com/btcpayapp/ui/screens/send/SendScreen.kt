@@ -1,5 +1,6 @@
 package com.btcpayapp.ui.screens.send
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -37,6 +38,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.btcpayapp.core.scan.ScanParser
 import com.btcpayapp.core.scan.ScannedPayload
+import com.btcpayapp.core.util.Amounts
+import com.btcpayapp.data.model.BitcoinUnit
 import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
@@ -47,8 +50,9 @@ import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.chainSubtitle
 import com.btcpayapp.ui.components.rememberLast
 import com.btcpayapp.ui.nav.ScanPurpose
-import com.btcpayapp.ui.screens.lightning.NoStoreSelectedState
+import com.btcpayapp.ui.components.NoStoreSelectedState
 import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
+import com.btcpayapp.ui.screens.wallet.parseAmountToBtc
 import com.btcpayapp.ui.theme.Motion
 
 /** The two ways money leaves a BTCPay store. */
@@ -62,7 +66,7 @@ enum class SendRail { OnChain, Lightning }
  *
  * [preferOnChain] settles the one code that is honestly both: a BIP21 URI
  * carrying an address *and* a `lightning=` invoice. The address wins when there
- * is an on-chain wallet to pay it from, because that is the half every wallet
+ * is an on-chain wallet that can pay it, because that is the half every wallet
  * can read; the invoice is then offered as the alternative rather than lost.
  */
 internal fun railFor(payload: ScannedPayload, preferOnChain: Boolean): SendRail? = when (payload) {
@@ -80,8 +84,27 @@ internal fun railFor(payload: ScannedPayload, preferOnChain: Boolean): SendRail?
     else -> null
 }
 
-/** What the screen is showing: the form, or what came back from the node. */
-private enum class SendPhase { NoRail, NoStore, Paid, Form }
+/**
+ * The field error for a typed amount, or null when it is blank or fine.
+ *
+ * One rule for both rails. [Amounts.parseProblem] catches the shape that reads
+ * two ways ("10,000" sat), and the rest says what to change rather than "not a
+ * number": a sat amount cannot have decimals, and BTC has eight.
+ */
+internal fun amountProblem(input: String, unit: BitcoinUnit, cryptoCode: String = "BTC"): String? {
+    if (input.isBlank()) return null
+    Amounts.parseProblem(input)?.let { return it }
+    val btc = parseAmountToBtc(input, unit, cryptoCode)
+    return when {
+        btc != null && btc.signum() > 0 -> null
+        btc != null || Amounts.parse(input)?.signum() == -1 -> "Enter an amount greater than zero."
+        unit == BitcoinUnit.Sat && cryptoCode.equals("BTC", ignoreCase = true) -> "Enter a whole number of sats."
+        else -> "Use at most 8 decimal places."
+    }
+}
+
+/** What the screen is showing: the form, or what came back from the node or the network. */
+private enum class SendPhase { NoRail, NoStore, Paid, Tracking, OnChainOutcome, Form }
 
 /**
  * Which form is on screen, and whether it is a form at all.
@@ -91,7 +114,7 @@ private enum class SendPhase { NoRail, NoStore, Paid, Form }
  * watch-only explanation is the same kind of change as switching rails, and
  * animating them separately would make the two cross-fades collide.
  */
-private enum class SendSlot { OnChain, OnChainWatchOnly, Lightning, LightningReadOnly }
+private enum class SendSlot { OnChain, OnChainWatchOnly, OnChainNeedsUpdate, Lightning, LightningReadOnly }
 
 /**
  * One Send screen for both rails.
@@ -119,7 +142,6 @@ fun SendScreen(
     onSent: () -> Unit,
 ) {
     val graph = LocalAppGraph.current
-    val settings = LocalSettings.current
 
     val onChainViewModel = paymentMethodId?.let { id ->
         appViewModel(key = "send-$id") { WalletSendViewModel(it, id) }
@@ -138,6 +160,8 @@ fun SendScreen(
     // open. The permission is a store one, so it says nothing about the
     // server's own node — that form is left alone rather than wrongly refused.
     val canUseNode = remember { serverNode || graph.session.canSpendLightning() }
+    // Read once too: the shell closes this screen when the store changes.
+    val storeName = remember { graph.session.activeStore.value?.name?.takeIf { it.isNotBlank() } }
 
     var rail by rememberSaveable {
         mutableStateOf(
@@ -156,15 +180,26 @@ fun SendScreen(
     // so that switching rails can hand the other half over.
     var unified by rememberSaveable { mutableStateOf<String?>(null) }
 
+    // While either rail is paying, nothing may switch or refill the other.
+    // Both halves of a unified code pay the same invoice, so the other half
+    // could pay it a second time.
+    val paying = lightningState?.let { it.sending || it.tracking != null } == true ||
+        (onChainState != null && onChainState.phase != OnChainPhase.Form)
+
     /** Files a destination under the rail that can actually pay it. */
     fun receive(text: String) {
+        if (paying) return
         val payload = ScanParser.parse(text)
         notice = null
         unified = (payload as? ScannedPayload.Bip21)
             ?.takeIf { it.address.isNotBlank() && it.lightning != null }
             ?.raw
 
-        val wanted = railFor(payload, preferOnChain = hasOnChain)
+        // Only a wallet that can spend takes the address half of a unified
+        // code. A watch-only wallet (or one on a server too old to broadcast)
+        // would land the sender on an explanation, with the payable invoice
+        // one switch away and nothing saying so.
+        val wanted = railFor(payload, preferOnChain = hasOnChain && onChainState?.spendable == true)
         val target = when {
             wanted == null -> rail
             wanted == SendRail.Lightning && !hasLightning -> {
@@ -204,19 +239,16 @@ fun SendScreen(
                     onChainViewModel?.setDestination(text)
                 }
 
-            SendRail.Lightning -> {
-                val wrapped = (payload as? ScannedPayload.Bip21)?.lightning
-                lightningViewModel?.setBolt11(wrapped ?: text)
-                // Kept in the field and explained underneath, rather than
-                // dropped: this rail is the right one for an LNURL, and the
-                // node still cannot be asked to pay it.
-                if (payload is ScannedPayload.Lnurl) lightningViewModel?.noteLnurl()
-            }
+            // An LNURL or a Lightning address stays in the field: this is the
+            // right rail for it, and the form says under the field why the
+            // node cannot be asked to pay it.
+            SendRail.Lightning ->
+                lightningViewModel?.setBolt11((payload as? ScannedPayload.Bip21)?.lightning ?: text)
         }
     }
 
     fun select(next: SendRail) {
-        if (next == rail) return
+        if (paying || next == rail) return
         // A rail this store does not have has no form to show, so nothing may
         // put the screen on one — not the switch, and not the offer to use the
         // other half of a code.
@@ -236,22 +268,55 @@ fun SendScreen(
         }
     }
 
-    LaunchedEffect(prefill) { prefill?.takeIf { it.isNotBlank() }?.let(::receive) }
-    LaunchedEffect(scanResult) { scanResult?.takeIf { it.isNotBlank() }?.let(::receive) }
-
-    val subtitle = when (rail) {
-        SendRail.OnChain -> chainSubtitle(onChainCryptoCode)
-        SendRail.Lightning -> chainSubtitle(
-            cryptoCode = lightningCryptoCode.orEmpty(),
-            prefix = "Server node".takeIf { serverNode },
-        )
+    /**
+     * After a Lightning result, nothing of the code that was just paid may
+     * stay behind. A unified code is one invoice with two ways to pay it: with
+     * its address and amount still on the on-chain form, "Use on-chain" would
+     * offer to pay the same invoice a second time.
+     */
+    fun payAnother() {
+        lightningViewModel?.reset()
+        unified = null
+        notice = null
+        onChainViewModel?.clearForm()
     }
 
-    AppScreen(title = "Send", subtitle = subtitle, onBack = onBack) { padding ->
+    // Once per visit. This screen leaves composition while the scanner is open
+    // or the app is locked, and coming back must not put back a code that
+    // "Pay another" cleared.
+    var prefillApplied by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(prefill) {
+        if (!prefillApplied) {
+            prefillApplied = true
+            prefill?.takeIf { it.isNotBlank() }?.let(::receive)
+        }
+    }
+    LaunchedEffect(scanResult) { scanResult?.takeIf { it.isNotBlank() }?.let(::receive) }
+
+    // A request that decides whether money moved is running. Leaving would
+    // cancel it with the view model and lose its answer, which is the one
+    // thing the sender needs, so back waits until the answer is in.
+    val busy = onChainState?.phase?.isWorking == true || lightningState?.sending == true
+    BackHandler(enabled = busy) {}
+    val leave: () -> Unit = { if (!busy) onBack() }
+
+    // The store is named because a multi-store operator must see which
+    // store's wallet pays; the server's own node belongs to no store.
+    val subtitle = when (rail) {
+        SendRail.OnChain -> listOfNotNull(storeName, chainSubtitle(onChainCryptoCode))
+        SendRail.Lightning -> listOfNotNull(
+            storeName.takeUnless { serverNode },
+            chainSubtitle(cryptoCode = lightningCryptoCode.orEmpty(), prefix = "Server node".takeIf { serverNode }),
+        )
+    }.joinToString(" · ").ifBlank { null }
+
+    AppScreen(title = "Send", subtitle = subtitle, onBack = leave) { padding ->
         val phase = when {
             !hasOnChain && !hasLightning -> SendPhase.NoRail
-            lightningState?.noStore == true -> SendPhase.NoStore
+            lightningState?.noStore == true || onChainState?.noStore == true -> SendPhase.NoStore
             lightningState?.result != null -> SendPhase.Paid
+            lightningState?.tracking != null -> SendPhase.Tracking
+            onChainState?.phase?.isOutcome == true -> SendPhase.OnChainOutcome
             else -> SendPhase.Form
         }
 
@@ -272,9 +337,30 @@ fun SendScreen(
                 SendPhase.Paid -> lightningState?.result?.let { payment ->
                     PaymentResult(
                         payment = payment,
-                        unit = settings.bitcoinUnit,
-                        onAgain = { lightningViewModel.reset() },
-                        onDone = onBack,
+                        unit = LocalSettings.current.bitcoinUnit,
+                        onAgain = ::payAnother,
+                        onDone = leave,
+                        modifier = Modifier.padding(padding),
+                    )
+                }
+
+                SendPhase.Tracking -> rememberLast(lightningState?.tracking)?.let { tracking ->
+                    PaymentTracking(
+                        tracking = tracking,
+                        onTrack = { lightningViewModel?.track() },
+                        onDone = leave,
+                        modifier = Modifier.padding(padding),
+                    )
+                }
+
+                SendPhase.OnChainOutcome -> if (onChainViewModel != null && onChainState != null) {
+                    OnChainOutcome(
+                        state = onChainState,
+                        cryptoCode = onChainCryptoCode,
+                        onSendAgain = onChainViewModel::broadcast,
+                        onCheckAgain = onChainViewModel::checkAgain,
+                        onChange = onChainViewModel::changePayment,
+                        onDone = onSent,
                         modifier = Modifier.padding(padding),
                     )
                 }
@@ -286,12 +372,15 @@ fun SendScreen(
                         .padding(padding),
                 ) {
                     if (hasOnChain && hasLightning) {
-                        RailSelector(rail = rail, onSelect = ::select)
+                        RailSelector(rail = rail, enabled = !paying, onSelect = ::select)
                     }
 
                     val slot = when {
                         rail == SendRail.OnChain && onChainState?.blockedUpFront == true ->
                             SendSlot.OnChainWatchOnly
+
+                        rail == SendRail.OnChain && onChainState?.serverTooOld == true ->
+                            SendSlot.OnChainNeedsUpdate
 
                         rail == SendRail.OnChain -> SendSlot.OnChain
                         canUseNode -> SendSlot.Lightning
@@ -302,6 +391,8 @@ fun SendScreen(
                         Column {
                             when (shownSlot) {
                                 SendSlot.OnChainWatchOnly -> OnChainWatchOnlyState()
+
+                                SendSlot.OnChainNeedsUpdate -> OnChainNeedsUpdateState()
 
                                 SendSlot.LightningReadOnly -> EmptyState(
                                     title = "Read only",
@@ -317,7 +408,7 @@ fun SendScreen(
                                         label = "Destination",
                                         value = onChainState.destination,
                                         placeholder = "Address or bitcoin: URI",
-                                        enabled = !onChainState.sending,
+                                        enabled = onChainState.phase == OnChainPhase.Form,
                                         onValueChange = ::receive,
                                         onScan = { onScan(scanPurpose(hasOnChain, hasLightning)) },
                                     )
@@ -329,6 +420,7 @@ fun SendScreen(
                                             "This code also carries a Lightning invoice."
                                         },
                                         actionLabel = "Use Lightning".takeIf { notice == null && alternative != null },
+                                        actionEnabled = !paying,
                                         onAction = { select(SendRail.Lightning) },
                                         onDismiss = { notice = null; unified = null },
                                     )
@@ -336,7 +428,6 @@ fun SendScreen(
                                         viewModel = onChainViewModel,
                                         state = onChainState,
                                         cryptoCode = onChainCryptoCode,
-                                        onSent = onSent,
                                     )
                                 }
 
@@ -346,7 +437,6 @@ fun SendScreen(
                                         value = lightningState.bolt11,
                                         placeholder = "lnbc…",
                                         enabled = !lightningState.sending,
-                                        error = lightningState.formError,
                                         onValueChange = ::receive,
                                         onScan = { onScan(scanPurpose(hasOnChain, hasLightning)) },
                                     )
@@ -356,6 +446,7 @@ fun SendScreen(
                                             "This code also carries an on-chain address."
                                         },
                                         actionLabel = "Use on-chain".takeIf { notice == null && alternative != null },
+                                        actionEnabled = !paying,
                                         onAction = { select(SendRail.OnChain) },
                                         onDismiss = { notice = null; unified = null },
                                     )
@@ -384,7 +475,7 @@ private fun scanPurpose(hasOnChain: Boolean, hasLightning: Boolean): String = wh
 }
 
 @Composable
-private fun RailSelector(rail: SendRail, onSelect: (SendRail) -> Unit) {
+private fun RailSelector(rail: SendRail, enabled: Boolean, onSelect: (SendRail) -> Unit) {
     SingleChoiceSegmentedButtonRow(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
@@ -392,11 +483,13 @@ private fun RailSelector(rail: SendRail, onSelect: (SendRail) -> Unit) {
             selected = rail == SendRail.OnChain,
             onClick = { onSelect(SendRail.OnChain) },
             shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            enabled = enabled,
         ) { Text("On-chain") }
         SegmentedButton(
             selected = rail == SendRail.Lightning,
             onClick = { onSelect(SendRail.Lightning) },
             shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            enabled = enabled,
         ) { Text("Lightning") }
     }
 }
@@ -409,7 +502,6 @@ private fun DestinationField(
     enabled: Boolean,
     onValueChange: (String) -> Unit,
     onScan: () -> Unit,
-    error: String? = null,
 ) {
     FormField(
         label = label,
@@ -418,9 +510,8 @@ private fun DestinationField(
         placeholder = placeholder,
         singleLine = false,
         enabled = enabled,
-        error = error,
         trailingIcon = {
-            IconButton(onClick = onScan) {
+            IconButton(onClick = onScan, enabled = enabled) {
                 Icon(Icons.Rounded.QrCodeScanner, contentDescription = "Scan")
             }
         },
@@ -438,6 +529,7 @@ private fun DestinationField(
 private fun SendNotice(
     text: String?,
     actionLabel: String?,
+    actionEnabled: Boolean,
     onAction: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -458,7 +550,7 @@ private fun SendNotice(
                 modifier = Modifier.weight(1f),
             )
             if (actionLabel != null) {
-                TextButton(onClick = onAction) { Text(actionLabel) }
+                TextButton(onClick = onAction, enabled = actionEnabled) { Text(actionLabel) }
             } else {
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
             }

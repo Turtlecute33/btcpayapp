@@ -41,7 +41,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -56,6 +58,7 @@ import com.btcpayapp.data.api.endpoints.deleteWebhook
 import com.btcpayapp.data.api.endpoints.redeliverWebhook
 import com.btcpayapp.data.api.endpoints.webhookDeliveries
 import com.btcpayapp.data.api.endpoints.webhooks
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppCard
@@ -70,9 +73,6 @@ import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.theme.AppTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -85,31 +85,35 @@ data class DeliveryFeed(
     val error: String? = null,
 )
 
+/** A delivery the user asked to send again, waiting for them to confirm. */
+data class PendingRedelivery(val webhookId: String, val delivery: WebhookDeliveryData)
+
 data class WebhooksState(
     val webhooks: List<WebhookData> = emptyList(),
-    val loading: Boolean = false,
+    // True from the start: the first load runs on the first resume, and an
+    // empty list before it would flash "No webhooks".
+    val loading: Boolean = true,
     val refreshing: Boolean = false,
     val error: ApiException? = null,
     val expandedId: String? = null,
     val deliveries: Map<String, DeliveryFeed> = emptyMap(),
     val pendingDelete: WebhookData? = null,
+    val pendingRedelivery: PendingRedelivery? = null,
     val message: String? = null,
 )
 
 class WebhooksViewModel(private val graph: AppGraph) : ViewModel() {
 
+    private val bound = StoreBinding(graph.session)
     private val _state = MutableStateFlow(WebhooksState())
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
+    private val storeId get() = bound.id
 
+    // The screen loads on every resume (so a webhook made in the editor shows
+    // on return); this covers a cold start, where the store comes later.
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { if (it != null) load(refreshing = false) }
-        }
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun refresh() = load(refreshing = true)
@@ -146,7 +150,18 @@ class WebhooksViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun redeliver(webhookId: String, deliveryId: String) {
+    fun askRedeliver(webhookId: String, delivery: WebhookDeliveryData) =
+        _state.update { it.copy(pendingRedelivery = PendingRedelivery(webhookId, delivery)) }
+
+    fun dismissRedeliver() = _state.update { it.copy(pendingRedelivery = null) }
+
+    fun confirmRedeliver() {
+        val pending = _state.value.pendingRedelivery ?: return
+        _state.update { it.copy(pendingRedelivery = null) }
+        redeliver(pending.webhookId, pending.delivery.id)
+    }
+
+    private fun redeliver(webhookId: String, deliveryId: String) {
         val store = storeId ?: return
         viewModelScope.launch {
             runCatching { graph.session.requireApi().redeliverWebhook(store, webhookId, deliveryId) }
@@ -175,8 +190,12 @@ class WebhooksViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    private fun load(refreshing: Boolean) {
-        val store = storeId ?: return
+    fun load(refreshing: Boolean = false) {
+        val store = storeId
+        if (store == null) {
+            _state.update { it.copy(loading = false, refreshing = false, error = ApiException.NoAccount()) }
+            return
+        }
         viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.webhooks.isEmpty(), refreshing = refreshing, error = null)
@@ -233,6 +252,10 @@ fun WebhooksScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // Also on the way back from the editor: the view model outlives it, and a
+    // stale "No webhooks" invites a second, duplicate webhook.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.load() }
+
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(text)
@@ -247,6 +270,19 @@ fun WebhooksScreen(
             destructive = true,
             onConfirm = viewModel::confirmDelete,
             onDismiss = viewModel::dismissDelete,
+        )
+    }
+
+    // The delivery list carries no event type, so the delivery is named by
+    // when it was sent.
+    state.pendingRedelivery?.let { pending ->
+        ConfirmDialog(
+            title = "Send this event again?",
+            message = "Your server posts the event from ${Dates.full(pending.delivery.timestamp)} to " +
+                "the webhook once more. A shop that does not check for repeats may act on it twice.",
+            confirmLabel = "Send again",
+            onConfirm = viewModel::confirmRedeliver,
+            onDismiss = viewModel::dismissRedeliver,
         )
     }
 
@@ -312,7 +348,7 @@ fun WebhooksScreen(
                                 onOpen = { onEdit(webhook.id) },
                                 onToggleDeliveries = { viewModel.toggleDeliveries(webhook.id) },
                                 onDelete = { viewModel.askDelete(webhook) },
-                                onRedeliver = { viewModel.redeliver(webhook.id, it) },
+                                onRedeliver = { viewModel.askRedeliver(webhook.id, it) },
                             )
                         }
                         item { Spacer(Modifier.height(88.dp)) }
@@ -332,7 +368,7 @@ private fun WebhookCard(
     onOpen: () -> Unit,
     onToggleDeliveries: () -> Unit,
     onDelete: () -> Unit,
-    onRedeliver: (String) -> Unit,
+    onRedeliver: (WebhookDeliveryData) -> Unit,
 ) {
     val colors = AppTheme.statusColors
     val events = webhook.authorizedEvents
@@ -406,7 +442,7 @@ private fun WebhookCard(
 }
 
 @Composable
-private fun DeliveryList(feed: DeliveryFeed?, onRedeliver: (String) -> Unit) {
+private fun DeliveryList(feed: DeliveryFeed?, onRedeliver: (WebhookDeliveryData) -> Unit) {
     val current = feed ?: DeliveryFeed(loading = true)
     val error = current.error
 
@@ -448,7 +484,7 @@ private fun DeliveryList(feed: DeliveryFeed?, onRedeliver: (String) -> Unit) {
                     current.items.forEach { delivery ->
                         DeliveryRow(
                             delivery = delivery,
-                            onRedeliver = { onRedeliver(delivery.id) },
+                            onRedeliver = { onRedeliver(delivery) },
                         )
                     }
                 }
@@ -489,12 +525,10 @@ private fun DeliveryRow(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            IconButton(onClick = onRedeliver, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    imageVector = Icons.Rounded.Replay,
-                    contentDescription = "Send again",
-                    modifier = Modifier.size(18.dp),
-                )
+            // The standard 48dp target, and a confirmation behind it: a shop
+            // backend may fulfil a resent order event twice.
+            IconButton(onClick = onRedeliver) {
+                Icon(imageVector = Icons.Rounded.Replay, contentDescription = "Send again")
             }
         }
         delivery.errorMessage?.takeIf { it.isNotBlank() }?.let { error ->

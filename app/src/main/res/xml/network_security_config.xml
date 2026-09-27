@@ -6,13 +6,22 @@
   trusted, so a rogue MDM profile or a sideloaded root cannot silently intercept
   API keys. Instances using a private CA or a self-signed certificate are
   supported through explicit, per-account certificate pinning in the app itself
-  (the user is shown the SPKI fingerprint and must accept it once), which is a
-  far narrower grant than trusting a whole extra root.
+  (the user types the start of a fingerprint read on the server, and only a
+  match pins the key), which is a far narrower grant than trusting a whole
+  extra root.
 
-  Exceptions to the TLS rule, both of which are safe:
-    * .onion  - Tor already provides authentication and encryption end to end,
-                and no CA can issue for .onion. Matching is by hostname suffix.
-    * loopback - traffic never leaves the device.
+  One exception to the TLS rule:
+    * .onion - Tor already provides authentication and encryption end to end,
+               and no CA can issue for .onion. Matching is by hostname suffix.
+               The hop from the app to Tor's SOCKS port on this phone (Orbot,
+               127.0.0.1:9050 by default) is still clear text: while Orbot is
+               stopped, any app can listen on that port and read the API key.
+               No public Orbot API lets the app prove who holds the port.
+
+  Loopback is deliberately NOT an exception. A listener on 127.0.0.1 can be any
+  app on the phone, so an API key sent to it in clear text is a key handed to
+  whoever holds the port. The debug build (src/debug) still allows loopback and
+  the emulator's 10.0.2.2 for development.
 -->
 <network-security-config>
 
@@ -24,12 +33,6 @@
 
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="true">onion</domain>
-    </domain-config>
-
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">localhost</domain>
-        <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">::1</domain>
     </domain-config>
 
 </network-security-config>

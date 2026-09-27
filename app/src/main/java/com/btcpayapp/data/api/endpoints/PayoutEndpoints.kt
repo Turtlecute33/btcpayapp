@@ -22,33 +22,55 @@ import com.btcpayapp.data.api.dto.UpdateOnChainPayoutProcessorSettings
 // ---------------------------------------------------------------------------
 // Payment requests
 // ---------------------------------------------------------------------------
+//
+// Every call here uses the store-scoped route, which exists in every 2.x. The
+// unscoped `api/v1/payment-requests/{id}` aliases arrived only in 2.4.0, so an
+// older server answers them with a 404. Callers pass the store id they captured
+// when the screen opened.
 
-internal suspend fun BtcPayApi.paymentRequests(storeId: String): List<PaymentRequestData> =
-    get("api/v1/stores/${storeId.pathSegment()}/payment-requests")
+private fun paymentRequestPath(storeId: String, paymentRequestId: String) =
+    "api/v1/stores/${storeId.pathSegment()}/payment-requests/${paymentRequestId.pathSegment()}"
 
-internal suspend fun BtcPayApi.paymentRequest(paymentRequestId: String): PaymentRequestData =
-    get("api/v1/payment-requests/${paymentRequestId.pathSegment()}")
+/** Archived requests are left out unless [includeArchived] is set. */
+internal suspend fun BtcPayApi.paymentRequests(
+    storeId: String,
+    includeArchived: Boolean = false,
+): List<PaymentRequestData> = get(
+    "api/v1/stores/${storeId.pathSegment()}/payment-requests",
+    listOf("includeArchived" to includeArchived.takeIf { it }),
+)
+
+internal suspend fun BtcPayApi.paymentRequest(storeId: String, paymentRequestId: String): PaymentRequestData =
+    get(paymentRequestPath(storeId, paymentRequestId))
 
 internal suspend fun BtcPayApi.createPaymentRequest(
     storeId: String,
     request: PaymentRequestRequest,
 ): PaymentRequestData = post("api/v1/stores/${storeId.pathSegment()}/payment-requests", body(request))
 
+/**
+ * Not a partial update. The server rebuilds the request from the body (title,
+ * amount, currency, expiry, reference, description, email, formId,
+ * allowCustomPaymentAmounts), so an omitted field is cleared. When `formId`
+ * changes it also deletes the stored form response. Callers therefore send
+ * every field of the loaded [PaymentRequestData], changed or not.
+ */
 internal suspend fun BtcPayApi.updatePaymentRequest(
+    storeId: String,
     paymentRequestId: String,
     request: PaymentRequestRequest,
-): PaymentRequestData =
-    put("api/v1/payment-requests/${paymentRequestId.pathSegment()}", body(request))
+): PaymentRequestData = put(paymentRequestPath(storeId, paymentRequestId), body(request))
 
-internal suspend fun BtcPayApi.archivePaymentRequest(paymentRequestId: String) {
-    call("DELETE", "api/v1/payment-requests/${paymentRequestId.pathSegment()}")
+internal suspend fun BtcPayApi.archivePaymentRequest(storeId: String, paymentRequestId: String) {
+    call("DELETE", paymentRequestPath(storeId, paymentRequestId))
 }
 
-/** Turns a payment request into a payable invoice. Not store-scoped. */
+/** Turns a payment request into a payable invoice. */
 internal suspend fun BtcPayApi.payPaymentRequest(
+    storeId: String,
     paymentRequestId: String,
     request: PayPaymentRequestRequest = PayPaymentRequestRequest(),
-): InvoiceData = post("api/v1/payment-requests/${paymentRequestId.pathSegment()}/pay", body(request))
+): InvoiceData = post("${paymentRequestPath(storeId, paymentRequestId)}/pay", body(request))
 
 // ---------------------------------------------------------------------------
 // Pull payments
@@ -62,6 +84,10 @@ internal suspend fun BtcPayApi.pullPayments(
     listOf("includeArchived" to includeArchived.takeIf { it }),
 )
 
+/**
+ * The claimant's public view. Like [pullPaymentPayouts] and [pullPaymentLnurl]
+ * it has no store in the path in every 2.x, so these reads stay unscoped.
+ */
 internal suspend fun BtcPayApi.pullPayment(pullPaymentId: String): PullPaymentData =
     get("api/v1/pull-payments/${pullPaymentId.pathSegment()}")
 
@@ -70,8 +96,9 @@ internal suspend fun BtcPayApi.createPullPayment(
     request: CreatePullPaymentRequest,
 ): PullPaymentData = post("api/v1/stores/${storeId.pathSegment()}/pull-payments", body(request))
 
-internal suspend fun BtcPayApi.archivePullPayment(pullPaymentId: String) {
-    call("DELETE", "api/v1/pull-payments/${pullPaymentId.pathSegment()}")
+/** Store-scoped: the unscoped DELETE exists only from 2.4.0. */
+internal suspend fun BtcPayApi.archivePullPayment(storeId: String, pullPaymentId: String) {
+    call("DELETE", "api/v1/stores/${storeId.pathSegment()}/pull-payments/${pullPaymentId.pathSegment()}")
 }
 
 /** The LNURL-withdraw the claimant scans. */
@@ -98,8 +125,16 @@ internal suspend fun BtcPayApi.pullPaymentPayouts(
     listOf("includeCancelled" to includeCancelled.takeIf { it }),
 )
 
-internal suspend fun BtcPayApi.payout(payoutId: String): PayoutData =
-    get("api/v1/payouts/${payoutId.pathSegment()}")
+/**
+ * Single-payout routes are store-scoped: the unscoped `api/v1/payouts/{id}`
+ * aliases first appear in 2.4.1, so approving through them fails with a 404 on
+ * every older server.
+ */
+private fun payoutPath(storeId: String, payoutId: String) =
+    "api/v1/stores/${storeId.pathSegment()}/payouts/${payoutId.pathSegment()}"
+
+internal suspend fun BtcPayApi.payout(storeId: String, payoutId: String): PayoutData =
+    get(payoutPath(storeId, payoutId))
 
 internal suspend fun BtcPayApi.createPayout(storeId: String, request: CreatePayoutRequest): PayoutData =
     post("api/v1/stores/${storeId.pathSegment()}/payouts", body(request))
@@ -110,24 +145,22 @@ internal suspend fun BtcPayApi.createPayout(storeId: String, request: CreatePayo
  * with `old-revision` rather than silently overwriting a concurrent edit.
  */
 internal suspend fun BtcPayApi.approvePayout(
+    storeId: String,
     payoutId: String,
     revision: Int,
     rateRule: String? = null,
-): PayoutData = post(
-    "api/v1/payouts/${payoutId.pathSegment()}",
-    body(ApprovePayoutRequest(revision, rateRule)),
-)
+): PayoutData = post(payoutPath(storeId, payoutId), body(ApprovePayoutRequest(revision, rateRule)))
 
-internal suspend fun BtcPayApi.cancelPayout(payoutId: String) {
-    call("DELETE", "api/v1/payouts/${payoutId.pathSegment()}")
+internal suspend fun BtcPayApi.cancelPayout(storeId: String, payoutId: String) {
+    call("DELETE", payoutPath(storeId, payoutId))
 }
 
-internal suspend fun BtcPayApi.markPayoutPaid(payoutId: String) {
-    call("POST", "api/v1/payouts/${payoutId.pathSegment()}/mark-paid")
+internal suspend fun BtcPayApi.markPayoutPaid(storeId: String, payoutId: String) {
+    call("POST", "${payoutPath(storeId, payoutId)}/mark-paid")
 }
 
-internal suspend fun BtcPayApi.markPayout(payoutId: String, state: PayoutState) {
-    call("POST", "api/v1/payouts/${payoutId.pathSegment()}/mark", body(MarkPayoutRequest(state)))
+internal suspend fun BtcPayApi.markPayout(storeId: String, payoutId: String, state: PayoutState) {
+    call("POST", "${payoutPath(storeId, payoutId)}/mark", body(MarkPayoutRequest(state)))
 }
 
 // ---------------------------------------------------------------------------

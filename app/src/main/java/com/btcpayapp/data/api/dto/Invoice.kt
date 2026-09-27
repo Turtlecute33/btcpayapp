@@ -29,7 +29,12 @@ data class InvoiceData(
     val metadata: JsonObject? = null,
     val checkout: CheckoutOptions? = null,
     val receipt: ReceiptOptions? = null,
-    /** Populated only when the request set `includePaymentMethods=true`. */
+    /**
+     * Null or empty unless the request set `includePaymentMethods=true` on a
+     * server that honours it (the single-invoice GET does only from 2.4.1;
+     * 2.3.6 to 2.4.0 send an empty list). Use `invoiceWithPaymentMethods`,
+     * which fills it on every 2.x.
+     */
     val paymentMethods: List<InvoicePaymentMethodData>? = null,
 ) {
     val isSettled: Boolean get() = status == InvoiceStatus.Settled
@@ -153,6 +158,12 @@ data class RefundInvoiceRequest(
     val name: String? = null,
     val description: String? = null,
     val payoutMethods: List<String>? = null,
+    /**
+     * The legacy single-method field. Servers before 2.4.1 read only this one
+     * and refund with the invoice's default method when it is absent; newer
+     * servers prefer [payoutMethods]. Callers set both to the same id.
+     */
+    val payoutMethodId: String? = null,
     val refundVariant: RefundVariant = RefundVariant.CurrentRate,
     val subtractPercentage: BigDecimal? = null,
     /** Required when [refundVariant] is [RefundVariant.Custom]. */

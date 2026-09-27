@@ -38,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,6 +61,7 @@ import com.btcpayapp.data.api.dto.StoreData
 import com.btcpayapp.data.api.endpoints.deleteStore
 import com.btcpayapp.data.api.endpoints.store
 import com.btcpayapp.data.api.endpoints.updateStore
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
@@ -74,6 +76,9 @@ import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.confirmDiscardChanges
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.theme.Motion
 import com.btcpayapp.ui.nav.AppsRoute
 import com.btcpayapp.ui.nav.PaymentMethodsRoute
@@ -84,27 +89,43 @@ import com.btcpayapp.ui.nav.StoreUsersRoute
 import com.btcpayapp.ui.nav.WebhooksRoute
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
+import java.math.RoundingMode
+import java.util.Currency
+import java.util.Locale
 
 /**
  * Editing surface for every field of a store, plus the doorway to the store's
  * sub-settings.
  *
- * `PUT /stores/{id}` is a whole-object replace, not a patch. The screen
- * therefore fetches the live [StoreData] and edits a *copy* of it; building a
+ * The screen fetches the live [StoreData] and edits a *copy* of it; building a
  * fresh `StoreData` from the controls on screen would silently reset every
  * setting this app does not render — payment method criteria, logo and CSS
  * URLs, additional tracked rates — the next time anyone pressed save.
+ *
+ * The server merges the body over the stored store and skips nulls, and its
+ * range checks on the durations can never fail (they join the two bounds with
+ * `&&`). So this screen does the checks itself, per field, and sends `""` for
+ * a text the user cleared.
  */
 
 /** The three durations the API keeps in seconds are shown in friendlier units. */
 private const val SECONDS_PER_MINUTE = 60
 private const val SECONDS_PER_HOUR = 3600
+
+/** The bounds the server means to enforce: 1 minute and 10 minutes up to 24 days. */
+private const val MIN_INVOICE_EXPIRATION = 60
+private const val MIN_MONITORING = 600
+private const val MAX_EXPIRATION = 34_560 * SECONDS_PER_MINUTE
+
+private val HUNDRED = BigDecimal(100)
+private const val TOLERANCE_RANGE = "Enter a value from 0 to 100."
+private const val FEE_TARGET_RANGE = "Enter 1 or more blocks."
+
+/** A field of [StoreSettingsDraft] that can hold a value the store must not get. */
+enum class StoreField { DefaultCurrency, InvoiceExpiration, DisplayTimer, Monitoring, Tolerance, FeeTarget, RefundDays }
 
 data class StoreSettingsDraft(
     val store: StoreData,
@@ -114,17 +135,101 @@ data class StoreSettingsDraft(
     val paymentTolerancePercent: String,
     val recommendedFeeBlockTarget: String,
     val refundExpirationDays: String,
+    val website: String = store.website.orEmpty(),
+    val supportUrl: String = store.supportUrl.orEmpty(),
+    val brandColor: String = store.brandColor.orEmpty(),
+    val htmlTitle: String = store.htmlTitle.orEmpty(),
+    val lightningDescription: String = store.lightningDescriptionTemplate.orEmpty(),
+    /** The currency as loaded; see the currency check in [checked]. */
+    val loadedCurrency: String = store.defaultCurrency,
 ) {
-    /** Folds the free-text numeric fields back into the object that goes on the wire. */
-    fun toStore(): StoreData = store.copy(
-        invoiceExpiration = durationSeconds(invoiceExpirationMinutes, store.invoiceExpiration, SECONDS_PER_MINUTE),
-        displayExpirationTimer = nonNegativeInt(displayExpirationSeconds),
-        monitoringExpiration = durationSeconds(monitoringExpirationHours, store.monitoringExpiration, SECONDS_PER_HOUR),
-        paymentTolerance = paymentTolerancePercent.toDoubleOrNull()?.takeIf { it.isFinite() && it in 0.0..100.0 }
-            ?: throw IllegalArgumentException("Payment tolerance must be between 0 and 100."),
-        recommendedFeeBlockTarget = nonNegativeInt(recommendedFeeBlockTarget).also { require(it > 0) { "Fee target must be positive." } },
-        refundBOLT11Expiration = nonNegativeInt(refundExpirationDays),
-    )
+    /** What is wrong with each field, shown under it. Empty when [toStore] succeeds. */
+    fun errors(): Map<StoreField, String> = checked().errors
+
+    /** Folds the text fields back into the object that goes on the wire; throws while [errors] is not empty. */
+    fun toStore(): StoreData = checked().let { it.store ?: throw IllegalArgumentException(it.errors.values.first()) }
+
+    /**
+     * The changes, against [server], that let an invoice count as paid on
+     * less: fewer confirmations, or a wider margin for an underpayment. One
+     * "old → new" line each; empty when there are none or a field has an error.
+     */
+    fun loosenedChecks(server: StoreData): List<String> {
+        val next = checked().store ?: return emptyList()
+        return listOfNotNull(
+            "Paid after: ${server.speedPolicy.speedLabel()} → ${next.speedPolicy.speedLabel()}"
+                .takeIf { next.speedPolicy.confirmations < server.speedPolicy.confirmations },
+            "Payment tolerance: ${toleranceText(server.paymentTolerance)} % → ${toleranceText(next.paymentTolerance)} %"
+                .takeIf { next.paymentTolerance > server.paymentTolerance },
+        )
+    }
+
+    private class Checked(val store: StoreData?, val errors: Map<StoreField, String>)
+
+    private fun checked(): Checked {
+        val errors = LinkedHashMap<StoreField, String>()
+        // Each rule throws IllegalArgumentException with its field message.
+        fun <T : Any> rule(key: StoreField, value: () -> T): T? =
+            kotlin.runCatching(value).onFailure { errors[key] = it.message ?: "Check this value." }.getOrNull()
+
+        // Only a changed code is checked; the stored one goes back as it was.
+        // The phone's ISO list can be older than the server's, and BTCPay takes
+        // crypto codes this app does not list, so a check of the stored code
+        // would block every save of such a store.
+        val typed = store.defaultCurrency.trim().uppercase(Locale.ROOT)
+        val currency = if (typed == loadedCurrency.trim().uppercase(Locale.ROOT)) {
+            loadedCurrency
+        } else {
+            typed.also { code -> currencyProblem(code)?.let { errors[StoreField.DefaultCurrency] = it } }
+        }
+        val expiration = rule(StoreField.InvoiceExpiration) {
+            duration(
+                invoiceExpirationMinutes, store.invoiceExpiration, SECONDS_PER_MINUTE,
+                MIN_INVOICE_EXPIRATION..MAX_EXPIRATION, "Enter 1 to 34560 minutes (24 days).",
+            )
+        }
+        val display = rule(StoreField.DisplayTimer) {
+            wholeNumber(displayExpirationSeconds, "Enter a number of seconds.").also {
+                require(expiration == null || it <= expiration) {
+                    "Enter 0 to $expiration seconds. The timer cannot run longer than the invoice."
+                }
+            }
+        }
+        val monitoring = rule(StoreField.Monitoring) {
+            duration(
+                monitoringExpirationHours, store.monitoringExpiration, SECONDS_PER_HOUR,
+                MIN_MONITORING..MAX_EXPIRATION, "Enter 0.17 to 576 hours (10 minutes to 24 days).",
+            )
+        }
+        val tolerance = rule(StoreField.Tolerance) { toleranceOf(paymentTolerancePercent, store.paymentTolerance) }
+        val feeTarget = rule(StoreField.FeeTarget) {
+            wholeNumber(recommendedFeeBlockTarget, FEE_TARGET_RANGE).also { require(it > 0) { FEE_TARGET_RANGE } }
+        }
+        val refundDays = rule(StoreField.RefundDays) { wholeNumber(refundExpirationDays, "Enter a number of days.") }
+
+        if (errors.isNotEmpty() || expiration == null || display == null || monitoring == null ||
+            tolerance == null || feeTarget == null || refundDays == null
+        ) {
+            return Checked(null, errors)
+        }
+        return Checked(
+            store.copy(
+                defaultCurrency = currency,
+                invoiceExpiration = expiration,
+                displayExpirationTimer = display,
+                monitoringExpiration = monitoring,
+                paymentTolerance = tolerance,
+                recommendedFeeBlockTarget = feeTarget,
+                refundBOLT11Expiration = refundDays,
+                website = text(website, store.website),
+                supportUrl = text(supportUrl, store.supportUrl),
+                brandColor = text(brandColor, store.brandColor),
+                htmlTitle = text(htmlTitle, store.htmlTitle),
+                lightningDescriptionTemplate = text(lightningDescription, store.lightningDescriptionTemplate),
+            ),
+            emptyMap(),
+        )
+    }
 
     companion object {
         fun of(store: StoreData) = StoreSettingsDraft(
@@ -132,32 +237,59 @@ data class StoreSettingsDraft(
             invoiceExpirationMinutes = displayDuration(store.invoiceExpiration, SECONDS_PER_MINUTE),
             displayExpirationSeconds = store.displayExpirationTimer.toString(),
             monitoringExpirationHours = displayDuration(store.monitoringExpiration, SECONDS_PER_HOUR),
-            paymentTolerancePercent = Amounts.trim(BigDecimal.valueOf(store.paymentTolerance), 4),
+            paymentTolerancePercent = toleranceText(store.paymentTolerance),
             recommendedFeeBlockTarget = store.recommendedFeeBlockTarget.toString(),
             refundExpirationDays = store.refundBOLT11Expiration.toString(),
         )
     }
 }
 
+/** Through [Amounts.toInput], so a prefill such as 4050 s = "1.1250" hours always parses back. */
 private fun displayDuration(seconds: Int, divisor: Int): String =
-    BigDecimal(seconds).divide(BigDecimal(divisor), 9, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
+    Amounts.toInput(BigDecimal(seconds).divide(BigDecimal(divisor), 9, RoundingMode.HALF_UP), 9)
 
-private fun durationSeconds(input: String, original: Int, divisor: Int): Int {
-    // Preserve seconds exactly when the displayed decimal is recurring.
-    if (input == displayDuration(original, divisor)) return original
-    return try {
-        input.toBigDecimal().multiply(BigDecimal(divisor)).intValueExact().also { require(it >= 0) }
-    } catch (_: IllegalArgumentException) {
-        throw IllegalArgumentException("Enter a non-negative duration in whole seconds.")
-    } catch (_: ArithmeticException) {
-        throw IllegalArgumentException("Duration is too large or contains a fraction of a second.")
+private fun duration(input: String, original: Int, divisor: Int, range: IntRange, rangeMessage: String): Int {
+    // The shown value is rounded when the seconds do not divide evenly;
+    // unchanged, it keeps the stored seconds exactly.
+    val seconds = if (input == displayDuration(original, divisor)) {
+        original
+    } else {
+        val value = Amounts.parse(input) ?: throw IllegalArgumentException(Amounts.parseProblem(input) ?: rangeMessage)
+        try {
+            value.multiply(BigDecimal(divisor)).intValueExact()
+        } catch (_: ArithmeticException) {
+            throw IllegalArgumentException("Too large, or not a whole number of seconds.")
+        }
     }
+    require(seconds in range) { rangeMessage }
+    return seconds
 }
 
-private fun nonNegativeInt(input: String): Int = input.toIntOrNull()?.takeIf { it >= 0 }
-    ?: throw IllegalArgumentException("Enter a non-negative whole number in each numeric field.")
+private fun toleranceText(percent: Double): String = Amounts.toInput(BigDecimal.valueOf(percent), 4)
 
-enum class StoreSettingsConfirm { Archive, Restore, Delete }
+private fun toleranceOf(input: String, original: Double): Double {
+    // Unchanged, the stored double goes back as it was, digits past the fourth included.
+    val value = if (input == toleranceText(original)) {
+        BigDecimal.valueOf(original)
+    } else {
+        Amounts.parse(input) ?: throw IllegalArgumentException(Amounts.parseProblem(input) ?: TOLERANCE_RANGE)
+    }
+    require(value >= BigDecimal.ZERO && value <= HUNDRED) { TOLERANCE_RANGE }
+    return if (input == toleranceText(original)) original else value.toDouble()
+}
+
+private fun wholeNumber(input: String, message: String): Int =
+    input.toIntOrNull()?.takeIf { it >= 0 } ?: throw IllegalArgumentException(message)
+
+/**
+ * An optional text: untouched, the stored value (null included) goes back as
+ * it was; cleared, `""` goes out. The server's merge skips a null, so sending
+ * null for a cleared field kept the old text and still said "saved".
+ */
+private fun text(input: String, stored: String?): String? =
+    input.trim().let { if (it == stored.orEmpty().trim()) stored else it }
+
+enum class StoreSettingsConfirm { Archive, Restore, Delete, LoosenedChecks }
 
 /** What the body is showing, so a save does not cross-fade the form with itself. */
 private enum class StoreSettingsPhase { Loading, Error, Content }
@@ -167,6 +299,8 @@ private enum class StoreSaveAction { Busy, Ready, None }
 
 data class StoreSettingsState(
     val draft: StoreSettingsDraft? = null,
+    /** The store as the server last sent it. Archive and restore write this, never the draft. */
+    val loaded: StoreData? = null,
     val loading: Boolean = false,
     val saving: Boolean = false,
     val error: ApiException? = null,
@@ -178,27 +312,20 @@ data class StoreSettingsState(
 
 class StoreSettingsViewModel(private val graph: AppGraph) : ViewModel() {
 
+    private val bound = StoreBinding(graph.session)
     private val _state = MutableStateFlow(StoreSettingsState())
     val state = _state.asStateFlow()
     private var loadJob: kotlinx.coroutines.Job? = null
 
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest {
-                    loadJob?.cancel()
-                    _state.value = StoreSettingsState()
-                    load()
-                }
-        }
+        load()
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun load() {
-        val storeId = graph.session.activeStore.value?.id
+        val storeId = bound.id
         if (storeId == null) {
-            _state.update { it.copy(loading = false, error = ApiException.NotFound("No store is selected.")) }
+            _state.update { it.copy(loading = false, error = ApiException.NoAccount()) }
             return
         }
         loadJob?.cancel()
@@ -206,7 +333,14 @@ class StoreSettingsViewModel(private val graph: AppGraph) : ViewModel() {
             _state.update { it.copy(loading = it.draft == null, error = null) }
             runCatching { graph.session.requireApi().store(storeId) }
                 .onSuccess { store ->
-                    _state.update { it.copy(draft = if (it.dirty) it.draft else StoreSettingsDraft.of(store), loading = false, error = null) }
+                    _state.update {
+                        it.copy(
+                            loaded = store,
+                            draft = if (it.dirty) it.draft else StoreSettingsDraft.of(store),
+                            loading = false,
+                            error = null,
+                        )
+                    }
                 }
                 .onFailure { failure ->
                     _state.update { it.copy(loading = false, error = failure.asApiException()) }
@@ -228,22 +362,39 @@ class StoreSettingsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun clearMessage() = _state.update { it.copy(message = null) }
 
-    fun save() = saveDraft(null)
-
-    fun setArchived(archived: Boolean) = saveDraft(archived)
-
-    private fun saveDraft(archived: Boolean?) {
-        runCatching {
-            _state.value.draft?.toStore()?.let { if (archived == null) it else it.copy(archived = archived) }
-        }.onSuccess {
-            put(it, when (archived) { true -> "Store archived."; false -> "Store restored."; null -> "Store settings saved." })
-        }.onFailure { failure ->
-            _state.update { it.copy(error = ApiException.Transport(failure.message ?: "Check the numeric fields.")) }
+    /**
+     * A change that lets an invoice count as paid on less stops at a review
+     * first: set once, it lets a later 1-sat or double-spent payment settle an
+     * invoice. [confirmed] is the user's yes to that review, and the spend gate's.
+     */
+    fun save(confirmed: Boolean = false) {
+        val draft = _state.value.draft ?: return
+        // The errors are already under their fields; this says why nothing happened.
+        if (draft.errors().isNotEmpty()) {
+            _state.update { it.copy(message = "Some values need a fix before you can save.") }
+            return
         }
+        val loaded = _state.value.loaded
+        if (!confirmed && loaded != null && draft.loosenedChecks(loaded).isNotEmpty()) {
+            _state.update { it.copy(confirm = StoreSettingsConfirm.LoosenedChecks) }
+            return
+        }
+        put(draft.toStore(), "Store settings saved.", fromDraft = true)
     }
 
+    /**
+     * Writes the store as last loaded with only the flag changed, so unsaved
+     * edits in the form do not ride along with a dialog that only spoke of
+     * archiving.
+     */
+    fun setArchived(archived: Boolean) {
+        val loaded = _state.value.loaded ?: return
+        put(loaded.copy(archived = archived), if (archived) "Store archived." else "Store restored.", fromDraft = false)
+    }
+
+    /** Call only after the spend gate: a deleted store takes its wallets and invoices with it. */
     fun delete() {
-        val storeId = graph.session.activeStore.value?.id ?: return
+        val storeId = bound.id ?: return
         _state.update { it.copy(confirm = null) }
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
@@ -256,9 +407,9 @@ class StoreSettingsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    private fun put(store: StoreData?, message: String) {
-        if (store == null || _state.value.saving) return
-        val storeId = graph.session.activeStore.value?.id ?: return
+    private fun put(store: StoreData, message: String, fromDraft: Boolean) {
+        if (_state.value.saving) return
+        val storeId = bound.id ?: return
         if (store.id != storeId) return
         val submitted = _state.value.draft
         loadJob?.cancel()
@@ -271,8 +422,20 @@ class StoreSettingsViewModel(private val graph: AppGraph) : ViewModel() {
                     // has to be told the name or currency just changed.
                     graph.session.refresh()
                     _state.update {
-                        if (it.draft == submitted) it.copy(draft = StoreSettingsDraft.of(saved), dirty = false, saving = false, message = message)
-                        else it.copy(saving = false, message = message)
+                        // Edits made during the round trip, or kept past an
+                        // archive, stay in the form; only the flag follows.
+                        val fresh = !it.dirty || (fromDraft && it.draft == submitted)
+                        it.copy(
+                            loaded = saved,
+                            draft = if (fresh) {
+                                StoreSettingsDraft.of(saved)
+                            } else {
+                                it.draft?.let { d -> d.copy(store = d.store.copy(archived = saved.archived)) }
+                            },
+                            dirty = !fresh,
+                            saving = false,
+                            message = message,
+                        )
                     }
                 }
                 .onFailure { failure -> _state.update { it.copy(saving = false, error = failure.asApiException()) } }
@@ -289,7 +452,9 @@ fun StoreSettingsScreen(
     val viewModel = appViewModel { StoreSettingsViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
-    val guardedBack = com.btcpayapp.ui.components.confirmDiscardChanges(state.dirty, onBack)
+    val guardedBack = confirmDiscardChanges(state.dirty, onBack)
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -317,7 +482,7 @@ fun StoreSettingsScreen(
                 when (shown) {
                     StoreSaveAction.Busy ->
                         CircularProgressIndicator(Modifier.padding(end = 16.dp).size(20.dp), strokeWidth = 2.dp)
-                    StoreSaveAction.Ready -> TextButton(onClick = viewModel::save) { Text("Save") }
+                    StoreSaveAction.Ready -> TextButton(onClick = { viewModel.save() }) { Text("Save") }
                     StoreSaveAction.None -> Unit
                 }
             }
@@ -348,6 +513,9 @@ fun StoreSettingsScreen(
                     // it, so this branch can still be composed a frame or two
                     // after the draft has been cleared.
                     val current = draft ?: return@AnimatedSwap
+                    // Under each field, where the reader is looking; a banner
+                    // at the top of a long form is off screen when Save is hit.
+                    val errors = remember(current) { current.errors() }
 
                     Column(
                         Modifier
@@ -357,13 +525,13 @@ fun StoreSettingsScreen(
                     ) {
                         ErrorBanner(state.error, onDismiss = viewModel::dismissError)
 
-                        StoreGeneralSection(current, viewModel, Modifier.arrive(0))
+                        StoreGeneralSection(current, errors, viewModel, Modifier.arrive(0))
                         ThinDivider()
-                        StoreCheckoutSection(current, viewModel, Modifier.arrive(1))
+                        StoreCheckoutSection(current, errors, viewModel, Modifier.arrive(1))
                         ThinDivider()
                         StoreLightningSection(current, viewModel, Modifier.arrive(2))
                         ThinDivider()
-                        StoreReceiptSection(current, viewModel, Modifier.arrive(3))
+                        StoreReceiptSection(current, state.loaded?.receipt, viewModel, Modifier.arrive(3))
                         ThinDivider()
                         StoreMenuSection(onNavigate, Modifier.arrive(4))
                         ThinDivider()
@@ -380,7 +548,8 @@ fun StoreSettingsScreen(
         StoreSettingsConfirm.Archive -> ConfirmDialog(
             title = "Archive this store?",
             message = "An archived store is hidden from the store list and stops accepting new " +
-                "invoices. Existing invoices and payouts are kept, and you can restore it later.",
+                "invoices. Existing invoices and payouts are kept, and you can restore it later. " +
+                "Unsaved changes in this form are not saved.",
             confirmLabel = "Archive",
             destructive = true,
             onConfirm = { viewModel.setArchived(true) },
@@ -395,16 +564,41 @@ fun StoreSettingsScreen(
             onDismiss = { viewModel.ask(null) },
         )
 
-        StoreSettingsConfirm.Delete -> ConfirmDialog(
-            title = "Delete “${state.draft?.store?.name.orEmpty()}”?",
-            message = "This cannot be undone. The store, its invoices, its payment method " +
-                "configuration and its wallet settings are removed from the server. If you only " +
-                "want to stop using it, archive it instead.",
-            confirmLabel = "Delete for ever",
-            destructive = true,
-            onConfirm = viewModel::delete,
-            onDismiss = { viewModel.ask(null) },
-        )
+        StoreSettingsConfirm.Delete -> {
+            val name = state.loaded?.name.orEmpty()
+            ConfirmDialog(
+                title = "Delete “$name”?",
+                message = "This cannot be undone. The store, its invoices, its payment method " +
+                    "configuration and its wallet settings are removed from the server. If you only " +
+                    "want to stop using it, archive it instead.",
+                confirmLabel = "Delete for ever",
+                destructive = true,
+                onConfirm = {
+                    viewModel.ask(null)
+                    scope.afterSpendGate(gate, "Confirm store deletion", name, { snackbarHostState.showSnackbar(it) }) { viewModel.delete() }
+                },
+                onDismiss = { viewModel.ask(null) },
+            )
+        }
+
+        StoreSettingsConfirm.LoosenedChecks -> {
+            val name = state.loaded?.name.orEmpty()
+            val changes = state.loaded?.let { state.draft?.loosenedChecks(it) }.orEmpty()
+            ConfirmDialog(
+                title = "Change when invoices count as paid?",
+                message = changes.joinToString("\n") + "\n\nInvoices of “$name” then count as paid " +
+                    "with less money or fewer confirmations.",
+                confirmLabel = "Save",
+                destructive = true,
+                onConfirm = {
+                    viewModel.ask(null)
+                    scope.afterSpendGate(gate, "Confirm payment rules", name, { snackbarHostState.showSnackbar(it) }) {
+                        viewModel.save(confirmed = true)
+                    }
+                },
+                onDismiss = { viewModel.ask(null) },
+            )
+        }
 
         null -> Unit
     }
@@ -417,6 +611,7 @@ fun StoreSettingsScreen(
 @Composable
 private fun StoreGeneralSection(
     draft: StoreSettingsDraft,
+    errors: Map<StoreField, String>,
     viewModel: StoreSettingsViewModel,
     modifier: Modifier = Modifier,
 ) {
@@ -429,15 +624,15 @@ private fun StoreGeneralSection(
         )
         FormField(
             label = "Website",
-            value = store.website.orEmpty(),
-            onValueChange = { value -> viewModel.edit { it.copy(website = value.ifBlank { null }) } },
+            value = draft.website,
+            onValueChange = { value -> viewModel.editDraft { it.copy(website = value) } },
             placeholder = "https://example.com",
             keyboardType = KeyboardType.Uri,
         )
         FormField(
             label = "Support URL",
-            value = store.supportUrl.orEmpty(),
-            onValueChange = { value -> viewModel.edit { it.copy(supportUrl = value.ifBlank { null }) } },
+            value = draft.supportUrl,
+            onValueChange = { value -> viewModel.editDraft { it.copy(supportUrl = value) } },
             supportingText = "Shown to a buyer when a payment goes wrong. {OrderId} and " +
                 "{InvoiceId} are substituted.",
             keyboardType = KeyboardType.Uri,
@@ -445,20 +640,21 @@ private fun StoreGeneralSection(
         FormField(
             label = "Default currency",
             value = store.defaultCurrency,
-            onValueChange = { value -> viewModel.edit { it.copy(defaultCurrency = value.uppercase()) } },
+            onValueChange = { value -> viewModel.edit { it.copy(defaultCurrency = value.uppercase(Locale.ROOT)) } },
             supportingText = "The currency new invoices are priced in, for example EUR or SATS.",
+            error = errors[StoreField.DefaultCurrency],
         )
         FormField(
             label = "Brand colour",
-            value = store.brandColor.orEmpty(),
-            onValueChange = { value -> viewModel.edit { it.copy(brandColor = value.ifBlank { null }) } },
+            value = draft.brandColor,
+            onValueChange = { value -> viewModel.editDraft { it.copy(brandColor = value) } },
             placeholder = "#0f3b82",
             leadingIcon = {
                 // The swatch is the only preview of what is being typed, and a
                 // hex code is edited one character at a time — so it crossfades
                 // between the half-finished colours rather than flicking
                 // through them.
-                val swatch = parseHexColour(store.brandColor)
+                val swatch = parseHexColour(draft.brandColor)
                 val shown by animateColorAsState(
                     targetValue = swatch ?: MaterialTheme.colorScheme.surfaceVariant,
                     animationSpec = Motion.color,
@@ -479,8 +675,8 @@ private fun StoreGeneralSection(
         )
         FormField(
             label = "HTML title",
-            value = store.htmlTitle.orEmpty(),
-            onValueChange = { value -> viewModel.edit { it.copy(htmlTitle = value.ifBlank { null }) } },
+            value = draft.htmlTitle,
+            onValueChange = { value -> viewModel.editDraft { it.copy(htmlTitle = value) } },
             supportingText = "The browser tab title on the checkout page. Defaults to the store name.",
         )
         FormField(
@@ -502,6 +698,7 @@ private fun StoreGeneralSection(
 @Composable
 private fun StoreCheckoutSection(
     draft: StoreSettingsDraft,
+    errors: Map<StoreField, String>,
     viewModel: StoreSettingsViewModel,
     modifier: Modifier = Modifier,
 ) {
@@ -518,9 +715,10 @@ private fun StoreCheckoutSection(
         FormField(
             label = "Invoice expires after (minutes)",
             value = draft.invoiceExpirationMinutes,
-            onValueChange = { value -> viewModel.editDraft { it.copy(invoiceExpirationMinutes = value.digits()) } },
-            keyboardType = KeyboardType.Number,
+            onValueChange = { value -> viewModel.editDraft { it.copy(invoiceExpirationMinutes = value.decimalText()) } },
+            keyboardType = KeyboardType.Decimal,
             supportingText = "The server stores this in seconds; it is shown here in minutes.",
+            error = errors[StoreField.InvoiceExpiration],
         )
         FormField(
             label = "Show the countdown for the last (seconds)",
@@ -528,13 +726,19 @@ private fun StoreCheckoutSection(
             onValueChange = { value -> viewModel.editDraft { it.copy(displayExpirationSeconds = value.digits()) } },
             keyboardType = KeyboardType.Number,
             supportingText = "The timer stays hidden until this much of the invoice life is left.",
+            error = errors[StoreField.DisplayTimer],
         )
         FormField(
             label = "Keep watching for payment for (hours)",
             value = draft.monitoringExpirationHours,
-            onValueChange = { value -> viewModel.editDraft { it.copy(monitoringExpirationHours = value.digits()) } },
-            keyboardType = KeyboardType.Number,
-            supportingText = "A late payment arriving inside this window still marks the invoice paid.",
+            onValueChange = { value -> viewModel.editDraft { it.copy(monitoringExpirationHours = value.decimalText()) } },
+            keyboardType = KeyboardType.Decimal,
+            // BTCPay leaves a payment made after expiry at Expired and only
+            // flags it as late; this window is how long a paid invoice may
+            // wait for its confirmations before it becomes invalid.
+            supportingText = "How long after expiry a payment may still confirm. A payment made " +
+                "after expiry is marked late, not paid, and needs your review.",
+            error = errors[StoreField.Monitoring],
         )
         FormField(
             label = "Payment tolerance (%)",
@@ -544,6 +748,7 @@ private fun StoreCheckoutSection(
             // Unlike almost every other amount in the API this one goes on the
             // wire as a plain JSON number rather than a decimal string.
             supportingText = "An underpayment inside this margin is still accepted. 0 means exact.",
+            error = errors[StoreField.Tolerance],
         )
         FormDropdown(
             label = "Network fee charged to the buyer",
@@ -556,7 +761,9 @@ private fun StoreCheckoutSection(
             label = "Default payment method",
             options = listOf("") + paymentMethodIds(),
             selected = store.defaultPaymentMethod.orEmpty(),
-            onSelect = { value -> viewModel.edit { it.copy(defaultPaymentMethod = value.ifBlank { null }) } },
+            // "" rather than null for "No preference": the server's merge
+            // skips a null and would keep the old default.
+            onSelect = { value -> viewModel.edit { it.copy(defaultPaymentMethod = value) } },
             optionLabel = { if (it.isBlank()) "No preference" else it },
             supportingText = "Pre-selected on the checkout page.",
         )
@@ -591,6 +798,7 @@ private fun StoreCheckoutSection(
             keyboardType = KeyboardType.Number,
             enabled = store.showRecommendedFee,
             supportingText = "Blocks to confirm within, used to quote a fee rate.",
+            error = errors[StoreField.FeeTarget],
         )
         FormSwitch(
             title = "Celebrate a payment",
@@ -625,6 +833,7 @@ private fun StoreCheckoutSection(
             onValueChange = { value -> viewModel.editDraft { it.copy(refundExpirationDays = value.digits()) } },
             keyboardType = KeyboardType.Number,
             supportingText = "How long a BOLT11 refund claim stays valid.",
+            error = errors[StoreField.RefundDays],
         )
     }
 }
@@ -664,46 +873,53 @@ private fun StoreLightningSection(
         )
         FormField(
             label = "Lightning invoice description",
-            value = store.lightningDescriptionTemplate.orEmpty(),
-            onValueChange = { value ->
-                viewModel.edit { it.copy(lightningDescriptionTemplate = value.ifBlank { null }) }
-            },
+            value = draft.lightningDescription,
+            onValueChange = { value -> viewModel.editDraft { it.copy(lightningDescription = value) } },
             singleLine = false,
             supportingText = "Placeholders: {StoreName}, {ItemDescription}, {OrderId}.",
         )
     }
 }
 
+/**
+ * A null flag means "inherit the server default", which is a third state and
+ * not the same as off, so these are dropdowns rather than switches.
+ *
+ * "Server default" is offered only while the stored flag is null. Greenfield
+ * merges the PUT over the stored store and skips nulls, so once a flag is set,
+ * sending null leaves it set: the app cannot give "inherit" back.
+ */
 @Composable
 private fun StoreReceiptSection(
     draft: StoreSettingsDraft,
+    stored: ReceiptOptions?,
     viewModel: StoreSettingsViewModel,
     modifier: Modifier = Modifier,
 ) {
-    // A null flag means "inherit the server default", which is a third state and
-    // not the same as off — so these are dropdowns rather than switches.
     val receipt = draft.store.receipt
     fun set(transform: (ReceiptOptions) -> ReceiptOptions) =
         viewModel.edit { it.copy(receipt = transform(it.receipt ?: ReceiptOptions())) }
+    fun choices(storedValue: Boolean?) =
+        if (storedValue == null) StoreInheritable.entries else StoreInheritable.entries - StoreInheritable.Inherit
 
     FormSection("Receipts", modifier) {
         FormDropdown(
             label = "Show a receipt after payment",
-            options = StoreInheritable.entries,
+            options = choices(stored?.enabled),
             selected = StoreInheritable.of(receipt?.enabled),
             onSelect = { choice -> set { it.copy(enabled = choice.value) } },
             optionLabel = { it.label },
         )
         FormDropdown(
             label = "Show the QR code on the receipt",
-            options = StoreInheritable.entries,
+            options = choices(stored?.showQR),
             selected = StoreInheritable.of(receipt?.showQR),
             onSelect = { choice -> set { it.copy(showQR = choice.value) } },
             optionLabel = { it.label },
         )
         FormDropdown(
             label = "List the payments on the receipt",
-            options = StoreInheritable.entries,
+            options = choices(stored?.showPayments),
             selected = StoreInheritable.of(receipt?.showPayments),
             onSelect = { choice -> set { it.copy(showPayments = choice.value) } },
             optionLabel = { it.label },
@@ -842,7 +1058,7 @@ private fun StoreMenuRow(
 
 /** Tri-state for the receipt flags, where a null is "inherit", not "off". */
 enum class StoreInheritable(val label: String, val value: Boolean?) {
-    Inherit("Use the server default", null),
+    Inherit("Server default", null),
     On("On", true),
     Off("Off", false),
     ;
@@ -873,8 +1089,48 @@ private fun NetworkFeeMode.feeModeLabel(): String = when (this) {
 
 private fun String.digits(): String = filter { it.isDigit() }
 
+/**
+ * Digits and the first ',' or '.', for the durations. A digits-only filter
+ * dropped the separator of a shown "1.5" hours, so one more digit made it
+ * "155" hours, and a fraction could not be typed at all.
+ */
+private fun String.decimalText(): String {
+    val separator = indexOfFirst { it == ',' || it == '.' }
+    return filterIndexed { index, c -> c.isDigit() || index == separator }
+}
+
 private fun parseHexColour(value: String?): Color? {
     val hex = value?.trim()?.removePrefix("#")?.takeIf { it.length == 6 || it.length == 8 } ?: return null
     val parsed = hex.toLongOrNull(16) ?: return null
     return if (hex.length == 6) Color(0xFF000000L or parsed) else Color(parsed)
+}
+
+// ---------------------------------------------------------------------------
+// Shared by the store screens
+// ---------------------------------------------------------------------------
+
+/**
+ * For a POST that only reads, such as a preview. It changes nothing on the
+ * server, so no answer is a plain timeout and trying again is safe; the
+ * unknown-outcome text would send the user to check for a change that cannot
+ * have happened. When an answer did arrive (a gateway error, an unreadable
+ * body), the client keeps it as the cause and that is what is shown; with no
+ * answer it stays a plain timeout.
+ */
+internal fun Throwable.asReadFailure(): ApiException =
+    asApiException().let {
+        if (it is ApiException.OutcomeUnknown) (it.cause as? ApiException) ?: ApiException.Timeout(it) else it
+    }
+
+private val ISO_CURRENCIES: Set<String> by lazy { Currency.getAvailableCurrencies().mapTo(HashSet()) { it.currencyCode } }
+
+/**
+ * The field error for a store's default currency, or null. The server stores
+ * any letters, and a typo such as "EUT" then fails every invoice at the rate
+ * lookup, so only ISO 4217 codes and the crypto codes this app knows pass.
+ */
+internal fun currencyProblem(code: String): String? {
+    val upper = code.trim().uppercase(Locale.ROOT)
+    return if (upper in ISO_CURRENCIES || Amounts.isCrypto(upper)) null
+    else "Enter a currency code, for example USD, EUR or BTC."
 }

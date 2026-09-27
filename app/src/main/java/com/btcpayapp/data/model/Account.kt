@@ -46,17 +46,6 @@ sealed interface Credential {
     @Serializable
     @SerialName("apiKey")
     data class ApiKey(val key: String) : Credential
-
-    /**
-     * HTTP Basic with the account's email and password. BTCPay accepts it only
-     * when the user has explicitly opted in (`allowGreenfieldBasicAuth`), and it
-     * grants *unrestricted* access, so the app uses it for exactly one thing:
-     * minting a scoped API key during onboarding, after which it is discarded.
-     * It is never persisted by the pairing flow.
-     */
-    @Serializable
-    @SerialName("basic")
-    data class Basic(val username: String, val password: String) : Credential
 }
 
 @Serializable

@@ -169,6 +169,22 @@ object NodeDirectory {
         return nicknames[key]?.isNotBlank() == true || wellKnownName(key) != null
     }
 
+    /**
+     * The operator's nickname or a [CURATED] name, else null. Never a name
+     * from the bundled table.
+     *
+     * Payment confirmations use this, not [label]. A bundled alias is chosen
+     * by the node's owner: a one-channel node may call itself "okx.com", and
+     * the generator cannot catch every look-alike. On a channel row that is a
+     * hint; on "Pay 500,000 sat to …" it would be the app vouching for a
+     * payee just before money leaves for good.
+     */
+    fun trustedName(pubkey: String, nicknames: Map<String, String> = emptyMap()): String? {
+        val key = normalise(pubkey)
+        nicknames[key]?.takeIf { it.isNotBlank() }?.let { return it.trim() }
+        return CURATED[key]
+    }
+
     /** `03864ef0…97a3f8f` — enough to compare against another screen by eye. */
     fun short(pubkey: String): String {
         val key = normalise(pubkey)

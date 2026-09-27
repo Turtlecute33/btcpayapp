@@ -1,6 +1,7 @@
 package com.btcpayapp.ui.theme
 
 import android.os.Build
+import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
@@ -12,12 +13,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.ReadOnlyComposable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.core.view.WindowCompat
 import com.btcpayapp.data.model.ThemeMode
 
 private val LocalStatusColors: ProvidableCompositionLocal<StatusColors> =
@@ -65,6 +69,22 @@ fun BtcPayTheme(
     }
 
     val statusColors = if (dark) DarkStatusColors else LightStatusColors
+
+    // The system-bar icons follow the app's theme, not the system's. The bars
+    // are transparent, so dark icons over the dark theme (or light icons over
+    // the light one) are simply invisible. `enableEdgeToEdge` picks the icon
+    // colour once, from the system setting, and the activity handles uiMode
+    // changes itself, so nothing else would ever correct it.
+    val view = LocalView.current
+    val window = LocalActivity.current?.window
+    if (window != null && !view.isInEditMode) {
+        SideEffect {
+            WindowCompat.getInsetsController(window, view).apply {
+                isAppearanceLightStatusBars = !dark
+                isAppearanceLightNavigationBars = !dark
+            }
+        }
+    }
 
     CompositionLocalProvider(
         LocalStatusColors provides statusColors,

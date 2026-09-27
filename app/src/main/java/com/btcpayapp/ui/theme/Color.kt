@@ -13,6 +13,10 @@ import androidx.compose.ui.graphics.Color
  * background makes amounts harder to read. Tonal values follow the Material 3
  * roles rather than being hand-picked per component, so dynamic colour and this
  * palette produce the same visual hierarchy.
+ *
+ * Every role is set, the surface containers and inverse roles included. A role
+ * left out falls back to Material's baseline purple, and cards, keypad keys and
+ * the snackbar action then turn lavender on this blue-grey background.
  */
 internal object Palette {
     val Orange10 = Color(0xFF2B1600)
@@ -24,13 +28,23 @@ internal object Palette {
     val Orange90 = Color(0xFFFFDDB6)
     val Orange100 = Color(0xFFFFFFFF)
 
+    val Slate4 = Color(0xFF0A0C10)
+    val Slate6 = Color(0xFF0F1115)
     val Slate10 = Color(0xFF15181D)
+    val Slate12 = Color(0xFF191C22)
+    val Slate17 = Color(0xFF24272E)
     val Slate20 = Color(0xFF2A2E35)
+    val Slate24 = Color(0xFF33373F)
     val Slate30 = Color(0xFF41454D)
     val Slate40 = Color(0xFF585D65)
     val Slate80 = Color(0xFFC1C6CF)
+    val Slate87 = Color(0xFFD5DAE3)
     val Slate90 = Color(0xFFDDE2EB)
+    val Slate92 = Color(0xFFE3E8F1)
+    val Slate94 = Color(0xFFE8EDF6)
     val Slate95 = Color(0xFFEBF0F9)
+    val Slate96 = Color(0xFFEFF3FA)
+    val Slate99 = Color(0xFFFCFCFF)
 
     val Teal40 = Color(0xFF00696E)
     val Teal80 = Color(0xFF4EDADF)
@@ -59,14 +73,24 @@ internal val LightScheme = lightColorScheme(
     onError = Color.White,
     errorContainer = Palette.Red90,
     onErrorContainer = Palette.Red10,
-    background = Color(0xFFFCFCFF),
+    background = Palette.Slate99,
     onBackground = Palette.Slate10,
-    surface = Color(0xFFFCFCFF),
+    surface = Palette.Slate99,
     onSurface = Palette.Slate10,
     surfaceVariant = Palette.Slate95,
     onSurfaceVariant = Palette.Slate30,
     outline = Color(0xFF75777F),
     outlineVariant = Color(0xFFC5C6D0),
+    surfaceDim = Palette.Slate87,
+    surfaceBright = Palette.Slate99,
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = Palette.Slate96,
+    surfaceContainer = Palette.Slate94,
+    surfaceContainerHigh = Palette.Slate92,
+    surfaceContainerHighest = Palette.Slate90,
+    inverseSurface = Palette.Slate20,
+    inverseOnSurface = Palette.Slate95,
+    inversePrimary = Palette.Orange80,
 )
 
 internal val DarkScheme = darkColorScheme(
@@ -86,14 +110,24 @@ internal val DarkScheme = darkColorScheme(
     onError = Color(0xFF690005),
     errorContainer = Color(0xFF93000A),
     onErrorContainer = Palette.Red90,
-    background = Color(0xFF0F1115),
+    background = Palette.Slate6,
     onBackground = Palette.Slate90,
-    surface = Color(0xFF0F1115),
+    surface = Palette.Slate6,
     onSurface = Palette.Slate90,
     surfaceVariant = Palette.Slate20,
     onSurfaceVariant = Palette.Slate80,
     outline = Color(0xFF8E9099),
     outlineVariant = Palette.Slate30,
+    surfaceDim = Palette.Slate6,
+    surfaceBright = Palette.Slate24,
+    surfaceContainerLowest = Palette.Slate4,
+    surfaceContainerLow = Palette.Slate10,
+    surfaceContainer = Palette.Slate12,
+    surfaceContainerHigh = Palette.Slate17,
+    surfaceContainerHighest = Palette.Slate20,
+    inverseSurface = Palette.Slate90,
+    inverseOnSurface = Palette.Slate20,
+    inversePrimary = Palette.Orange40,
 )
 
 /**

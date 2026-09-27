@@ -1,0 +1,7 @@
+{
+  "source": "https://mempool.emzy.de/api/v1/lightning",
+  "generated": "2026-09-26",
+  "script": "build-node-directory.rb blob 6bbac9247799c121191f66c99010c718ae1e6545",
+  "nodes": 6132,
+  "sha256": "cc623c3786cb21c65b416d04848c4db013f180fe08296903f232504698d53bed"
+}

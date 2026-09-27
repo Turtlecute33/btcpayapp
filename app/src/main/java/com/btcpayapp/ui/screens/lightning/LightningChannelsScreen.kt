@@ -1,5 +1,6 @@
 package com.btcpayapp.ui.screens.lightning
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -40,13 +41,16 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -56,37 +60,42 @@ import com.btcpayapp.core.scan.ScannedPayload
 import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.mayHaveGoneThrough
 import com.btcpayapp.data.api.dto.LightningChannelData
 import com.btcpayapp.data.api.dto.OpenChannelRequest
+import com.btcpayapp.data.api.endpoints.LightningScope
 import com.btcpayapp.data.api.endpoints.connectToLightningNode
 import com.btcpayapp.data.api.endpoints.lightningChannels
 import com.btcpayapp.data.api.endpoints.openLightningChannel
 import com.btcpayapp.data.api.endpoints.walletFeeRate
 import com.btcpayapp.data.model.BitcoinUnit
+import com.btcpayapp.data.session.OutcomeHold
 import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.chainSubtitle
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppCard
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.FormProblem
 import com.btcpayapp.ui.components.CopyableField
 import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
+import com.btcpayapp.ui.components.FigureText
 import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusPill
+import com.btcpayapp.ui.components.maskedIfPrivate
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
+import com.btcpayapp.ui.components.NoStoreSelectedState
 import com.btcpayapp.ui.theme.AppTheme
 import java.math.BigDecimal
 import java.math.BigInteger
 import java.math.RoundingMode
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -99,6 +108,15 @@ import kotlinx.coroutines.launch
  */
 private const val CHANNEL_FEE_BLOCK_TARGET = 6
 
+/**
+ * What an open with no answer tells the operator. The funding may already be
+ * on its way, and a second open would lock more of the node's funds in a
+ * second channel, so Open stays off for the rest of this screen. A pending
+ * channel shows in the Lightning screen's pending count, not in this list.
+ */
+private const val OPEN_UNKNOWN =
+    "The channel may be opening. Check for a pending channel on the Lightning screen before you try again."
+
 data class LightningChannelsState(
     val channels: List<LightningChannelData> = emptyList(),
     val loading: Boolean = false,
@@ -106,6 +124,8 @@ data class LightningChannelsState(
     val nodeOffline: Boolean = false,
     val noStore: Boolean = false,
     val error: ApiException? = null,
+    /** False when the key may not use this node, so the open form is not offered. */
+    val canOpen: Boolean = true,
 
     // --- Connect / open form ------------------------------------------------
     val sheetOpen: Boolean = false,
@@ -114,14 +134,32 @@ data class LightningChannelsState(
     val feeRate: String = "",
     /** True while [feeRate] still holds the estimate rather than a typed value. */
     val feeRateIsEstimate: Boolean = false,
-    val busy: Boolean = false,
+    /** One flag per button, so the spinner is on the button that was pressed. */
+    val connecting: Boolean = false,
+    val opening: Boolean = false,
+    /** The address last connected to, so the sheet can say it worked. */
+    val connectedUri: String? = null,
+    /** An open got no answer; see [OPEN_UNKNOWN]. */
+    val openUnknown: Boolean = false,
+    /** The open waiting for the operator's review. */
+    val review: ChannelReview? = null,
     val formError: String? = null,
     val message: String? = null,
 
     // --- Peer detail --------------------------------------------------------
     val peerDetail: LightningChannelData? = null,
     val nicknameDraft: String? = null,
-)
+    val nicknameError: String? = null,
+) {
+    val busy: Boolean get() = connecting || opening
+}
+
+/**
+ * A channel open, parsed and checked. The review dialog shows this and the
+ * request is built from it and nothing else, so what the operator confirmed
+ * is what goes to the node, even if a field changes while the prompt is up.
+ */
+data class ChannelReview(val nodeUri: String, val sats: BigDecimal, val feeRate: BigDecimal)
 
 class LightningChannelsViewModel(
     private val graph: AppGraph,
@@ -129,31 +167,45 @@ class LightningChannelsViewModel(
     private val serverNode: Boolean,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(LightningChannelsState(loading = true))
+    private val node = LightningBinding(graph.session, serverNode)
+
+    /** Whose node opens the channel, for the confirmation: a multi-store operator must see it. */
+    val owner: String get() = node.owner
+
+    private val _state = MutableStateFlow(
+        LightningChannelsState(loading = true, canOpen = graph.canUseNode(node.scope)),
+    )
     val state = _state.asStateFlow()
 
+    // An open with no answer may have locked the node's funds in a channel.
+    // While Open stays off for it, a store or account switch is refused: the
+    // switch would clear this screen, and the next open could make a second
+    // channel. Owned here, not by the screen, so a tab switch or a screen
+    // pushed on top does not let the switch through.
+    private val outcomeHold = OutcomeHold(graph.session).also(::addCloseable)
+
     init {
-        if (serverNode) {
+        load()
+        loadFeeEstimate()
+        node.retryWhenKnown(viewModelScope) {
+            _state.update { it.copy(canOpen = graph.canUseNode(node.scope)) }
             load()
-        } else {
-            viewModelScope.launch {
-                graph.session.activeStore
-                    .map { it?.id }
-                    .distinctUntilChanged()
-                    .collectLatest { storeId ->
-                        if (storeId != null) {
-                            load()
-                            loadFeeEstimate()
-                        } else {
-                            delay(NO_STORE_GRACE_MS)
-                            _state.update { it.copy(loading = false, noStore = true) }
-                        }
-                    }
-            }
+            loadFeeEstimate()
         }
     }
 
     fun refresh() = load(refreshing = true)
+
+    /**
+     * Reloads quietly when the screen comes back, from the scanner or from
+     * another app. Skipped while a load runs, which also covers the first
+     * resume, straight after [init].
+     */
+    fun onResume() {
+        val current = _state.value
+        if (current.loading || current.refreshing) return
+        load()
+    }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
@@ -175,35 +227,39 @@ class LightningChannelsViewModel(
 
     fun showPeer(channel: LightningChannelData) = _state.update { it.copy(peerDetail = channel) }
 
-    fun dismissPeer() = _state.update { it.copy(peerDetail = null, nicknameDraft = null) }
+    fun dismissPeer() = _state.update { it.copy(peerDetail = null, nicknameDraft = null, nicknameError = null) }
 
     fun startRename() {
         val pubkey = _state.value.peerDetail?.remoteNode ?: return
         val existing = graph.settings.settings.value
             .lightningNodeNicknames[NodeDirectory.normalise(pubkey)]
-        _state.update { it.copy(nicknameDraft = existing.orEmpty()) }
+        _state.update { it.copy(nicknameDraft = existing.orEmpty(), nicknameError = null) }
     }
 
-    fun setNicknameDraft(value: String) = _state.update { it.copy(nicknameDraft = value) }
+    fun setNicknameDraft(value: String) = _state.update { it.copy(nicknameDraft = value, nicknameError = null) }
 
-    fun cancelRename() = _state.update { it.copy(nicknameDraft = null) }
+    fun cancelRename() = _state.update { it.copy(nicknameDraft = null, nicknameError = null) }
 
     /**
      * Saves — or, on a blank name, clears — the nickname for the peer whose
      * sheet is open. Stays on the device; see
-     * [com.btcpayapp.core.lightning.NodeDirectory].
+     * [com.btcpayapp.core.lightning.NodeDirectory]. A failed write keeps the
+     * dialog open and says so, rather than closing as if it had worked.
      */
     fun saveNickname() {
         val snapshot = _state.value
         val pubkey = snapshot.peerDetail?.remoteNode?.let(NodeDirectory::normalise) ?: return
         val name = snapshot.nicknameDraft?.trim().orEmpty().take(40)
         viewModelScope.launch {
-            graph.settings.update { settings ->
+            val saved = graph.settings.update { settings ->
                 val nicknames = settings.lightningNodeNicknames.toMutableMap()
                 if (name.isEmpty()) nicknames.remove(pubkey) else nicknames[pubkey] = name
                 settings.copy(lightningNodeNicknames = nicknames.toMap())
             }
-            _state.update { it.copy(nicknameDraft = null) }
+            _state.update {
+                if (saved) it.copy(nicknameDraft = null, nicknameError = null)
+                else it.copy(nicknameError = "Could not save the name.")
+            }
         }
     }
 
@@ -221,83 +277,138 @@ class LightningChannelsViewModel(
     }
 
     fun connectPeer() {
-        val uri = _state.value.nodeUri.trim()
-        if (uri.isEmpty()) {
-            _state.update { it.copy(formError = "Enter a node address first.") }
-            return
-        }
-        val scope = graph.lightningScopeOrNull(serverNode) ?: run {
-            _state.update { it.copy(noStore = true) }
-            return
-        }
-        viewModelScope.launch {
-            _state.update { it.copy(busy = true, formError = null) }
-            runCatching { graph.session.requireApi().connectToLightningNode(scope, uri, cryptoCode) }
-                .onSuccess {
-                    _state.update { it.copy(busy = false, message = "Connected to the peer.") }
-                }
-                .onFailure { failure ->
-                    _state.update {
-                        it.copy(busy = false, formError = failure.asApiException().channelMessage())
-                    }
-                }
-        }
-    }
-
-    fun openChannel() {
         val snapshot = _state.value
+        // `enabled` is one recomposition behind the click.
+        if (snapshot.busy) return
         val uri = snapshot.nodeUri.trim()
         if (uri.isEmpty()) {
             _state.update { it.copy(formError = "Enter a node address first.") }
             return
         }
-        val amount = Amounts.parse(snapshot.channelAmountSats)?.takeIf { it.signum() > 0 }
-        if (amount == null) {
-            _state.update { it.copy(formError = "Enter the channel size in satoshi.") }
-            return
-        }
-        val feeRate = Amounts.parse(snapshot.feeRate)?.toDouble()?.takeIf { it > 0 && it.isFinite() }
-        if (feeRate == null) {
-            _state.update { it.copy(formError = "Enter a fee rate in sat/vB.") }
-            return
-        }
-
-        val scope = graph.lightningScopeOrNull(serverNode) ?: run {
+        val scope = node.scope ?: run {
             _state.update { it.copy(noStore = true) }
             return
         }
-
+        _state.update { it.copy(connecting = true, formError = null) }
         viewModelScope.launch {
-            _state.update { it.copy(busy = true, formError = null) }
+            runCatching { graph.session.requireApi().connectToLightningNode(scope, uri, cryptoCode) }
+                .onSuccess {
+                    _state.update { it.copy(connecting = false, connectedUri = uri) }
+                }
+                .onFailure { failure ->
+                    val text = failure.asApiException().channelMessage()
+                    _state.update { it.copy(connecting = false).withProblem(text) }
+                }
+        }
+    }
+
+    /**
+     * Checks the form and puts the open up for review. Nothing is sent here:
+     * the screen shows the review, asks the spend gate, and only then calls
+     * [openChannel].
+     */
+    fun reviewChannel() {
+        val snapshot = _state.value
+        if (snapshot.busy || snapshot.openUnknown) return
+        val uri = snapshot.nodeUri.trim()
+        val sats = channelSats(snapshot.channelAmountSats)
+        // The on-chain send's rule: ',' and '.' always mark the decimal, so
+        // "1.125" is 1.125 sat/vB and never an offer of 1125.
+        val feeRate = Amounts.feeRate(snapshot.feeRate)
+        val problem = when {
+            uri.isEmpty() -> "Enter a node address first."
+            !NodeDirectory.isPubkey(uri) -> "That is not a node address. It starts with the node's public key."
+            sats == null -> channelSizeProblem(snapshot.channelAmountSats)
+            feeRate == null -> Amounts.parseProblem(snapshot.feeRate) ?: "Enter a fee rate in sat/vB."
+            else -> null
+        }
+        if (problem != null || sats == null || feeRate == null) {
+            _state.update { it.copy(formError = problem) }
+            return
+        }
+        _state.update { it.copy(review = ChannelReview(uri, sats, feeRate), formError = null) }
+    }
+
+    fun dismissReview() = _state.update { it.copy(review = null) }
+
+    /**
+     * Hands the review to the screen, once. The dialog's button can be pressed
+     * twice in one frame; only the first press gets it, so one review can
+     * never be sent twice.
+     */
+    fun takeReview(): ChannelReview? {
+        val review = _state.value.review ?: return null
+        _state.update { it.copy(review = null) }
+        return review
+    }
+
+    /** A refusal from the spend gate, shown where the form is. */
+    fun showProblem(text: String) = _state.update { it.withProblem(text) }
+
+    /**
+     * Opens the channel in [review]. Call it only after the spend gate said
+     * yes: the funding transaction spends the node's on-chain funds as soon
+     * as the server has the request.
+     */
+    fun openChannel(review: ChannelReview) {
+        // `enabled` is one recomposition behind the click, and LND allows
+        // several pending channels with one peer, so a second tap would open
+        // a second channel.
+        if (_state.value.busy || _state.value.openUnknown) return
+        val scope = node.scope ?: run {
+            _state.update { it.copy(noStore = true) }
+            return
+        }
+        updateOpen { it.copy(opening = true, formError = null) }
+        viewModelScope.launch {
             runCatching {
-                graph.session.requireApi().openLightningChannel(
-                    scope = scope,
-                    request = OpenChannelRequest(
-                        nodeURI = uri,
-                        // Satoshi on the wire, unlike every other Lightning
-                        // amount in this API.
-                        channelAmount = amount.setScale(0, RoundingMode.DOWN).toPlainString(),
-                        feeRate = feeRate,
-                    ),
-                    cryptoCode = cryptoCode,
-                )
+                // Marked as money in flight, so a store switch waits for the
+                // answer instead of cancelling the request and losing it.
+                graph.session.spending {
+                    graph.session.requireApi().openLightningChannel(
+                        scope = scope,
+                        request = OpenChannelRequest(
+                            nodeURI = review.nodeUri,
+                            // Satoshi on the wire, unlike every other Lightning
+                            // amount in this API.
+                            channelAmount = review.sats.toBigInteger().toString(),
+                            feeRate = review.feeRate.toDouble(),
+                        ),
+                        cryptoCode = cryptoCode,
+                    )
+                }
             }.onSuccess {
-                _state.update {
+                updateOpen {
                     it.copy(
-                        busy = false,
+                        opening = false,
                         sheetOpen = false,
                         nodeUri = "",
                         channelAmountSats = "",
+                        connectedUri = null,
                         message = "Channel opening. It will show once the funding transaction confirms.",
                     )
                 }
                 load(refreshing = true)
             }.onFailure { failure ->
-                _state.update {
-                    it.copy(busy = false, formError = failure.asApiException().channelMessage())
+                val error = failure.asApiException()
+                updateOpen {
+                    if (error.mayHaveGoneThrough()) {
+                        it.copy(opening = false, openUnknown = true).withProblem(OPEN_UNKNOWN)
+                    } else {
+                        it.copy(opening = false).withProblem(error.channelMessage())
+                    }
                 }
             }
         }
+    }
+
+    /**
+     * Every change to the open's phase goes through here, so [outcomeHold]
+     * follows [LightningChannelsState.openUnknown]. No other update sets it.
+     */
+    private fun updateOpen(change: (LightningChannelsState) -> LightningChannelsState) {
+        _state.update(change)
+        outcomeHold.set(_state.value.openUnknown)
     }
 
     /**
@@ -307,11 +418,10 @@ class LightningChannelsViewModel(
      * already know what sat/vB is reasonable today, and guessing a constant
      * would be worse — fee markets move by two orders of magnitude. A failure
      * here is silent: the field simply stays empty and asks for a number, which
-     * is where it was before.
+     * is where it was before. The server node has no store, so no estimator.
      */
     private fun loadFeeEstimate() {
-        if (serverNode) return
-        val storeId = graph.session.activeStore.value?.id ?: return
+        val storeId = (node.scope as? LightningScope.Store)?.storeId ?: return
         viewModelScope.launch {
             val api = runCatching { graph.session.requireApi() }.getOrNull() ?: return@launch
             val rate = runCatching {
@@ -323,7 +433,7 @@ class LightningChannelsViewModel(
                 // flight.
                 if (current.feeRate.isNotBlank() && !current.feeRateIsEstimate) current
                 else current.copy(
-                    feeRate = Amounts.trim(BigDecimal.valueOf(rate), 2),
+                    feeRate = Amounts.toInput(BigDecimal.valueOf(rate), 2),
                     feeRateIsEstimate = true,
                 )
             }
@@ -331,7 +441,7 @@ class LightningChannelsViewModel(
     }
 
     private fun load(refreshing: Boolean = false) {
-        val scope = graph.lightningScopeOrNull(serverNode)
+        val scope = node.scope
         if (scope == null) {
             _state.update { it.copy(loading = false, refreshing = false, noStore = true) }
             return
@@ -370,6 +480,49 @@ class LightningChannelsViewModel(
                 }
         }
     }
+}
+
+/**
+ * Whether the key may connect peers and open channels on this node, from the
+ * key's grant. A read-only key is not offered a form whose only outcome is a
+ * 403 at the end. Unknown grants say yes and let the server decide.
+ */
+private fun AppGraph.canUseNode(scope: LightningScope?): Boolean = when (scope) {
+    LightningScope.Server -> session.hasPermission("btcpay.server.canuseinternallightningnode")
+    is LightningScope.Store -> session.hasPermission("btcpay.store.canuselightningnode", scope.storeId)
+    null -> false
+}
+
+/**
+ * [text] where the operator can see it: in the sheet while it is open, because
+ * the screen's snackbar is drawn under a modal sheet, else as a snackbar.
+ */
+private fun LightningChannelsState.withProblem(text: String): LightningChannelsState =
+    if (sheetOpen) copy(formError = text) else copy(message = text)
+
+/** The channel size in whole sat, or null. The node takes no fraction of a sat here. */
+private fun channelSats(input: String): BigDecimal? =
+    Amounts.parse(input)?.takeIf { it.signum() > 0 && it.stripTrailingZeros().scale() <= 0 }
+
+private fun channelSizeProblem(input: String): String =
+    Amounts.parseProblem(input)
+        ?: if (Amounts.parse(input)?.signum() == 1) "Enter a whole number of sat." else "Enter the channel size in sat."
+
+/**
+ * The review: who the channel is with, its size in both units, the fee rate,
+ * and where the money comes from. The peer is named only by the operator's
+ * nickname or a curated name, never by the alias a node picks for itself, and
+ * its key is always shown.
+ */
+private fun reviewText(review: ChannelReview, owner: String, unit: BitcoinUnit, nicknames: Map<String, String>): String {
+    val key = NodeDirectory.short(review.nodeUri)
+    val peer = NodeDirectory.trustedName(review.nodeUri, nicknames)?.let { "$it ($key)" } ?: key
+    val btc = Amounts.satsToBtc(review.sats)
+    return "From: $owner\n" +
+        "Peer: $peer\n" +
+        "Size: ${Amounts.formatBitcoin(btc, unit)} (${Amounts.inOtherUnit(btc, unit)})\n" +
+        "Fee rate: ${Amounts.trim(review.feeRate, 8)} sat/vB\n\n" +
+        "The funding transaction spends on-chain funds of the node."
 }
 
 /**
@@ -415,10 +568,14 @@ fun LightningChannelsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState()
     val peerSheetState = rememberModalBottomSheetState()
+    val gate = rememberSpendGate()
+    val uiScope = rememberCoroutineScope()
 
     LaunchedEffect(scanResult) {
         scanResult?.let(viewModel::applyScan)
     }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -427,15 +584,22 @@ fun LightningChannelsScreen(
         }
     }
 
+    // Leaving would cancel the open with the view model and lose its answer,
+    // and without that answer the next open could be a second channel. Back
+    // waits until the answer is in.
+    BackHandler(enabled = state.opening) {}
+
     AppScreen(
         title = "Channels",
         subtitle = channelsSubtitle(state.channels, serverNode, cryptoCode),
-        onBack = onBack,
+        onBack = { if (!state.opening) onBack() },
         refreshing = state.refreshing,
         onRefresh = viewModel::refresh,
         snackbarHostState = snackbarHostState,
         floatingActionButton = {
-            if (!state.noStore) {
+            // Only for a key that may use this node: a read-only key would
+            // fill in the whole form to be told no at the end.
+            if (!state.noStore && state.canOpen) {
                 ExtendedFloatingActionButton(
                     onClick = viewModel::openSheet,
                     icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
@@ -470,10 +634,14 @@ fun LightningChannelsScreen(
 
                 ChannelsPhase.Empty -> EmptyState(
                     title = "No channels",
-                    description = "Open a channel with a peer to send and receive over Lightning.",
+                    description = if (state.canOpen) {
+                        "Open a channel with a peer to send and receive over Lightning."
+                    } else {
+                        "This API key cannot open channels on this node."
+                    },
                     icon = Icons.Rounded.Hub,
-                    actionLabel = "Open a channel",
-                    onAction = viewModel::openSheet,
+                    actionLabel = if (state.canOpen) "Open a channel" else null,
+                    onAction = if (state.canOpen) viewModel::openSheet else null,
                 )
 
                 ChannelsPhase.Content -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {
@@ -514,9 +682,29 @@ fun LightningChannelsScreen(
                 onFeeRate = viewModel::setFeeRate,
                 onScan = onScan,
                 onConnect = viewModel::connectPeer,
-                onOpen = viewModel::openChannel,
+                onOpen = viewModel::reviewChannel,
             )
         }
+    }
+
+    // Composed after the sheet, so the dialog opens above it. The spend gate
+    // is asked here, from the screen's own scope, and never by the view model:
+    // it holds the activity, which a view model outlives.
+    state.review?.let { review ->
+        ConfirmDialog(
+            title = "Open a channel?",
+            message = reviewText(review, viewModel.owner, unit, nicknames),
+            confirmLabel = "Open channel",
+            onConfirm = {
+                viewModel.takeReview()?.let { approved ->
+                    val size = Amounts.formatBitcoin(Amounts.satsToBtc(approved.sats), unit)
+                    uiScope.afterSpendGate(gate, "Confirm channel", "$size from ${viewModel.owner}", viewModel::showProblem) {
+                        viewModel.openChannel(approved)
+                    }
+                }
+            },
+            onDismiss = viewModel::dismissReview,
+        )
     }
 
     state.peerDetail?.let { channel ->
@@ -537,6 +725,7 @@ fun LightningChannelsScreen(
         NicknameDialog(
             draft = draft,
             peer = state.peerDetail?.remoteNode.orEmpty(),
+            error = state.nicknameError,
             onChange = viewModel::setNicknameDraft,
             onSave = viewModel::saveNickname,
             onDismiss = viewModel::cancelRename,
@@ -607,14 +796,14 @@ private fun ChannelCard(
             Spacer(Modifier.height(8.dp))
             Row(Modifier.fillMaxWidth()) {
                 Text(
-                    text = "Spendable ${msatLabel(split.local, unit)}",
+                    text = "Spendable ${maskedIfPrivate(msatLabel(split.local, unit))}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = "Receivable ${msatLabel(split.remote, unit)}",
+                    text = "Receivable ${maskedIfPrivate(msatLabel(split.remote, unit))}",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
@@ -672,9 +861,9 @@ private fun PeerDetailSheet(
 
         Spacer(Modifier.height(16.dp))
         Row(Modifier.fillMaxWidth()) {
-            SheetFigure("Spendable", msatLabel(split.local, unit), Modifier.weight(1f))
-            SheetFigure("Receivable", msatLabel(split.remote, unit), Modifier.weight(1f))
-            SheetFigure("Capacity", msatLabel(channel.capacity, unit), Modifier.weight(1f))
+            SheetFigure("Spendable", maskedIfPrivate(msatLabel(split.local, unit)), Modifier.weight(1f))
+            SheetFigure("Receivable", maskedIfPrivate(msatLabel(split.remote, unit)), Modifier.weight(1f))
+            SheetFigure("Capacity", maskedIfPrivate(msatLabel(channel.capacity, unit)), Modifier.weight(1f))
         }
 
         Spacer(Modifier.height(16.dp))
@@ -701,7 +890,7 @@ private fun SheetFigure(label: String, value: String, modifier: Modifier = Modif
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(2.dp))
-        Text(value, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+        FigureText(value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -713,6 +902,7 @@ private fun SheetFigure(label: String, value: String, modifier: Modifier = Modif
 private fun NicknameDialog(
     draft: String,
     peer: String,
+    error: String?,
     onChange: (String) -> Unit,
     onSave: () -> Unit,
     onDismiss: () -> Unit,
@@ -737,7 +927,8 @@ private fun NicknameDialog(
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Name") },
                     placeholder = { Text(NodeDirectory.short(peer)) },
-                    supportingText = { Text("Leave empty to remove the name.") },
+                    supportingText = { Text(error ?: "Leave empty to remove the name.") },
+                    isError = error != null,
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     shape = MaterialTheme.shapes.small,
@@ -760,8 +951,10 @@ private fun NicknameDialog(
 private data class Liquidity(val local: String, val remote: String, val localShare: Float)
 
 private fun liquidityOf(channel: LightningChannelData): Liquidity {
-    val capacity = channel.capacity.toBigIntegerOrNull() ?: BigInteger.ZERO
-    val local = channel.localBalance.toBigIntegerOrNull() ?: BigInteger.ZERO
+    // Through `serverDecimal`, so a million-digit string from a broken node is
+    // not parsed on the main thread.
+    val capacity = Amounts.serverDecimal(channel.capacity)?.toBigInteger() ?: BigInteger.ZERO
+    val local = Amounts.serverDecimal(channel.localBalance)?.toBigInteger() ?: BigInteger.ZERO
     val remote = (capacity - local).coerceAtLeast(BigInteger.ZERO)
     val share = if (capacity.signum() <= 0) {
         0f
@@ -784,6 +977,14 @@ private fun PeerSheet(
     onConnect: () -> Unit,
     onOpen: () -> Unit,
 ) {
+    // Said in the sheet, next to the field: the screen's snackbar is drawn
+    // under a modal sheet, so "Connected" never reached the operator there.
+    val connected = state.connectedUri != null && state.connectedUri == state.nodeUri.trim()
+    // The size in BTC under the sat field, so a slip of one zero shows before
+    // anything is sent: "10000000" reads "= 0.1 BTC", not "= 0.01 BTC".
+    val sizeEcho = channelSats(state.channelAmountSats)
+        ?.let { "= ${Amounts.inOtherUnit(Amounts.satsToBtc(it), BitcoinUnit.Sat)}" }
+
     Column(
         Modifier
             .fillMaxWidth()
@@ -803,10 +1004,14 @@ private fun PeerSheet(
             value = state.nodeUri,
             onValueChange = onNodeUri,
             placeholder = "pubkey@host:port",
-            supportingText = "Connect first, then open a channel with the same peer.",
+            supportingText = if (connected) {
+                "Connected to this peer."
+            } else {
+                "Connect first, then open a channel with the same peer."
+            },
             enabled = !state.busy,
             trailingIcon = {
-                IconButton(onClick = onScan) {
+                IconButton(onClick = onScan, enabled = !state.busy) {
                     Icon(Icons.Rounded.QrCodeScanner, contentDescription = "Scan a node address")
                 }
             },
@@ -817,7 +1022,7 @@ private fun PeerSheet(
             enabled = !state.busy,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
         ) {
-            Text("Connect")
+            BusyLabel("Connect", busy = state.connecting)
         }
 
         FormField(
@@ -825,7 +1030,7 @@ private fun PeerSheet(
             value = state.channelAmountSats,
             onValueChange = onChannelAmount,
             placeholder = "100000",
-            supportingText = "Funded from the node's on-chain balance.",
+            supportingText = sizeEcho ?: "Funded from the node's on-chain balance.",
             enabled = !state.busy,
             keyboardType = KeyboardType.Number,
         )
@@ -845,26 +1050,33 @@ private fun PeerSheet(
             imeAction = ImeAction.Done,
         )
 
-        FormProblem(state.formError, verticalPadding = 4.dp)
+        FormProblem(state.formError ?: OPEN_UNKNOWN.takeIf { state.openUnknown }, verticalPadding = 4.dp)
 
         Button(
             onClick = onOpen,
-            enabled = !state.busy,
+            enabled = !state.busy && !state.openUnknown,
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
         ) {
-            // The spinner cross-fades in beside the label rather than shoving
-            // it sideways. Opening a channel takes a few seconds against a node
-            // behind Tor, and the label is what says which of the two buttons
-            // on this sheet was pressed.
-            AnimatedSwap(state.busy, label = "openChannel") { busy ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (busy) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(12.dp))
-                    }
-                    Text("Open channel")
-                }
+            BusyLabel("Open channel", busy = state.opening)
+        }
+    }
+}
+
+/**
+ * A button label with its own spinner, which cross-fades in beside the label
+ * rather than shoving it sideways. Opening a channel takes a few seconds
+ * against a node behind Tor, and each button on the sheet spins only for
+ * itself, so the label says which of the two was pressed.
+ */
+@Composable
+private fun BusyLabel(text: String, busy: Boolean) {
+    AnimatedSwap(busy, label = text) { spinning ->
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (spinning) {
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
             }
+            Text(text)
         }
     }
 }

@@ -35,7 +35,13 @@ data class PairRoute(
 )
 
 @Serializable
-data class ManualKeyRoute(val baseUrl: String, val pins: String = "")
+data class ManualKeyRoute(
+    val baseUrl: String,
+    val pins: String = "",
+    /** The access chosen on the pairing screen: a `PermissionSet` name such as `TakePayments`. */
+    val access: String = "TakePayments",
+    val serverAdmin: Boolean = false,
+)
 
 // --- Top-level tabs --------------------------------------------------------
 

@@ -17,7 +17,10 @@ import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.LockPerson
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Storefront
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -28,7 +31,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.btcpayapp.R
+import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.components.AppScreen
 import com.btcpayapp.ui.components.arrive
 
@@ -78,6 +83,16 @@ fun WelcomeScreen(onConnect: () -> Unit) {
                     style = MaterialTheme.typography.headlineSmall,
                     textAlign = TextAlign.Center,
                 )
+                Spacer(Modifier.height(8.dp))
+                // Right under the title, the first thing read: the
+                // name and the mark are the project's, so without this line a
+                // user can take the app for the official one.
+                Text(
+                    text = "Unofficial app. Not made or endorsed by the BTCPay Server Foundation.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
                 Spacer(Modifier.height(12.dp))
                 Text(
                     text = "This app talks to a BTCPay Server instance you control — your own box, " +
@@ -114,6 +129,10 @@ fun WelcomeScreen(onConnect: () -> Unit) {
 
             Spacer(Modifier.height(24.dp))
 
+            // No dismiss: the flag ends at the next vault save, such as
+            // connecting an account.
+            if (LocalAppGraph.current.accounts.lost.collectAsStateWithLifecycle().value) LostAccountsNotice()
+
             Button(
                 onClick = onConnect,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).arrive(4),
@@ -121,6 +140,35 @@ fun WelcomeScreen(onConnect: () -> Unit) {
                 Text("Connect a server")
             }
             Spacer(Modifier.height(32.dp))
+        }
+    }
+}
+
+/**
+ * The vault could not be opened and was moved aside. The API keys it held are
+ * still valid on their servers, so the user must revoke them there.
+ */
+@Composable
+private fun LostAccountsNotice() {
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer,
+            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        ),
+    ) {
+        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
+            Icon(Icons.Rounded.Warning, contentDescription = null, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text("Saved accounts could not be opened", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = "The app started with no accounts. Their API keys still work on your servers. " +
+                        "Revoke them on each server (Account > API keys), then connect again.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
         }
     }
 }

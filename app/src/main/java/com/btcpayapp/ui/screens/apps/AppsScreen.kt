@@ -60,10 +60,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
+import com.btcpayapp.core.net.isLocalNetworkHost
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
@@ -91,6 +94,7 @@ import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.maskedIfPrivate
 import com.btcpayapp.ui.theme.AppTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -125,6 +129,8 @@ data class AppStats(
 )
 
 data class AppsState(
+    /** The store [apps] belong to. Rows and actions never outlive it. */
+    val storeId: String? = null,
     val apps: List<AppData> = emptyList(),
     val loading: Boolean = false,
     val refreshing: Boolean = false,
@@ -134,6 +140,8 @@ data class AppsState(
     val pendingDelete: AppData? = null,
     val qrTarget: AppData? = null,
     val baseUrl: String? = null,
+    /** Set when [baseUrl] is an address customers may not reach; see [publicLinkWarning]. */
+    val linkWarning: String? = null,
     val message: String? = null,
 )
 
@@ -142,24 +150,52 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
     private val _state = MutableStateFlow(AppsState(baseUrl = graph.session.activeAccount.value?.baseUrl))
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
-
     init {
         viewModelScope.launch {
             graph.session.activeAccount
-                .map { it?.baseUrl }
+                .map { it?.baseUrl to it?.host }
                 .distinctUntilChanged()
-                .collectLatest { url -> _state.update { it.copy(baseUrl = url) } }
+                .collectLatest { (url, host) ->
+                    _state.update { it.copy(baseUrl = url, linkWarning = host?.let(::publicLinkWarning)) }
+                }
         }
         viewModelScope.launch {
             graph.session.activeStore
                 .map { it?.id }
                 .distinctUntilChanged()
-                .collectLatest { if (it != null) load(refreshing = false) }
+                .collectLatest { id ->
+                    // The old store's apps go at once, not when the reload
+                    // lands: until then they would sit under the new store's
+                    // name, with Delete one tap away.
+                    _state.update {
+                        it.copy(
+                            storeId = id,
+                            apps = emptyList(),
+                            loading = false,
+                            refreshing = false,
+                            error = null,
+                            expandedId = null,
+                            stats = emptyMap(),
+                            pendingDelete = null,
+                            qrTarget = null,
+                        )
+                    }
+                    if (id != null) load(refreshing = false)
+                }
         }
     }
 
     fun refresh() = load(refreshing = true)
+
+    /**
+     * A quiet reload when the screen comes back, from an edit screen or
+     * another app, so a new or renamed app shows up. Ignored while a load
+     * runs.
+     */
+    fun reload() {
+        val current = _state.value
+        if (!current.loading && !current.refreshing) load()
+    }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
@@ -227,20 +263,22 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun load(refreshing: Boolean = false) {
-        val store = storeId ?: return
+        val store = _state.value.storeId ?: return
         viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.apps.isEmpty(), refreshing = refreshing, error = null)
             }
+            // A late answer for a store the user has left is dropped.
             runCatching { graph.session.requireApi().storeApps(store) }
                 .onSuccess { list ->
                     _state.update {
-                        it.copy(apps = list, loading = false, refreshing = false, error = null)
+                        if (it.storeId != store) it else it.copy(apps = list, loading = false, refreshing = false, error = null)
                     }
                 }
                 .onFailure { failure ->
+                    val error = failure.asApiException()
                     _state.update {
-                        it.copy(loading = false, refreshing = false, error = failure.asApiException())
+                        if (it.storeId != store) it else it.copy(loading = false, refreshing = false, error = error)
                     }
                 }
         }
@@ -263,6 +301,8 @@ fun AppsScreen(
     val uriHandler = LocalUriHandler.current
     var createMenuOpen by remember { mutableStateOf(false) }
 
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.reload() }
+
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
         snackbarHostState.showSnackbar(text)
@@ -284,6 +324,7 @@ fun AppsScreen(
         AppQrSheet(
             app = target,
             link = publicLink(state.baseUrl, target.id),
+            warning = state.linkWarning,
             onDismiss = viewModel::hideQr,
         )
     }
@@ -400,6 +441,17 @@ fun AppsScreen(
 
 private fun publicLink(baseUrl: String?, appId: String): String? =
     baseUrl?.takeIf { it.isNotBlank() }?.let { "${it.trimEnd('/')}/apps/$appId" }
+
+/**
+ * The warning to show with a public link, or null.
+ *
+ * Links to apps and payment requests are built from the address this phone
+ * uses to reach the server; BTCPay builds its own from the request host, so
+ * there is no public URL to ask it for. An .onion or local-network address
+ * works from here, and a customer's phone often cannot open it.
+ */
+internal fun publicLinkWarning(host: String): String? =
+    if (isLocalNetworkHost(host)) "This link uses $host, which customers may not be able to open." else null
 
 @Composable
 private fun AppRow(
@@ -563,7 +615,7 @@ private fun StatsPanel(stats: AppStats?) {
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
-                                    text = "${item.salesCount} · ${item.totalFormatted}",
+                                    text = "${item.salesCount} · ${maskedIfPrivate(item.totalFormatted)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
@@ -626,7 +678,7 @@ private fun SalesBars(series: List<AppSalesSeriesPoint>) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AppQrSheet(app: AppData, link: String?, onDismiss: () -> Unit) {
+private fun AppQrSheet(app: AppData, link: String?, warning: String?, onDismiss: () -> Unit) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -650,6 +702,14 @@ private fun AppQrSheet(app: AppData, link: String?, onDismiss: () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium,
                 )
             } else {
+                if (warning != null) {
+                    Text(
+                        text = warning,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                }
                 // No `arrive` here. `QrCode` is complete on its first frame, and
                 // whatever reveals it animates it from the outside.
                 QrCode(content = link, contentDescription = "Link to ${app.appName}")

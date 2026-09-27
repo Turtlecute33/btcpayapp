@@ -3,9 +3,12 @@
 package com.btcpayapp.data.api.dto
 
 import com.btcpayapp.data.api.BigDecimalSerializer
+import com.btcpayapp.data.api.DecimalTextSerializer
 import com.btcpayapp.data.api.FallbackEnumSerializer
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.UseSerializers
+import kotlinx.serialization.json.JsonNames
 import kotlinx.serialization.json.JsonObject
 import java.math.BigDecimal
 
@@ -66,6 +69,18 @@ data class StoreData(
      * the wire.
      */
     val paymentMethodCriteria: List<PaymentMethodCriteria> = emptyList(),
+)
+
+/**
+ * Only the two values the user chooses. The server merges the request over the
+ * admin's default store template and every value sent wins, so a whole
+ * [StoreData] of Kotlin defaults would override the template's speed policy,
+ * expiry and tolerance.
+ */
+@Serializable
+data class CreateStoreRequest(
+    val name: String,
+    val defaultCurrency: String,
 )
 
 @Serializable
@@ -144,6 +159,11 @@ data class UpdatePaymentMethodRequest(
     val config: JsonObject? = null,
 )
 
+/**
+ * The **write** shape of an on-chain config (BTCPay's alternative config). The
+ * server builds a new wallet from it, so it never reads back the same way; the
+ * GET shape is [OnChainWalletConfig].
+ */
 @Serializable
 data class OnChainPaymentMethodConfig(
     val derivationScheme: String = "",
@@ -151,10 +171,37 @@ data class OnChainPaymentMethodConfig(
     val accountKeyPath: String? = null,
 )
 
+/**
+ * The **read** shape of an on-chain config: BTCPay's `DerivationSchemeSettings`,
+ * as returned by `GET .../payment-methods/{id}?includeConfig=true`. It has no
+ * `derivationScheme` key, so reading it as [OnChainPaymentMethodConfig] shows a
+ * configured wallet as empty. One [AccountKeySettings] per signer; more than one
+ * is a multisig.
+ */
+@Serializable
+data class OnChainWalletConfig(
+    val accountDerivation: String = "",
+    val label: String? = null,
+    /** The server holds the keys and can sign (in-app send, automated payouts). */
+    val isHotWallet: Boolean = false,
+    /** How the wallet was set up, e.g. `NBXplorer`. */
+    val source: String? = null,
+    val accountKeySettings: List<AccountKeySettings> = emptyList(),
+)
+
+@Serializable
+data class AccountKeySettings(
+    val rootFingerprint: String? = null,
+    val accountKeyPath: String? = null,
+    val accountKey: String? = null,
+)
+
 @Serializable
 data class LightningPaymentMethodConfig(
     /** `"Internal Node"` selects the server's own node. */
     val connectionString: String = "",
+    /** Set by the GET, instead of [connectionString], when the store uses the server's internal node. */
+    val internalNodeRef: String? = null,
 )
 
 @Serializable
@@ -202,10 +249,16 @@ data class WalletPreviewAddress(
 // Store users, invitations, rates
 // ---------------------------------------------------------------------------
 
+/**
+ * The role key changed: `storeRole` up to 2.4.3, `roleId` from 2.4.4. Both are
+ * read, or every row on an older server shows no role.
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class StoreUserData(
     val id: String = "",
     val email: String = "",
+    @JsonNames("storeRole")
     val roleId: String = "",
 )
 
@@ -254,9 +307,27 @@ data class StoreRateResult(
 
 @Serializable
 data class StoreRateConfiguration(
-    /** Percent, 0..100. */
+    /**
+     * Percent, 0..100, as plain decimal text. The server sends a JSON number
+     * (a bare C# `decimal`, whatever the swagger says), which a plain `String`
+     * refuses under `isLenient = false`, so the whole screen failed to load.
+     */
+    @Serializable(with = DecimalTextSerializer::class)
     val spread: String = "0",
     val preferredSource: String? = null,
     val isCustomScript: Boolean = false,
     val effectiveScript: String = "",
+)
+
+/**
+ * The body for a rates update or preview. The GET fills `effectiveScript` even
+ * when no custom script is in use, and the server's
+ * `ValidateAndSanitizeConfiguration` rejects a non-empty `effectiveScript`
+ * without custom scripting and a `preferredSource` with it. So echoing the
+ * loaded object back failed every save; this keeps only what the chosen mode
+ * reads.
+ */
+internal fun StoreRateConfiguration.forWrite(): StoreRateConfiguration = copy(
+    effectiveScript = if (isCustomScript) effectiveScript else "",
+    preferredSource = if (isCustomScript) null else preferredSource,
 )

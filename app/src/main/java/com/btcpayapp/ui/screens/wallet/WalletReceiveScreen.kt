@@ -15,14 +15,10 @@ import androidx.compose.material.icons.rounded.Autorenew
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
@@ -37,6 +33,7 @@ import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.dto.WalletAddressData
 import com.btcpayapp.data.api.endpoints.walletAddress
 import com.btcpayapp.data.model.BitcoinUnit
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.chainSubtitle
@@ -47,10 +44,10 @@ import com.btcpayapp.ui.components.DetailRow
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.FormField
-import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.QrCode
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.screens.send.amountProblem
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -73,11 +70,26 @@ class WalletReceiveViewModel(
     private val paymentMethodId: String,
 ) : ViewModel() {
 
+    /**
+     * The store this screen was opened in (see [StoreBinding]). The shell
+     * drops the screen on a store switch, so "New address" can never reserve
+     * one in a store the code on screen does not belong to.
+     */
+    private val store = StoreBinding(graph.session)
+    private val storeId: String? get() = store.id
+
+    /**
+     * Shown in the title bar: an operator with several stores must see which
+     * store's wallet the customer pays before showing the code.
+     */
+    val storeName: String? get() = store.store?.name?.takeIf { it.isNotBlank() }
+
     private val _state = MutableStateFlow(WalletReceiveState())
     val state = _state.asStateFlow()
 
     init {
         load(forceGenerate = false)
+        store.retryWhenKnown(viewModelScope) { load(forceGenerate = false) }
     }
 
     fun setAmount(value: String) = _state.update { it.copy(amountInput = value) }
@@ -89,7 +101,7 @@ class WalletReceiveViewModel(
      * re-serving the one it has already reserved and not yet seen paid.
      */
     fun load(forceGenerate: Boolean) {
-        val storeId = runCatching { graph.session.requireStoreId() }.getOrElse {
+        val storeId = storeId ?: run {
             _state.update { it.copy(error = ApiException.NoAccount()) }
             return
         }
@@ -133,12 +145,24 @@ fun WalletReceiveScreen(paymentMethodId: String, onBack: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val settings = LocalSettings.current
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
     val cryptoCode = remember(paymentMethodId) { cryptoCodeOf(paymentMethodId) }
+    val bitcoin = cryptoCode.equals("BTC", true)
 
     val amountBtc: BigDecimal? = remember(state.amountInput, settings.bitcoinUnit, cryptoCode) {
         parseAmountToBtc(state.amountInput, settings.bitcoinUnit, cryptoCode)
+    }
+
+    // Not masked in privacy mode, here or in the code: this screen is shown to
+    // the customer who pays, and a hidden amount is one they cannot check.
+    // The same wording as on Send, for the same field.
+    val amountError = remember(state.amountInput, settings.bitcoinUnit, cryptoCode) {
+        amountProblem(state.amountInput, settings.bitcoinUnit, cryptoCode)
+    }
+
+    // The same value in the other unit, under the field: a slip of three
+    // zeros between sat and BTC shows here, before the customer pays it.
+    val echo = remember(amountBtc, settings.bitcoinUnit) {
+        amountBtc?.takeIf { bitcoin && it.signum() > 0 }?.let { "= ${Amounts.inOtherUnit(it, settings.bitcoinUnit)}" }
     }
 
     // BIP21 always denominates `amount` in BTC, whatever unit the user reads the
@@ -156,9 +180,8 @@ fun WalletReceiveScreen(paymentMethodId: String, onBack: () -> Unit) {
 
     AppScreen(
         title = "Receive",
-        subtitle = chainSubtitle(cryptoCode),
+        subtitle = chainSubtitle(cryptoCode, prefix = viewModel.storeName),
         onBack = onBack,
-        snackbarHostState = snackbarHostState,
         actions = {
             IconButton(
                 onClick = {
@@ -222,14 +245,13 @@ fun WalletReceiveScreen(paymentMethodId: String, onBack: () -> Unit) {
                         )
                     }
 
+                    // No snackbar on copy: the copy itself says so, with a
+                    // toast below Android 13 and the system's own line above.
                     state.address?.let { address ->
                         CopyableField(
                             label = "Address",
                             value = address.address,
                             modifier = Modifier.padding(horizontal = 16.dp).arrive(1),
-                            onCopied = { label ->
-                                scope.launch { snackbarHostState.showSnackbar("$label copied") }
-                            },
                         )
                     }
 
@@ -237,18 +259,17 @@ fun WalletReceiveScreen(paymentMethodId: String, onBack: () -> Unit) {
 
                     FormField(
                         label = "Amount (${unitLabel(settings.bitcoinUnit, cryptoCode)})",
-                        enabled = cryptoCode.equals("BTC", true),
+                        enabled = bitcoin,
                         value = state.amountInput,
                         onValueChange = viewModel::setAmount,
                         modifier = Modifier.arrive(2),
                         placeholder = "Optional",
-                        supportingText = if (cryptoCode.equals("BTC", true)) "Adding an amount turns the code into a BIP21 payment request."
-                            else "Use the server's payment link or address for this currency.",
-                        error = if (state.amountInput.isNotBlank() && amountBtc == null) {
-                            "Not a number"
-                        } else {
-                            null
+                        supportingText = when {
+                            echo != null -> echo
+                            bitcoin -> "Adding an amount turns the code into a BIP21 payment request."
+                            else -> "Use the server's payment link or address for this currency."
                         },
+                        error = amountError,
                         keyboardType = KeyboardType.Decimal,
                         imeAction = ImeAction.Done,
                     )
@@ -288,8 +309,14 @@ internal fun parseAmountToBtc(input: String, unit: BitcoinUnit, cryptoCode: Stri
     return btc.takeIf { it.stripTrailingZeros().scale() <= 8 }
 }
 
-/** The inverse of [parseAmountToBtc], for pre-filling a field from a scan. */
+/**
+ * The inverse of [parseAmountToBtc], for pre-filling a field from a scan.
+ *
+ * Through [Amounts.toInput], so the text always parses back to the same
+ * value: 1.125 BTC is written "1.1250", which [Amounts.parse] reads as a
+ * decimal, where "1.125" is refused as possibly meaning 1125.
+ */
 internal fun formatAmountInput(btc: BigDecimal, unit: BitcoinUnit): String = when (unit) {
-    BitcoinUnit.Btc -> Amounts.trim(btc, 8)
-    BitcoinUnit.Sat -> Amounts.trim(Amounts.btcToSats(btc), 0)
+    BitcoinUnit.Btc -> Amounts.toInput(btc, 8)
+    BitcoinUnit.Sat -> Amounts.toInput(Amounts.btcToSats(btc), 0)
 }

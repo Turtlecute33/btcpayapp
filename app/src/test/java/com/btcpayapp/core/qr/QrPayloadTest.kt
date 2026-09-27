@@ -1,6 +1,13 @@
 package com.btcpayapp.core.qr
 
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.decoder.ErrorCorrectionLevel
+import com.google.zxing.qrcode.decoder.Mode
+import com.google.zxing.qrcode.encoder.Encoder
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import java.util.Locale
 import org.junit.After
 import org.junit.Test
@@ -73,5 +80,51 @@ class QrPayloadTest {
     fun `lightning payloads survive a Turkish locale`() {
         Locale.setDefault(Locale.forLanguageTag("tr-TR"))
         assertEquals("LNBC1PVJLUEZPP5", QrEncoder.optimiseCase("lnbc1pvjluezpp5"))
+        assertEquals("LIGHTNING:LNBC1PVJLUEZPP5", QrEncoder.optimiseCase("lightning:lnbc1pvjluezpp5"))
+    }
+
+    @Test
+    fun `lightning scheme payloads are uppercased too`() {
+        // Checkout links and Lightning receive both show `lightning:lnbc…`,
+        // the longest payloads in the app.
+        assertEquals("LIGHTNING:LNBC1PVJLUEZPP5", QrEncoder.optimiseCase("lightning:lnbc1pvjluezpp5"))
+        assertEquals("LIGHTNING:LNTBS1PVJLUEZPP5", QrEncoder.optimiseCase("lightning:lntbs1pvjluezpp5"))
+        assertEquals("LIGHTNING:LNURL1DP68GURN8GHJ7", QrEncoder.optimiseCase("lightning:lnurl1dp68gurn8ghj7"))
+    }
+
+    @Test
+    fun `case-sensitive lightning payloads are left alone`() {
+        // A LUD-17 URL has a path and query; a Lightning address has a user.
+        val url = "lightning:lnurlp://pay.example.com/.well-known/lnurlp/Alice"
+        assertEquals(url, QrEncoder.optimiseCase(url))
+        val address = "lightning:Alice@pay.example.com"
+        assertEquals(address, QrEncoder.optimiseCase(address))
+    }
+
+    @Test
+    fun `ascii payloads are encoded without an eci header`() {
+        // With a character-set hint zxing prefixes every byte-mode code with a
+        // UTF-8 ECI segment; without one it adds none.
+        val payload = QrEncoder.optimiseCase("lightning:lnbc1pvjluezpp5qqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqqqsyqcyq5rqwzqfqypq")
+        val hints = QrEncoder.hints(payload, 2)
+        assertFalse(hints.containsKey(EncodeHintType.CHARACTER_SET))
+        assertNotNull(QrEncoder.matrix(payload))
+        assertEquals(Mode.ALPHANUMERIC, Encoder.encode(payload, ErrorCorrectionLevel.M, hints).mode)
+
+        val link = "https://pay.example.com/apps/abc/pos"
+        assertFalse(QrEncoder.hints(link, 2).containsKey(EncodeHintType.CHARACTER_SET))
+        assertNotNull(QrEncoder.matrix(link))
+    }
+
+    @Test
+    fun `text that is not ascii keeps its utf-8 bytes`() {
+        // zxing's default byte encoding is ISO-8859-1, which would print '?'.
+        assertEquals("UTF-8", QrEncoder.hints("Caffè ☕", 2)[EncodeHintType.CHARACTER_SET])
+        assertNotNull(QrEncoder.matrix("Caffè ☕"))
+    }
+
+    @Test
+    fun `an empty payload has no code`() {
+        assertNull(QrEncoder.matrix(""))
     }
 }

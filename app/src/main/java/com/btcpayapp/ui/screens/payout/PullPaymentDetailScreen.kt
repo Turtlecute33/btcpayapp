@@ -28,18 +28,22 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -54,6 +58,8 @@ import com.btcpayapp.data.api.endpoints.archivePullPayment
 import com.btcpayapp.data.api.endpoints.pullPayment
 import com.btcpayapp.data.api.endpoints.pullPaymentLnurl
 import com.btcpayapp.data.api.endpoints.pullPaymentPayouts
+import com.btcpayapp.data.session.StoreBinding
+import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AmountText
 import com.btcpayapp.ui.components.AnimatedSwap
@@ -88,6 +94,11 @@ data class PullPaymentDetailState(
     val pullPayment: PullPaymentData? = null,
     val lnurl: LnurlData? = null,
     val payouts: List<PayoutData> = emptyList(),
+    /**
+     * The last claims read failed. Kept apart from [payouts] being empty: shown
+     * as "nothing claimed", a failed read led merchants to refund twice.
+     */
+    val claimsError: ApiException? = null,
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val error: ApiException? = null,
@@ -100,12 +111,18 @@ class PullPaymentDetailViewModel(
     private val pullPaymentId: String,
 ) : ViewModel() {
 
+    /**
+     * The store this screen was opened in (see [StoreBinding]), read when the
+     * archive runs; archiving is store-scoped on servers before 2.4.
+     */
+    private val bound = StoreBinding(graph.session)
+    private val storeId: String? get() = bound.id
+
     private val _state = MutableStateFlow(PullPaymentDetailState())
     val state = _state.asStateFlow()
 
-    init {
-        load()
-    }
+    /** Loads on every return to the screen, so claims made meanwhile show up. */
+    fun onResume() = load()
 
     fun refresh() = load(refreshing = true)
 
@@ -117,8 +134,12 @@ class PullPaymentDetailViewModel(
 
     fun confirmArchive() {
         _state.update { it.copy(confirmingArchive = false) }
+        val store = storeId ?: run {
+            _state.update { it.copy(message = ApiException.NoAccount().userMessage) }
+            return
+        }
         viewModelScope.launch {
-            runCatching { graph.session.requireApi().archivePullPayment(pullPaymentId) }
+            runCatching { graph.session.requireApi().archivePullPayment(store, pullPaymentId) }
                 .onSuccess {
                     _state.update { it.copy(message = "Pull payment archived") }
                     load(refreshing = true)
@@ -157,9 +178,12 @@ class PullPaymentDetailViewModel(
                 .onSuccess { data -> _state.update { it.copy(lnurl = data) } }
                 .onFailure { _state.update { it.copy(lnurl = null) } }
 
+            // A failure keeps the claims already on screen and says so.
             runCatching { api.pullPaymentPayouts(pullPaymentId, includeCancelled = true) }
-                .onSuccess { list -> _state.update { it.copy(payouts = list.sortedByDescending(PayoutData::date)) } }
-                .onFailure { /* The header is still useful without the claims. */ }
+                .onSuccess { list ->
+                    _state.update { it.copy(payouts = list.sortedByDescending(PayoutData::date), claimsError = null) }
+                }
+                .onFailure { failure -> _state.update { it.copy(claimsError = failure.asApiException()) } }
 
             _state.update { it.copy(loading = false, refreshing = false) }
         }
@@ -179,6 +203,8 @@ fun PullPaymentDetailScreen(
 
     val pullPayment = state.pullPayment
     val claimLink = pullPayment?.viewLink
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -256,9 +282,11 @@ fun PullPaymentDetailScreen(
                             Column {
                                 SectionHeader("Claim link")
                                 Column(Modifier.padding(horizontal = 16.dp)) {
-                                    QrCode(content = claimLink, contentDescription = "Claim link")
-                                    Spacer(Modifier.height(12.dp))
-                                    CopyableField(label = "Link", value = claimLink)
+                                    HiddenCode(content = claimLink, contentDescription = "Claim link")
+                                    // A bearer claim, like the code above: shortened
+                                    // on screen, and copied as a secret, so clipboard
+                                    // histories leave it out. The copy is whole.
+                                    CopyableField(label = "Link", value = claimLink, sensitive = true, truncate = true)
                                     Spacer(Modifier.height(8.dp))
                                     Text(
                                         text = "Whoever opens this enters their own address or invoice to claim.",
@@ -278,12 +306,16 @@ fun PullPaymentDetailScreen(
                                     // Wallets expect the `lightning:` scheme on the
                                     // QR even though the copyable string is the bare
                                     // bech32.
-                                    QrCode(
+                                    HiddenCode(
                                         content = "lightning:${lnurl.lnurlBech32}",
                                         contentDescription = "LNURL withdraw code",
                                     )
-                                    Spacer(Modifier.height(12.dp))
-                                    CopyableField(label = "LNURL", value = lnurl.lnurlBech32, truncate = true)
+                                    CopyableField(
+                                        label = "LNURL",
+                                        value = lnurl.lnurlBech32,
+                                        sensitive = true,
+                                        truncate = true,
+                                    )
                                 }
                             }
                         }
@@ -292,10 +324,11 @@ fun PullPaymentDetailScreen(
                     item {
                         Column(Modifier.padding(top = 16.dp)) {
                             SectionHeader("Claims")
+                            val claimsError = state.claimsError
                             // The line goes as the first claim lands, so it
                             // gives way rather than being overwritten.
                             AnimatedVisibility(
-                                visible = state.payouts.isEmpty(),
+                                visible = claimsError == null && state.payouts.isEmpty(),
                                 enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
                                 exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
                             ) {
@@ -305,6 +338,24 @@ fun PullPaymentDetailScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                                 )
+                            }
+                            AnimatedVisibility(
+                                visible = claimsError != null,
+                                enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
+                                exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "Could not load claims.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    TextButton(onClick = viewModel::refresh) { Text("Retry") }
+                                }
                             }
                         }
                     }
@@ -336,6 +387,38 @@ fun PullPaymentDetailScreen(
     }
 }
 
+/**
+ * A claim code, collapsed until asked for.
+ *
+ * These codes are bearer claims: anyone whose camera sees one can take the
+ * funds, and with auto-approve nobody reviews that claim. So the screen opens
+ * with them folded away, Share stays the usual way to hand one over, and in
+ * privacy mode they cannot be shown at all.
+ */
+@Composable
+private fun HiddenCode(content: String, contentDescription: String) {
+    val privacyMode = LocalSettings.current.privacyMode
+    var shown by rememberSaveable(content) { mutableStateOf(false) }
+
+    AnimatedVisibility(
+        visible = shown && !privacyMode,
+        enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
+        exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
+    ) {
+        QrCode(content = content, contentDescription = contentDescription)
+    }
+    if (privacyMode) {
+        Text(
+            text = "The code stays hidden in privacy mode. Use Share or copy the link.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = 8.dp),
+        )
+    } else {
+        TextButton(onClick = { shown = !shown }) { Text(if (shown) "Hide code" else "Show code") }
+    }
+}
+
 @Composable
 private fun PullPaymentHeader(pullPayment: PullPaymentData) {
     val colors = AppTheme.statusColors
@@ -345,6 +428,8 @@ private fun PullPaymentHeader(pullPayment: PullPaymentData) {
     // header is disposed when it scrolls away and would introduce itself all
     // over again on the way back. The screen's own push is its entrance.
     Column(Modifier.fillMaxWidth().padding(vertical = 16.dp)) {
+        // Masked in privacy mode: this is the store's own record, not a
+        // figure shown to a customer.
         BigAmount(
             amount = pullPayment.amount,
             currency = pullPayment.currency,

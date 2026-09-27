@@ -19,13 +19,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Shield
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -41,10 +39,11 @@ import com.btcpayapp.AppGraph
 import com.btcpayapp.core.net.CertificateProbe
 import com.btcpayapp.core.net.ProxySpec
 import com.btcpayapp.core.net.Tls
+import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.core.net.TransportOptions
 import com.btcpayapp.core.scan.ScanParser
-import com.btcpayapp.core.util.Dates
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.attempt
 import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.Endpoint
 import com.btcpayapp.data.api.endpoints.health
@@ -52,8 +51,7 @@ import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppCard
 import com.btcpayapp.ui.components.AppScreen
-import com.btcpayapp.ui.components.CopyableField
-import com.btcpayapp.ui.components.DetailRow
+import com.btcpayapp.ui.components.CertificateCheckDialog
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.arrive
@@ -70,7 +68,10 @@ data class ConnectState(
     val address: String = "",
     val probing: Boolean = false,
     val error: ApiException? = null,
-    /** Set when the handshake failed and a certificate was recovered to show. */
+    /**
+     * Set only when the system refused the certificate for its issuer alone
+     * and a probe read it back, so the user can check it against the server.
+     */
     val certificate: CertificateProbe? = null,
     val pins: List<String> = emptyList(),
     /** Non-null once the health probe succeeded; consumed by the composable. */
@@ -93,10 +94,14 @@ class ConnectViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun rejectCertificate() = _state.update { it.copy(certificate = null) }
 
-    /** Accepts the probed key as this account's pin, then retries the health call. */
-    fun acceptCertificate() {
-        val probe = _state.value.certificate ?: return
-        _state.update { it.copy(certificate = null, pins = (it.pins + probe.pin).distinct()) }
+    /**
+     * Pins [pin] for this account, then retries the health call.
+     * [CertificateCheckDialog] passes it only once the user typed a matching
+     * fingerprint; a call after the dialog closed does nothing.
+     */
+    fun acceptCertificate(pin: String) {
+        if (_state.value.certificate == null) return
+        _state.update { it.copy(certificate = null, pins = (it.pins + pin).distinct()) }
         connect()
     }
 
@@ -114,19 +119,24 @@ class ConnectViewModel(private val graph: AppGraph) : ViewModel() {
             _state.update { it.copy(probing = true, error = null) }
             val pins = _state.value.pins
 
-            runCatching { apiFor(normalised, pins).health() }
+            attempt { apiFor(normalised, pins).health() }
                 .onSuccess {
                     _state.update { current -> current.copy(probing = false, connected = normalised) }
                 }
                 .onFailure { failure ->
-                    if (failure is kotlinx.coroutines.CancellationException) throw failure
                     val error = failure as? ApiException
                         ?: ApiException.Transport(failure.message ?: "Could not reach the server.")
 
                     // Trust-on-first-use is offered only for the very first
-                    // handshake. Once a pin is held, a rejection means the key
-                    // changed, and that is an attack until proven otherwise.
-                    val probe = if (error is ApiException.Tls && pins.isEmpty() && !normalised.isOnion()) {
+                    // handshake, and only when the issuer is the one fault. A
+                    // wrong name or an expired certificate is what an
+                    // interception looks like, and pinning repairs neither; once
+                    // a pin is held, a rejection means the key changed.
+                    val offerTrust = error is ApiException.Tls &&
+                        error.problem == TlsProblem.UntrustedIssuer &&
+                        pins.isEmpty() &&
+                        !normalised.isOnion()
+                    val probe = if (offerTrust) {
                         withContext(Dispatchers.IO) {
                             Tls.probeCertificate(normalised.hostOrBlank(), normalised.effectivePort())
                         }
@@ -181,6 +191,9 @@ fun ConnectScreen(
 
     val normalised = ScanParser.normaliseServerUrl(state.address)
     val onion = normalised?.isOnion() == true
+    // For an http:// onion address, the hop to Orbot's port carries the API
+    // key in clear text.
+    val cleartext = normalised?.startsWith("http://") == true
 
     AppScreen(
         title = "Connect a server",
@@ -205,6 +218,7 @@ fun ConnectScreen(
                     ?: "https:// is assumed unless the address ends in .onion.",
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Go,
+                onImeAction = viewModel::connect,
                 enabled = !state.probing,
                 leadingIcon = { Icon(Icons.Rounded.Language, contentDescription = null) },
                 modifier = Modifier.arrive(0),
@@ -221,8 +235,10 @@ fun ConnectScreen(
                 Hint(
                     icon = Icons.Rounded.Shield,
                     text = "Onion addresses are routed through Orbot on 127.0.0.1:9050. " +
-                        "Start Orbot and let it finish bootstrapping before you connect — " +
-                        "the first request over a fresh circuit can take half a minute.",
+                        "Start Orbot and let it finish bootstrapping before you connect. " +
+                        "The first request over a fresh circuit can take half a minute. " +
+                        (if (cleartext) "While Orbot is off, another app can take that port and read the API key. " else "") +
+                        "Background checks use Orbot too. Keep it running, or turn them off in Settings.",
                 )
             }
 
@@ -238,10 +254,10 @@ fun ConnectScreen(
                 )
             }
 
-            // Still suppressed while the certificate dialog is up, which says
-            // the same thing at far greater length.
+            // Also under the certificate dialog: it names why the system
+            // refused the certificate, which the dialog does not repeat.
             ErrorBanner(
-                error = state.error.takeIf { state.certificate == null },
+                error = state.error,
                 onDismiss = viewModel::dismissError,
             )
 
@@ -282,69 +298,14 @@ fun ConnectScreen(
     }
 
     state.certificate?.let { probe ->
-        CertificateDialog(
+        CertificateCheckDialog(
             host = normalised?.hostOrBlank().orEmpty(),
+            port = normalised?.effectivePort() ?: 443,
             probe = probe,
-            onAccept = viewModel::acceptCertificate,
-            onDismiss = viewModel::rejectCertificate,
+            onTrust = viewModel::acceptCertificate,
+            onCancel = viewModel::rejectCertificate,
         )
     }
-}
-
-/**
- * Trust-on-first-use, spelled out.
- *
- * The user is agreeing to one key for one account — not to a new certificate
- * authority — so the wording says so, and the fingerprint is copyable to be
- * compared against what the server operator sees.
- */
-@Composable
-private fun CertificateDialog(
-    host: String,
-    probe: CertificateProbe,
-    onAccept: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        icon = { Icon(Icons.Rounded.Shield, contentDescription = null) },
-        title = { Text("Trust this certificate?") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(
-                    text = "$host presented a certificate that the system cannot vouch for. " +
-                        "Accepting it pins this exact key for this account only — nothing else " +
-                        "on the device or elsewhere in the app starts trusting it. That is much " +
-                        "narrower than installing a new certificate authority, which would let " +
-                        "the same key impersonate any site.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(Modifier.height(16.dp))
-                DetailRow(label = "Common name", value = probe.commonName)
-                DetailRow(label = "Issued by", value = probe.issuer.issuerCommonName())
-                DetailRow(label = "Self-signed", value = if (probe.selfSigned) "Yes" else "No")
-                DetailRow(label = "Valid from", value = Dates.full(probe.notBefore / 1000))
-                DetailRow(label = "Valid until", value = Dates.full(probe.notAfter / 1000))
-                if (probe.subjectAlternativeNames.isNotEmpty()) {
-                    DetailRow(
-                        label = "Also valid for",
-                        value = probe.subjectAlternativeNames.joinToString(", "),
-                    )
-                }
-                Spacer(Modifier.height(12.dp))
-                CopyableField(label = "SHA-256 of the public key", value = probe.fingerprint)
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = "Compare this fingerprint with the one shown on the server before you " +
-                        "accept. If they differ, stop.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = { TextButton(onClick = onAccept) { Text("Accept and connect") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
 }
 
 @Composable
@@ -380,10 +341,3 @@ private fun String.effectivePort(): Int {
     if (uri.port > 0) return uri.port
     return if (uri.scheme.equals("http", ignoreCase = true)) 80 else 443
 }
-
-/** X.500 names are verbose; the CN is the only part worth showing in a dialog. */
-private fun String.issuerCommonName(): String = split(',')
-    .firstOrNull { it.trim().startsWith("CN=", ignoreCase = true) }
-    ?.substringAfter('=')
-    ?.trim()
-    ?: this

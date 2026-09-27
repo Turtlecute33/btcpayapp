@@ -19,7 +19,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -39,11 +38,20 @@ object SyncScheduler {
         val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
 
         val period = TimeUnit.MINUTES.toMillis(intervalMinutes.toLong()).coerceAtLeast(MIN_PERIOD_MS)
+        val networkType = if (unmeteredOnly) JobInfo.NETWORK_TYPE_UNMETERED else JobInfo.NETWORK_TYPE_ANY
+
+        // `schedule` stops a running job with the same id. Every process start
+        // and every visit to Settings comes here, and a sync run is often what
+        // started the process, so an unchanged job is left alone. The network
+        // type getter is deprecated from API 28, but it is exactly what the
+        // builder below sets, on every API level this app supports.
+        val pending = runCatching { scheduler.getPendingJob(JOB_ID) }.getOrNull()
+        @Suppress("DEPRECATION")
+        val unchanged = pending != null && pending.intervalMillis == period && pending.networkType == networkType
+        if (unchanged) return
 
         val job = JobInfo.Builder(JOB_ID, ComponentName(context, SyncJobService::class.java))
-            .setRequiredNetworkType(
-                if (unmeteredOnly) JobInfo.NETWORK_TYPE_UNMETERED else JobInfo.NETWORK_TYPE_ANY,
-            )
+            .setRequiredNetworkType(networkType)
             .setPeriodic(period)
             .setPersisted(true)
             .setRequiresDeviceIdle(false)
@@ -87,13 +95,20 @@ class SyncJobService : JobService() {
         job = scope.launch {
             val result = try {
                 // JobScheduler kills a JobService that overruns its execution
-                // window, mid-write. The engine awaits three Keystore decrypts
-                // and then walks every account and store serially, with onion
-                // timeouts up to 105s per request, so unbounded it would overrun
-                // routinely — and repeated overruns get the app moved into a
-                // restricted standby bucket, which is what "sync stopped
-                // working" looks like from outside.
-                withTimeoutOrNull(MAX_RUNTIME_MS) { graph.syncEngine.run() } ?: SyncEngine.Result.Failed
+                // window, mid-write. The engine waits up to 20 s for three
+                // Keystore decrypts and then gives each account up to 4
+                // minutes, with onion timeouts of minutes per request, so
+                // unbounded it could overrun — and repeated overruns get the
+                // app moved into a restricted standby bucket, which is what
+                // "sync stopped working" looks like from outside.
+                withTimeoutOrNull(MAX_RUNTIME_MS) {
+                    // A document whose read failed stops retrying by itself
+                    // about 30 s after the process starts. In a process kept
+                    // alive for jobs, with no screen for "Try again", only
+                    // this reads it again.
+                    graph.retryStorage()
+                    graph.syncEngine.run()
+                } ?: SyncEngine.Result.Failed
             } catch (e: CancellationException) {
                 // onStopJob already asked for a reschedule; do not also call
                 // jobFinished, which would tell the system "done, do not
@@ -140,7 +155,12 @@ class BootReceiver : BroadcastReceiver() {
         // every boot and every app update.
         graph.scope.launch {
             try {
-                val loaded = withTimeoutOrNull(BOOT_TIMEOUT_MS) { graph.settings.loaded.first { it } }
+                val loaded = withTimeoutOrNull(BOOT_TIMEOUT_MS) {
+                    // A read that failed stops retrying by itself after about
+                    // 30 s, so a process that lived longer would only wait.
+                    graph.retryStorage()
+                    graph.settings.loaded.first { it }
+                }
                 if (loaded != true) return@launch
                 val settings = graph.settings.settings.value
                 if (settings.backgroundSync) {

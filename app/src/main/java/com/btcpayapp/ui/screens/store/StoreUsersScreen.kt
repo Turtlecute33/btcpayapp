@@ -39,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,6 +53,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.RoleData
 import com.btcpayapp.data.api.dto.StoreInvitationData
 import com.btcpayapp.data.api.dto.StoreUserData
@@ -62,6 +64,8 @@ import com.btcpayapp.data.api.endpoints.storeInvitations
 import com.btcpayapp.data.api.endpoints.storeRoles
 import com.btcpayapp.data.api.endpoints.storeUsers
 import com.btcpayapp.data.api.endpoints.updateStoreUser
+import com.btcpayapp.data.session.Permissions
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
@@ -77,14 +81,12 @@ import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -102,6 +104,52 @@ private val BUILT_IN_ROLES = listOf(
     RoleData(id = "Guest", role = "Guest"),
 )
 
+/**
+ * The store policies that let a user move funds or change where they go:
+ * store settings (wallets, users), the Lightning node, payouts, pull payments
+ * that pay without approval, and on 2.4 wallet settings and signing.
+ * [Permissions.covers] reads the policy tree, so a parent such as
+ * canmanagewallets counts too.
+ */
+private val CONTROL_POLICIES = listOf(
+    "btcpay.store.canmodifystoresettings",
+    "btcpay.store.canuselightningnode",
+    "btcpay.store.canmanagepayouts",
+    "btcpay.store.cancreatepullpayments",
+    "btcpay.store.canmanagewalletsettings",
+    "btcpay.store.cansigntransactions",
+)
+
+/**
+ * True when [roleId] gives control of the store: Owner, or a role with any of
+ * [CONTROL_POLICIES]. A role whose permissions this app cannot read (the roles
+ * list did not load) counts too, as it may be any of them.
+ */
+internal fun roleGivesControl(roleId: String, roles: List<RoleData>): Boolean {
+    if (roleId.equals("Owner", ignoreCase = true)) return true
+    val permissions = roles.firstOrNull { it.id.equals(roleId, ignoreCase = true) }?.permissions
+    // covers() answers true for a null or empty grant.
+    return CONTROL_POLICIES.any { Permissions.covers(permissions, it) }
+}
+
+/**
+ * A role change that gives someone control of the store: they could then
+ * spend from it or point its payments at their own wallet. It waits for a
+ * confirmation and the spend gate.
+ */
+sealed interface OwnerGrant {
+    val role: String
+    val who: String
+
+    data class Add(val idOrEmail: String, override val role: String) : OwnerGrant {
+        override val who: String get() = idOrEmail.trim()
+    }
+
+    data class Change(val user: StoreUserData, override val role: String) : OwnerGrant {
+        override val who: String get() = user.email.ifBlank { user.id }
+    }
+}
+
 data class StoreUsersState(
     val users: List<StoreUserData> = emptyList(),
     val invitations: List<StoreInvitationData> = emptyList(),
@@ -115,28 +163,27 @@ data class StoreUsersState(
     val invitationLink: String? = null,
     val editing: StoreUserData? = null,
     val removing: StoreUserData? = null,
+    val grant: OwnerGrant? = null,
 )
 
 class StoreUsersViewModel(private val graph: AppGraph) : ViewModel() {
 
+    private val bound = StoreBinding(graph.session)
     private val _state = MutableStateFlow(StoreUsersState())
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
+    /** For the confirmation that names the store an owner is added to. */
+    val storeName: String get() = bound.name
 
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { load() }
-        }
+        load()
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun load(refreshing: Boolean = false) {
-        val store = storeId
+        val store = bound.id
         if (store == null) {
-            _state.update { it.copy(loading = false, error = ApiException.NotFound("No store is selected.")) }
+            _state.update { it.copy(loading = false, error = ApiException.NoAccount()) }
             return
         }
         viewModelScope.launch {
@@ -150,19 +197,22 @@ class StoreUsersViewModel(private val graph: AppGraph) : ViewModel() {
 
             val usersCall = async { runCatching { api.storeUsers(store) } }
             val rolesCall = async { runCatching { api.storeRoles(store) } }
-            // Older instances have no invitations route; a failure there must not
-            // blank the user list, so it is folded in separately.
-            val invitesCall = async { runCatching { api.storeInvitations(store) } }
-            awaitAll(usersCall, rolesCall, invitesCall)
+            // The invitations route came with 2.4.4, so it is not asked for
+            // before; a failure there must not blank the user list either.
+            val invitesCall = if (graph.session.serverAtLeast(ServerVersion.STORE_INVITATIONS)) {
+                async { runCatching { api.storeInvitations(store) } }
+            } else {
+                null
+            }
 
             val users = usersCall.await()
             val roles = rolesCall.await()
-            val invitations = invitesCall.await()
+            val invitations = invitesCall?.await()?.getOrNull().orEmpty()
             _state.update {
                 it.copy(
                     users = users.getOrDefault(it.users),
                     roles = roles.getOrNull()?.takeIf { list -> list.isNotEmpty() } ?: BUILT_IN_ROLES,
-                    invitations = invitations.getOrDefault(emptyList()),
+                    invitations = invitations,
                     loading = false,
                     refreshing = false,
                     error = users.exceptionOrNull()?.asApi(),
@@ -185,9 +235,33 @@ class StoreUsersViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun dismissInvitation() = _state.update { it.copy(invitationLink = null) }
 
-    fun add(idOrEmail: String, role: String) {
+    fun dismissGrant() = _state.update { it.copy(grant = null) }
+
+    /** Adds the user, or first asks for a confirmation when [role] gives control of the store. */
+    fun requestAdd(idOrEmail: String, role: String) {
+        if (givesControl(role)) _state.update { it.copy(grant = OwnerGrant.Add(idOrEmail, role)) } else add(idOrEmail, role)
+    }
+
+    /** As [requestAdd], for a role change. Keeping the same role sends nothing. */
+    fun requestRole(user: StoreUserData, role: String) {
+        when {
+            role.equals(user.roleId, ignoreCase = true) -> edit(null)
+            givesControl(role) -> _state.update { it.copy(editing = null, grant = OwnerGrant.Change(user, role)) }
+            else -> changeRole(user, role)
+        }
+    }
+
+    /** Call only after the spend gate. */
+    fun grant(grant: OwnerGrant) = when (grant) {
+        is OwnerGrant.Add -> add(grant.idOrEmail, grant.role)
+        is OwnerGrant.Change -> changeRole(grant.user, grant.role)
+    }
+
+    private fun givesControl(roleId: String): Boolean = roleGivesControl(roleId, _state.value.roles)
+
+    private fun add(idOrEmail: String, role: String) {
         if (_state.value.busy) return
-        val store = storeId ?: return
+        val store = bound.id ?: return
         viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
             runCatching {
@@ -218,8 +292,8 @@ class StoreUsersViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun changeRole(user: StoreUserData, role: String) {
-        val store = storeId ?: return
+    private fun changeRole(user: StoreUserData, role: String) {
+        val store = bound.id ?: return
         _state.update { it.copy(editing = null) }
         viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
@@ -238,7 +312,7 @@ class StoreUsersViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun remove(user: StoreUserData) {
-        val store = storeId ?: return
+        val store = bound.id ?: return
         _state.update { it.copy(removing = null) }
         viewModelScope.launch {
             _state.update { it.copy(busy = true, error = null) }
@@ -284,6 +358,8 @@ fun StoreUsersScreen(onBack: () -> Unit) {
     val viewModel = appViewModel { StoreUsersViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -384,7 +460,7 @@ fun StoreUsersScreen(onBack: () -> Unit) {
         AddStoreUserDialog(
             roles = state.roles,
             busy = state.busy,
-            onAdd = viewModel::add,
+            onAdd = viewModel::requestAdd,
             onDismiss = { viewModel.showAdd(false) },
         )
     }
@@ -393,7 +469,7 @@ fun StoreUsersScreen(onBack: () -> Unit) {
         ChangeRoleDialog(
             user = user,
             roles = state.roles,
-            onSelect = { viewModel.changeRole(user, it) },
+            onSelect = { viewModel.requestRole(user, it) },
             onDismiss = { viewModel.edit(null) },
         )
     }
@@ -411,6 +487,21 @@ fun StoreUsersScreen(onBack: () -> Unit) {
 
     state.invitationLink?.let { link ->
         InvitationDialog(link = link, onDismiss = viewModel::dismissInvitation)
+    }
+
+    state.grant?.let { grant ->
+        ConfirmDialog(
+            title = "Give ${grant.who} the ${state.roles.labelFor(grant.role)} role?",
+            message = "With this role they may be able to move funds out of ${viewModel.storeName} " +
+                "or change where it receives payments.",
+            confirmLabel = "Give role",
+            destructive = true,
+            onConfirm = {
+                viewModel.dismissGrant()
+                scope.afterSpendGate(gate, "Confirm store access", grant.who, { snackbarHostState.showSnackbar(it) }) { viewModel.grant(grant) }
+            },
+            onDismiss = viewModel::dismissGrant,
+        )
     }
 }
 

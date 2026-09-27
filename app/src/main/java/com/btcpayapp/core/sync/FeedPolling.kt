@@ -40,15 +40,27 @@ internal fun evaluateFeed(previous: FeedPollState?, items: List<NotificationData
  * Feed entries that the app's own alerts already announce, by BTCPay's
  * notification identifier.
  *
- * The invoice poll reports every payment, including one made after expiry,
- * and the payout poll reports every payout awaiting approval. The same events
- * from the feed would be a second notification for one payment. A payout
- * notification without a status is one awaiting approval: BTCPay renders it
- * with that text.
+ * The invoice poll reports every settlement in the stores it reads, also of a
+ * payment it announced as detected before, and the payout poll every payout
+ * awaiting approval. The same events from the feed would be a second
+ * notification for one payment. A payout notification without a status is one
+ * awaiting approval: BTCPay renders it with that text.
+ *
+ * A late or partial payment, or a payment that did not confirm, is covered
+ * only when the poll announced that invoice in this run
+ * ([announcedInvoiceIds]; the entry's link names the invoice). The poll
+ * follows open invoices only, so an invoice that expired unpaid and was paid
+ * later reaches the phone through the feed alone.
  */
-internal fun coveredByOwnAlerts(identifier: String, payments: Boolean, payouts: Boolean): Boolean =
-    when (identifier.lowercase()) {
-        "invoice_confirmed", "invoice_paidafterexpiration" -> payments
-        "payout", "payout_awaitingapproval" -> payouts
-        else -> false
-    }
+internal fun coveredByOwnAlerts(
+    item: NotificationData,
+    payments: Boolean,
+    payouts: Boolean,
+    announcedInvoiceIds: Set<String>,
+): Boolean = when (item.identifier.lowercase()) {
+    "invoice_confirmed" -> payments
+    "invoice_paidafterexpiration", "invoice_expiredpaidpartial", "invoice_failedtoconfirm" ->
+        payments && announcedInvoiceIds.any { it.isNotEmpty() && item.link?.contains(it) == true }
+    "payout", "payout_awaitingapproval" -> payouts
+    else -> false
+}

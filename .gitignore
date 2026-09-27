@@ -12,8 +12,16 @@ local.properties
 # rotate them; git history is forever.
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.pem
+.env
 keystore.properties
 signing.properties
+
+# Build artifacts belong on the Releases page, not in git
+*.apk
+*.aab
 
 # IDE
 .idea/

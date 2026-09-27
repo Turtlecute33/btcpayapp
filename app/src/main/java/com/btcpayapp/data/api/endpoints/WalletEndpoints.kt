@@ -1,6 +1,7 @@
 package com.btcpayapp.data.api.endpoints
 
 import com.btcpayapp.data.api.BtcPayApi
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.BroadcastTransactionRequest
 import com.btcpayapp.data.api.dto.CreateTransactionPsbtResponse
 import com.btcpayapp.data.api.dto.CreateTransactionRequest
@@ -83,16 +84,26 @@ internal suspend fun BtcPayApi.walletTransaction(
     get("${walletPath(storeId, paymentMethodId)}/transactions/${transactionId.pathSegment()}")
 
 /**
- * Creates, signs and broadcasts in one call. Requires a hot wallet on the
- * server; a watch-only store will reject it.
+ * Creates and signs a transaction with the server's hot-wallet seed, and does
+ * **not** broadcast it. Returns the raw signed transaction as hex (the server
+ * answers with a bare JSON string), so the app can show the real fee and the
+ * outputs before anything leaves, then send exactly those bytes with
+ * [broadcastTransaction].
+ *
+ * `proceedWithPayjoin = false` is load-bearing. The server runs payjoin
+ * *before* it checks `proceedWithBroadcast` (v2.3.3), and a payjoin broadcasts
+ * the payjoin transaction and schedules the original for two minutes later. So
+ * with payjoin on and a payjoin-capable destination, this "sign only" call would
+ * send money. No payjoin is intended: the reviewed bytes must be the bytes
+ * sent. A watch-only store rejects this call.
  */
-internal suspend fun BtcPayApi.createTransaction(
+internal suspend fun BtcPayApi.signTransaction(
     storeId: String,
     paymentMethodId: String,
     request: CreateTransactionRequest,
-): WalletTransactionData = post(
+): String = post(
     "${walletPath(storeId, paymentMethodId)}/transactions",
-    body(request),
+    body(request.copy(signWithSeed = true, proceedWithBroadcast = false, proceedWithPayjoin = false)),
 )
 
 /**
@@ -108,6 +119,16 @@ internal suspend fun BtcPayApi.createUnsignedPsbt(
     body(request.copy(signWithSeed = false, proceedWithBroadcast = false)),
 )
 
+/**
+ * Broadcasts a signed transaction ([transaction] = hex from [signTransaction]).
+ * The route exists from 2.3.3 ([ServerVersion.SIGNED_BROADCAST]).
+ *
+ * After a successful broadcast the server looks the transaction up in its own
+ * wallet and answers 404 `transaction-not-found` while its indexer has not seen
+ * it yet: that answer means **sent**, not failed. Broadcasting the same hex
+ * again is harmless (the network already has it), so a retry after an unclear
+ * outcome must re-send the same hex, never sign a new transaction.
+ */
 internal suspend fun BtcPayApi.broadcastTransaction(
     storeId: String,
     paymentMethodId: String,

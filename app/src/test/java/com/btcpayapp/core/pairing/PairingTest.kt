@@ -1,5 +1,6 @@
 package com.btcpayapp.core.pairing
 
+import com.btcpayapp.data.session.Permissions
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -38,13 +39,49 @@ class PairingTest {
     }
 
     @Test
-    fun `strict and selective stores are requested by default`() {
+    fun `the consent page lets the user untick and pick stores`() {
         val url = Pairing.authorizeUrl(BASE, "http://127.0.0.1:1/x", emptyList())
+        val manual = Pairing.manualAuthorizeUrl(BASE, Pairing.DEFAULT_PERMISSIONS)
 
-        // strict=true stops the server granting anything broader than asked for;
-        // selectiveStores=true lets the user scope the key to one store.
-        assertTrue(url.contains("strict=true"))
+        // strict=true draws every requested box disabled, so the user could
+        // only take the whole list; selectiveStores=true lets the
+        // user scope the key to one store.
+        assertTrue(url.contains("strict=false"))
         assertTrue(url.contains("selectiveStores=true"))
+        assertTrue(manual.contains("strict=false"))
+        assertFalse(manual.contains("strict=true"))
+    }
+
+    @Test
+    fun `the point of sale set can take payments and nothing more`() {
+        val pos = Pairing.POINT_OF_SALE_PERMISSIONS
+        assertTrue(Permissions.covers(pos, "btcpay.store.cancreateinvoice"))
+        assertTrue(Permissions.covers(pos, "btcpay.store.cancreatelightninginvoice"))
+        // Opening a notification marks it seen, a PUT the view permission does not allow.
+        assertTrue(Permissions.covers(pos, "btcpay.user.canmanagenotificationsforuser"))
+        val forbidden = listOf(
+            "btcpay.store.canmodifystoresettings",
+            "btcpay.store.canmanagewallets",
+            "btcpay.store.canmanagewalletsettings",
+            "btcpay.store.canmanagewallettransactions",
+            "btcpay.store.cancreatetransactions",
+            "btcpay.store.cansigntransactions",
+            "btcpay.store.canbroadcasttransactions",
+            "btcpay.store.canuselightningnode",
+            "btcpay.store.canmanagepayouts",
+            "btcpay.store.canmanagepullpayments",
+            "btcpay.store.canmodifyinvoices",
+            "btcpay.store.canmodifypaymentrequests",
+            "btcpay.store.webhooks.canmodifywebhooks",
+        )
+        assertEquals(emptyList<String>(), forbidden.filter { Permissions.covers(pos, it) })
+        assertTrue(pos.none { it.startsWith("btcpay.server.") })
+    }
+
+    @Test
+    fun `the consent page shows the launcher label`() {
+        // Must equal app_name in res/values/strings.xml.
+        assertEquals("BtcPayServer", Pairing.APPLICATION_NAME)
     }
 
     @Test

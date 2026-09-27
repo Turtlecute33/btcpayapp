@@ -3,6 +3,7 @@
 package com.btcpayapp.data.api.dto
 
 import com.btcpayapp.data.api.BigDecimalSerializer
+import com.btcpayapp.data.api.DecimalTextSerializer
 import com.btcpayapp.data.api.FallbackEnumSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.UseSerializers
@@ -153,8 +154,14 @@ data class PayLightningInvoiceRequest(
 data class LightningAddressData(
     val username: String = "",
     val currencyCode: String? = null,
-    /** Satoshi. */
+    /**
+     * Satoshi, as plain decimal text. The server sends JSON numbers here (a bare
+     * C# `decimal?`, whatever the swagger says), which a plain `String` refuses
+     * under `isLenient = false`, so one address with limits failed the whole list.
+     */
+    @Serializable(with = DecimalTextSerializer::class)
     val min: String? = null,
+    @Serializable(with = DecimalTextSerializer::class)
     val max: String? = null,
     val invoiceMetadata: kotlinx.serialization.json.JsonObject? = null,
 )

@@ -1,7 +1,6 @@
 package com.btcpayapp.ui.screens.notifications
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -49,6 +48,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -59,6 +60,7 @@ import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.attempt
 import com.btcpayapp.data.api.dto.NotificationData
 import com.btcpayapp.data.api.dto.NotificationSettingItem
 import com.btcpayapp.data.api.endpoints.deleteNotification
@@ -66,6 +68,7 @@ import com.btcpayapp.data.api.endpoints.markNotification
 import com.btcpayapp.data.api.endpoints.notificationSettings
 import com.btcpayapp.data.api.endpoints.notifications
 import com.btcpayapp.data.api.endpoints.updateNotificationSettings
+import com.btcpayapp.ui.LocalOpenInStore
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
@@ -77,6 +80,8 @@ import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.theme.Motion
+import com.btcpayapp.ui.OpenLinkDialog
+import com.btcpayapp.ui.webHost
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -110,7 +115,11 @@ data class NotificationsState(
     val settingsError: String? = null,
     val baseUrl: String? = null,
     val message: String? = null,
-    /** Set by a tap, cleared by the screen once it has acted on it. */
+    /**
+     * Set by a tap, cleared by the screen once it has acted on it. An in-app
+     * target carries a store id only when it is in another store; a web target
+     * waits here for the user's yes or no.
+     */
     val navigateTo: NotificationTarget? = null,
 )
 
@@ -135,6 +144,13 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
+    /**
+     * Marking seen and deleting need this permission. A "Watch only" key
+     * lacks it, so those actions are hidden rather than failing on every tap.
+     */
+    val canManage: Boolean
+        get() = graph.session.hasPermission("btcpay.user.canmanagenotificationsforuser")
+
     fun refresh() = load(refreshing = true)
 
     fun dismissError() = _state.update { it.copy(error = null) }
@@ -153,39 +169,35 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
      * screens against whichever store happened to be active shows the wrong
      * store's data or an error.
      *
-     * The switch is silent, as it already is when the same notification arrives
-     * as a system notification and is tapped from the shade — that path switches
-     * account and store before it navigates too.
+     * The switch is the shell's, not this model's: it is refused while a
+     * payment is in flight, drops the old store's screens and only then opens
+     * the target, the same path a tap on a system notification takes. Switching here and
+     * then navigating would race that reset, which can pop the target again.
      */
     fun open(notification: NotificationData) {
-        markSeen(notification.id)
-        when (val target = notificationTarget(notification.link, _state.value.baseUrl)) {
-            is NotificationTarget.Web -> _state.update { it.copy(navigateTo = target) }
+        if (canManage) markSeen(notification.id)
+        val next = when (val target = notificationTarget(notification.link, _state.value.baseUrl)) {
+            is NotificationTarget.Web -> target
 
-            NotificationTarget.None -> Unit
+            NotificationTarget.None -> null
 
             is NotificationTarget.InApp -> {
                 val storeId = notification.storeId ?: target.storeId
-                if (storeId == null || storeId == graph.session.activeStore.value?.id) {
-                    _state.update { it.copy(navigateTo = target) }
-                    return
-                }
-                viewModelScope.launch {
+                when {
+                    storeId == null || storeId == graph.session.activeStore.value?.id -> target.copy(storeId = null)
                     // A store this account cannot see is one no screen here can
                     // fill, so that link opens in the browser rather than as an
                     // empty screen with the right title.
-                    if (graph.session.stores.value.none { it.id == storeId }) {
-                        val web = notification.link?.let { absoluteLink(_state.value.baseUrl, it) }
-                        _state.update {
-                            it.copy(navigateTo = web?.let(NotificationTarget::Web))
-                        }
-                        return@launch
-                    }
-                    graph.session.selectStore(storeId)
-                    _state.update { it.copy(navigateTo = target) }
+                    graph.session.stores.value.none { it.id == storeId } ->
+                        notification.link?.let { absoluteLink(_state.value.baseUrl, it) }?.let(NotificationTarget::Web)
+                    else -> target.copy(storeId = storeId)
                 }
             }
         }
+        // The same rule as a link from outside the app: a web address opens
+        // only when webHost can say where it goes.
+        if (next == null || next is NotificationTarget.Web && webHost(next.url) == null) return
+        _state.update { it.copy(navigateTo = next) }
     }
 
     fun setUnseenOnly(value: Boolean) {
@@ -221,9 +233,7 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
             var failures = 0
             unseen.chunked(4).forEach { batch ->
                 failures += batch.map { item -> async {
-                    runCatching { api.markNotification(item.id, true) }.onFailure {
-                        if (it is kotlinx.coroutines.CancellationException) throw it
-                    }
+                    attempt { api.markNotification(item.id, true) }
                 } }.awaitAll().count { it.isFailure }
             }
             if (failures > 0) _state.update { it.copy(message = "$failures notifications could not be marked as seen. Try again.") }
@@ -251,7 +261,9 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
     // --- Settings ----------------------------------------------------------
 
     fun openSettings() {
-        _state.update { it.copy(settingsOpen = true, settingsLoading = true, settingsError = null) }
+        // Last visit's switches are not shown while this loads: a failed load
+        // must not leave old values on screen for a save to send back.
+        _state.update { it.copy(settingsOpen = true, settingsLoading = true, settingsError = null, settings = emptyList()) }
         viewModelScope.launch {
             runCatching { graph.session.requireApi().notificationSettings() }
                 .onSuccess { data ->
@@ -280,15 +292,18 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
         val next = _state.value.settings.map {
             if (it.identifier == identifier) it.copy(enabled = enabled) else it
         }
-        _state.update { it.copy(settings = next, settingsLoading = true) }
+        _state.update { it.copy(settings = next, settingsLoading = true, settingsError = null) }
 
         viewModelScope.launch {
             val disabled = next.filterNot { it.enabled }.map { it.identifier }
             runCatching { graph.session.requireApi().updateNotificationSettings(disabled) }
                 .onSuccess { data -> _state.update { it.copy(settings = data.notifications, settingsLoading = false) } }
                 .onFailure { failure ->
+                    // The switches come back as they were, with one line
+                    // above them; the sheet stays usable for another try.
+                    val reason = failure.asApiException().userMessage
                     _state.update {
-                        it.copy(settings = previous, settingsLoading = false, settingsError = failure.asApiException().userMessage)
+                        it.copy(settings = previous, settingsLoading = false, settingsError = "Could not save the setting. $reason")
                     }
                 }
         }
@@ -331,6 +346,7 @@ fun NotificationsScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val uriHandler = LocalUriHandler.current
+    val openInStore = LocalOpenInStore.current
 
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
@@ -338,15 +354,19 @@ fun NotificationsScreen(
         viewModel.consumeMessage()
     }
 
-    // The tap resolves in the view model, which may have to switch stores before
-    // the destination means anything; the act of going there is the screen's.
+    // The tap resolves in the view model; the act of going there is the
+    // screen's, and one in another store goes through the shell's switch.
     LaunchedEffect(state.navigateTo) {
-        when (val target = state.navigateTo) {
-            is NotificationTarget.InApp -> onNavigate(target.route)
-            is NotificationTarget.Web -> uriHandler.openUri(target.url)
-            else -> return@LaunchedEffect
-        }
+        val target = state.navigateTo as? NotificationTarget.InApp ?: return@LaunchedEffect
+        val storeId = target.storeId
+        if (storeId != null) openInStore(storeId, target.route) else onNavigate(target.route)
         viewModel.consumeNavigation()
+    }
+
+    // The server writes these links, and a plugin can write any address, so a
+    // web link is asked about as one from outside the app is.
+    (state.navigateTo as? NotificationTarget.Web)?.let { target ->
+        OpenLinkDialog(target.url, onOpen = { uriHandler.openUri(target.url) }, onDismiss = viewModel::consumeNavigation)
     }
 
     if (state.settingsOpen) {
@@ -366,8 +386,10 @@ fun NotificationsScreen(
         onRefresh = viewModel::refresh,
         snackbarHostState = snackbarHostState,
         actions = {
-            IconButton(onClick = viewModel::markAllSeen) {
-                Icon(Icons.Rounded.DoneAll, contentDescription = "Mark all as seen")
+            if (viewModel.canManage) {
+                IconButton(onClick = viewModel::markAllSeen) {
+                    Icon(Icons.Rounded.DoneAll, contentDescription = "Mark all as seen")
+                }
             }
             IconButton(onClick = viewModel::openSettings) {
                 Icon(Icons.Rounded.Settings, contentDescription = "Notification settings")
@@ -428,7 +450,11 @@ fun NotificationsScreen(
                                 NotificationRow(
                                     notification = notification,
                                     onClick = { viewModel.open(notification) },
-                                    onDelete = { viewModel.delete(notification.id) },
+                                    onDelete = if (viewModel.canManage) {
+                                        { viewModel.delete(notification.id) }
+                                    } else {
+                                        null
+                                    },
                                 )
                                 ThinDivider()
                             }
@@ -444,7 +470,7 @@ fun NotificationsScreen(
 private fun NotificationRow(
     notification: NotificationData,
     onClick: () -> Unit,
-    onDelete: () -> Unit,
+    onDelete: (() -> Unit)?,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -472,6 +498,8 @@ private fun NotificationRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
+            // The dot and the weight are visual only; this says it aloud.
+            .semantics { if (!notification.seen) stateDescription = "Unread" }
             .padding(start = 16.dp, top = 14.dp, bottom = 14.dp),
         verticalAlignment = Alignment.Top,
     ) {
@@ -495,7 +523,7 @@ private fun NotificationRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Box {
+        if (onDelete != null) Box {
             IconButton(onClick = { menuOpen = true }) {
                 Icon(Icons.Rounded.MoreVert, contentDescription = "Notification actions")
             }
@@ -544,9 +572,11 @@ private fun NotificationSettingsSheet(
             )
             Spacer(Modifier.height(8.dp))
 
+            // An error with switches to show is a failed save, said above
+            // them; without any it is a failed load, and is all there is.
             val phase = when {
                 loading -> NotificationSettingsPhase.Loading
-                error != null -> NotificationSettingsPhase.Error
+                error != null && settings.isEmpty() -> NotificationSettingsPhase.Error
                 settings.isEmpty() -> NotificationSettingsPhase.Empty
                 else -> NotificationSettingsPhase.Content
             }
@@ -578,6 +608,14 @@ private fun NotificationSettingsSheet(
                     // the sheet back through its loading state, so an entrance
                     // here would replay on every toggle.
                     NotificationSettingsPhase.Content -> Column(Modifier.fillMaxWidth()) {
+                        if (error != null) {
+                            Text(
+                                text = error,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                         settings.forEach { item ->
                             FormSwitch(
                                 title = item.name.ifBlank { item.identifier },

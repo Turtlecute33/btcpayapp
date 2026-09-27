@@ -7,7 +7,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -32,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
@@ -47,6 +47,7 @@ import com.btcpayapp.data.api.dto.UpdateEmailSettingsRequest
 import com.btcpayapp.data.api.endpoints.serverEmailSettings
 import com.btcpayapp.data.api.endpoints.updateServerEmailSettings
 import com.btcpayapp.ui.appViewModel
+import com.btcpayapp.ui.components.ActionBar
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
 import com.btcpayapp.ui.components.ErrorBanner
@@ -56,7 +57,15 @@ import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SecretField
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.confirmDiscardChanges
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.screens.store.SMTP_RETYPE_PASSWORD
+import com.btcpayapp.ui.screens.store.SmtpReviewDialog
+import com.btcpayapp.ui.screens.store.SmtpRoute
+import com.btcpayapp.ui.screens.store.SmtpSave
+import com.btcpayapp.ui.screens.store.smtpSave
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -65,7 +74,14 @@ import kotlinx.coroutines.launch
 
 data class ServerEmailState(
     val loading: Boolean = false,
+    /**
+     * True once the stored settings are in the form. Until then the form holds
+     * blanks, and saving them would erase the server's SMTP settings and its
+     * password, which the server never returns.
+     */
+    val loaded: Boolean = false,
     val saving: Boolean = false,
+    val dirty: Boolean = false,
     val loadError: ApiException? = null,
     val error: ApiException? = null,
     val from: String = "",
@@ -76,9 +92,16 @@ data class ServerEmailState(
     val passwordSet: Boolean = false,
     val disableCertificateCheck: Boolean = false,
     val shareWithStores: Boolean = false,
+    /** The route the server holds, to tell a new one from it. */
+    val saved: SmtpRoute = SmtpRoute(),
+    /** A new route waiting for the user's yes; see [SmtpReviewDialog]. */
+    val review: SmtpRoute? = null,
     val portError: String? = null,
+    val passwordError: String? = null,
     val message: String? = null,
 )
+
+private fun ServerEmailState.route() = SmtpRoute.of(server, port, login, disableCertificateCheck)
 
 class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
 
@@ -89,23 +112,27 @@ class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
         load()
     }
 
-    fun setFrom(value: String) = _state.update { it.copy(from = value) }
+    fun setFrom(value: String) = _state.update { it.copy(from = value, dirty = true) }
 
-    fun setServer(value: String) = _state.update { it.copy(server = value) }
+    fun setServer(value: String) = _state.update { it.copy(server = value, passwordError = null, dirty = true) }
 
-    fun setPort(value: String) = _state.update { it.copy(port = value.filter(Char::isDigit), portError = null) }
+    fun setPort(value: String) =
+        _state.update { it.copy(port = value.filter(Char::isDigit), portError = null, dirty = true) }
 
-    fun setLogin(value: String) = _state.update { it.copy(login = value) }
+    fun setLogin(value: String) = _state.update { it.copy(login = value, passwordError = null, dirty = true) }
 
-    fun setPassword(value: String) = _state.update { it.copy(password = value) }
+    fun setPassword(value: String) = _state.update { it.copy(password = value, passwordError = null, dirty = true) }
 
-    fun setDisableCertificateCheck(value: Boolean) = _state.update { it.copy(disableCertificateCheck = value) }
+    fun setDisableCertificateCheck(value: Boolean) =
+        _state.update { it.copy(disableCertificateCheck = value, dirty = true) }
 
-    fun setShareWithStores(value: Boolean) = _state.update { it.copy(shareWithStores = value) }
+    fun setShareWithStores(value: Boolean) = _state.update { it.copy(shareWithStores = value, dirty = true) }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
+
+    fun dismissReview() = _state.update { it.copy(review = null) }
 
     fun load() {
         viewModelScope.launch {
@@ -115,6 +142,8 @@ class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
                     _state.update {
                         it.copy(
                             loading = false,
+                            loaded = true,
+                            dirty = false,
                             from = data.from.orEmpty(),
                             server = data.server.orEmpty(),
                             port = data.port?.toString().orEmpty(),
@@ -123,7 +152,7 @@ class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
                             passwordSet = data.passwordSet,
                             disableCertificateCheck = data.disableCertificateCheck,
                             shareWithStores = data.enableStoresToUseServerEmailSettings == true,
-                        )
+                        ).let { next -> next.copy(saved = next.route()) }
                     }
                 }
                 .onFailure { failure ->
@@ -132,12 +161,33 @@ class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun save() {
+    /**
+     * [reviewed] is the route the user confirmed in [SmtpReviewDialog] and the
+     * spend gate. The save goes ahead only for that exact route. This mail
+     * carries password-reset links, so whoever can read it can take over
+     * accounts on this server.
+     */
+    fun save(reviewed: SmtpRoute? = null) {
         val snapshot = _state.value
+        if (!snapshot.loaded || snapshot.saving) return
         val port = snapshot.port.takeIf { it.isNotBlank() }?.toIntOrNull()
         if (snapshot.port.isNotBlank() && (port == null || port !in 1..65535)) {
             _state.update { it.copy(portError = "A port is a number between 1 and 65535.") }
             return
+        }
+        val route = snapshot.route()
+        when (smtpSave(snapshot.saved, route, passwordTyped = snapshot.password.isNotBlank(), passwordSet = snapshot.passwordSet)) {
+            SmtpSave.RetypePassword -> {
+                // Also as a snackbar: Save sits far from the password field,
+                // which the keyboard often hides.
+                _state.update { it.copy(passwordError = SMTP_RETYPE_PASSWORD, message = SMTP_RETYPE_PASSWORD) }
+                return
+            }
+            SmtpSave.Review -> if (route != reviewed) {
+                _state.update { it.copy(review = route) }
+                return
+            }
+            SmtpSave.Go -> Unit
         }
 
         viewModelScope.launch {
@@ -160,8 +210,11 @@ class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
                 _state.update {
                     it.copy(
                         saving = false,
+                        // Edits typed while the request ran are still unsaved.
+                        dirty = it.fields() != snapshot.fields(),
                         password = "",
                         passwordSet = data.passwordSet,
+                        saved = route,
                         message = "Email settings saved.",
                     )
                 }
@@ -173,6 +226,10 @@ class ServerEmailViewModel(private val graph: AppGraph) : ViewModel() {
 
 }
 
+/** The editable part of the state, to tell whether anything changed during a save. */
+private fun ServerEmailState.fields() =
+    listOf(from, server, port, login, password, disableCertificateCheck, shareWithStores)
+
 /** What the body is showing; a cheap discriminator, not the form itself. */
 private enum class ServerEmailPhase { Loading, Error, Content }
 
@@ -181,6 +238,23 @@ fun ServerEmailScreen(onBack: () -> Unit) {
     val viewModel = appViewModel { ServerEmailViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val guardedBack = confirmDiscardChanges(state.dirty, onBack)
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
+
+    state.review?.let { route ->
+        SmtpReviewDialog(
+            route = route,
+            mail = "invitations and password-reset links",
+            onConfirm = {
+                viewModel.dismissReview()
+                scope.afterSpendGate(gate, "Confirm email server", route.host, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.save(reviewed = route)
+                }
+            },
+            onDismiss = viewModel::dismissReview,
+        )
+    }
 
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
@@ -188,18 +262,23 @@ fun ServerEmailScreen(onBack: () -> Unit) {
         viewModel.consumeMessage()
     }
 
+    // Content only once the stored settings are in the form.
+    val phase = when {
+        state.loaded -> ServerEmailPhase.Content
+        state.loadError != null && !state.loading -> ServerEmailPhase.Error
+        else -> ServerEmailPhase.Loading
+    }
+
     AppScreen(
         title = "Server email",
         subtitle = "SMTP used for invitations and notices",
-        onBack = onBack,
+        onBack = guardedBack,
         snackbarHostState = snackbarHostState,
         bottomBar = {
-            Surface(tonalElevation = 3.dp) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+            // No Save while the form is loading or failed to load: it would
+            // send the blank form.
+            if (phase == ServerEmailPhase.Content) {
+                ActionBar {
                     // Sideways: the button keeps its place and the spinner
                     // opens a gap beside it, rather than the bar changing
                     // height mid-save.
@@ -208,22 +287,13 @@ fun ServerEmailScreen(onBack: () -> Unit) {
                         enter = expandHorizontally(Motion.spatialSize) + fadeIn(Motion.effects),
                         exit = shrinkHorizontally(Motion.spatialSize) + fadeOut(Motion.effectsFast),
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(Modifier.size(20.dp))
-                            Spacer(Modifier.width(16.dp))
-                        }
+                        CircularProgressIndicator(Modifier.size(20.dp))
                     }
-                    Button(onClick = viewModel::save, enabled = !state.saving) { Text("Save") }
+                    Button(onClick = { viewModel.save() }, enabled = !state.saving) { Text("Save") }
                 }
             }
         },
     ) { padding ->
-        val phase = when {
-            state.loading -> ServerEmailPhase.Loading
-            state.loadError != null -> ServerEmailPhase.Error
-            else -> ServerEmailPhase.Content
-        }
-
         AnimatedSwap(phase, label = "serverEmail") { shown ->
             when (shown) {
                 // A spinner rather than a skeleton: one record behind a form.
@@ -286,6 +356,7 @@ fun ServerEmailScreen(onBack: () -> Unit) {
                             } else {
                                 "No password is stored for this server yet."
                             },
+                            error = state.passwordError,
                             imeAction = ImeAction.Done,
                         )
                     }

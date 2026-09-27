@@ -10,13 +10,17 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavDestination.Companion.hasRoute
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.toRoute
+import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.components.LocalNavAnimatedScope
 import com.btcpayapp.ui.components.LocalSharedTransitionScope
 import com.btcpayapp.ui.theme.LocalReducedMotion
@@ -244,6 +248,29 @@ fun AppNavHost(
     modifier: Modifier = Modifier,
 ) {
     val still = LocalReducedMotion.current
+    val graph = LocalAppGraph.current
+
+    /**
+     * Back for every screen: pops, but never the start destination.
+     *
+     * A screen can ask to go back after it has already gone. Picking or
+     * deleting a store switches the active store, and the shell then drops
+     * every store screen, the asking one included. That screen is still
+     * composed for its exit animation when its own "done, go back" effect
+     * runs, and popping then would take the root and leave nothing on screen.
+     */
+    val back: () -> Unit = remember(navController) {
+        { if (navController.previousBackStackEntry != null) navController.popBackStack() }
+    }
+
+    /**
+     * [back] from [entry] only while it is on top. A result a screen reports
+     * twice (a double tap) or after a store reset dropped it must not pop, or
+     * hand a result to, whatever is now below.
+     */
+    fun backFrom(entry: NavBackStackEntry) {
+        if (navController.currentBackStackEntry == entry) back()
+    }
 
     // Everything the app draws lives inside one shared-transition scope, so a
     // row on a list and the screen it opens can be declared as the same object
@@ -277,7 +304,7 @@ fun AppNavHost(
 
                 screen<ConnectRoute> {
                     ConnectScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onConnected = { baseUrl, pins ->
                             navController.navigate(PairRoute(baseUrl, pins.joinToString(",")))
                         },
@@ -289,8 +316,10 @@ fun AppNavHost(
                     PairScreen(
                         baseUrl = route.baseUrl,
                         pins = route.pins.splitPins(),
-                        onBack = navController::popBackStack,
-                        onManualKey = { navController.navigate(ManualKeyRoute(route.baseUrl, route.pins)) },
+                        onBack = back,
+                        onManualKey = { access, serverAdmin ->
+                            navController.navigate(ManualKeyRoute(route.baseUrl, route.pins, access, serverAdmin))
+                        },
                         onPaired = { navController.toHomeClearingOnboarding() },
                     )
                 }
@@ -300,14 +329,30 @@ fun AppNavHost(
                     ManualKeyScreen(
                         baseUrl = route.baseUrl,
                         pins = route.pins.splitPins(),
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onPaired = { navController.toHomeClearingOnboarding() },
+                        access = route.access,
+                        serverAdmin = route.serverAdmin,
                     )
                 }
 
                 // --- Tabs ----------------------------------------------------------
 
                 screen<HomeRoute> {
+                    // A code scanned from Home (or the Scan shortcut) is
+                    // something to pay: the send screen tells the rails apart.
+                    val scanned = navController.consumeScanResult()
+                    LaunchedEffect(scanned) {
+                        if (scanned == null) return@LaunchedEffect
+                        navController.navigate(
+                            SendRoute(
+                                paymentMethodId = graph.session.enabledPaymentMethodIds
+                                    .firstOrNull { it.endsWith("-CHAIN", ignoreCase = true) },
+                                lightningCryptoCode = graph.session.lightningCryptoCodes.firstOrNull(),
+                                prefill = scanned,
+                            ),
+                        )
+                    }
                     HomeScreen(
                         onOpenInvoice = { navController.navigate(InvoiceDetailRoute(it)) },
                         onOpenInvoices = { navController.navigate(InvoicesRoute) },
@@ -317,7 +362,7 @@ fun AppNavHost(
                         onOpenAccounts = { navController.navigate(AccountsRoute) },
                         onOpenStores = { navController.navigate(StoreListRoute) },
                         onCreateInvoice = { navController.navigate(CreateInvoiceRoute()) },
-                        onScan = { navController.navigate(ScanRoute()) },
+                        onScan = { navController.navigate(ScanRoute(ScanPurpose.SEND_DESTINATION)) },
                     )
                 }
 
@@ -363,9 +408,9 @@ fun AppNavHost(
                     val route = entry.toRoute<InvoiceDetailRoute>()
                     InvoiceDetailScreen(
                         invoiceId = route.invoiceId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onRefund = { navController.navigate(RefundRoute(route.invoiceId)) },
-                        onCheckout = { navController.navigate(CheckoutRoute(route.invoiceId)) },
+                        onCheckout = { navController.navigateOrPop(CheckoutRoute(route.invoiceId)) },
                     )
                 }
 
@@ -374,7 +419,7 @@ fun AppNavHost(
                     CreateInvoiceScreen(
                         prefillAmount = route.prefillAmount,
                         prefillCurrency = route.prefillCurrency,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onCreated = { invoiceId ->
                             navController.navigate(CheckoutRoute(invoiceId)) {
                                 popUpTo<CreateInvoiceRoute> { inclusive = true }
@@ -386,7 +431,7 @@ fun AppNavHost(
                 screen<RefundRoute> { entry ->
                     RefundScreen(
                         invoiceId = entry.toRoute<RefundRoute>().invoiceId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onCreated = { pullPaymentId ->
                             navController.navigate(PullPaymentDetailRoute(pullPaymentId)) {
                                 popUpTo<RefundRoute> { inclusive = true }
@@ -398,8 +443,8 @@ fun AppNavHost(
                 screen<CheckoutRoute> { entry ->
                     CheckoutScreen(
                         invoiceId = entry.toRoute<CheckoutRoute>().invoiceId,
-                        onBack = navController::popBackStack,
-                        onOpenInvoice = { navController.navigate(InvoiceDetailRoute(it)) },
+                        onBack = back,
+                        onOpenInvoice = { navController.navigateOrPop(InvoiceDetailRoute(it)) },
                     )
                 }
 
@@ -408,7 +453,7 @@ fun AppNavHost(
                 screen<WalletReceiveRoute> { entry ->
                     WalletReceiveScreen(
                         paymentMethodId = entry.toRoute<WalletReceiveRoute>().paymentMethodId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -417,14 +462,14 @@ fun AppNavHost(
                     TransactionDetailScreen(
                         paymentMethodId = route.paymentMethodId,
                         transactionId = route.transactionId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
                 screen<UtxoRoute> { entry ->
                     UtxoScreen(
                         paymentMethodId = entry.toRoute<UtxoRoute>().paymentMethodId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -435,7 +480,7 @@ fun AppNavHost(
                     LightningScreen(
                         cryptoCode = route.cryptoCode,
                         serverNode = route.serverNode,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onChannels = { navController.navigate(LightningChannelsRoute(route.cryptoCode, route.serverNode)) },
                         onPayments = { navController.navigate(LightningPaymentsRoute(route.cryptoCode, route.serverNode)) },
                         onSend = {
@@ -459,7 +504,7 @@ fun AppNavHost(
                         serverNode = route.serverNode,
                         scanResult = navController.consumeScanResult(),
                         onScan = { navController.navigate(ScanRoute(ScanPurpose.NODE_URI)) },
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -468,7 +513,7 @@ fun AppNavHost(
                     LightningPaymentsScreen(
                         cryptoCode = route.cryptoCode,
                         serverNode = route.serverNode,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -477,12 +522,12 @@ fun AppNavHost(
                     LightningReceiveScreen(
                         cryptoCode = route.cryptoCode,
                         serverNode = route.serverNode,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
                 screen<LightningAddressesRoute> {
-                    LightningAddressesScreen(onBack = navController::popBackStack)
+                    LightningAddressesScreen(onBack = back)
                 }
 
                 // --- Sending -------------------------------------------------------
@@ -500,8 +545,8 @@ fun AppNavHost(
                         // rails this store actually has, and the scanner should
                         // keep refusing codes that cannot be paid from here.
                         onScan = { purpose -> navController.navigate(ScanRoute(purpose)) },
-                        onBack = navController::popBackStack,
-                        onSent = { navController.popBackStack() },
+                        onBack = back,
+                        onSent = { backFrom(entry) },
                     )
                 }
 
@@ -511,14 +556,14 @@ fun AppNavHost(
                     PaymentRequestListScreen(
                         onOpen = { navController.navigate(PaymentRequestEditRoute(it)) },
                         onCreate = { navController.navigate(PaymentRequestEditRoute()) },
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
                 screen<PaymentRequestEditRoute> { entry ->
                     PaymentRequestEditScreen(
                         paymentRequestId = entry.toRoute<PaymentRequestEditRoute>().paymentRequestId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -528,13 +573,13 @@ fun AppNavHost(
                     PullPaymentListScreen(
                         onOpen = { navController.navigate(PullPaymentDetailRoute(it)) },
                         onCreate = { navController.navigate(PullPaymentCreateRoute) },
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
                 screen<PullPaymentCreateRoute> {
                     PullPaymentCreateScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onCreated = { id ->
                             navController.navigate(PullPaymentDetailRoute(id)) {
                                 popUpTo<PullPaymentCreateRoute> { inclusive = true }
@@ -546,14 +591,14 @@ fun AppNavHost(
                 screen<PullPaymentDetailRoute> { entry ->
                     PullPaymentDetailScreen(
                         pullPaymentId = entry.toRoute<PullPaymentDetailRoute>().pullPaymentId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
                 screen<PayoutsRoute> {
                     PayoutListScreen(
                         onCreate = { navController.navigate(PayoutCreateRoute) },
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -561,7 +606,7 @@ fun AppNavHost(
                     PayoutCreateScreen(
                         scanResult = navController.consumeScanResult(),
                         onScan = { navController.navigate(ScanRoute(ScanPurpose.PAYOUT_DESTINATION)) },
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -569,7 +614,7 @@ fun AppNavHost(
 
                 screen<AppsRoute> {
                     AppsScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onEditPointOfSale = { navController.navigate(PointOfSaleEditRoute(it)) },
                         onEditCrowdfund = { navController.navigate(CrowdfundEditRoute(it)) },
                     )
@@ -578,14 +623,14 @@ fun AppNavHost(
                 screen<PointOfSaleEditRoute> { entry ->
                     PointOfSaleEditScreen(
                         appId = entry.toRoute<PointOfSaleEditRoute>().appId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
                 screen<CrowdfundEditRoute> { entry ->
                     CrowdfundEditScreen(
                         appId = entry.toRoute<CrowdfundEditRoute>().appId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -593,25 +638,25 @@ fun AppNavHost(
 
                 screen<NotificationsRoute> {
                     NotificationsScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onNavigate = { navController.navigate(it) },
                     )
                 }
 
                 screen<StoreSettingsRoute> {
                     StoreSettingsScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onNavigate = { navController.navigate(it) },
                     )
                 }
 
                 screen<StoreListRoute> {
-                    StoreListScreen(onBack = navController::popBackStack)
+                    StoreListScreen(onBack = back)
                 }
 
                 screen<PaymentMethodsRoute> {
                     PaymentMethodsScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onEdit = { navController.navigate(PaymentMethodEditRoute(it)) },
                     )
                 }
@@ -619,17 +664,17 @@ fun AppNavHost(
                 screen<PaymentMethodEditRoute> { entry ->
                     PaymentMethodEditScreen(
                         paymentMethodId = entry.toRoute<PaymentMethodEditRoute>().paymentMethodId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
-                screen<StoreUsersRoute> { StoreUsersScreen(onBack = navController::popBackStack) }
-                screen<StoreRatesRoute> { StoreRatesScreen(onBack = navController::popBackStack) }
-                screen<StoreEmailRoute> { StoreEmailScreen(onBack = navController::popBackStack) }
+                screen<StoreUsersRoute> { StoreUsersScreen(onBack = back) }
+                screen<StoreRatesRoute> { StoreRatesScreen(onBack = back) }
+                screen<StoreEmailRoute> { StoreEmailScreen(onBack = back) }
 
                 screen<WebhooksRoute> {
                     WebhooksScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onEdit = { navController.navigate(WebhookEditRoute(it)) },
                     )
                 }
@@ -637,7 +682,7 @@ fun AppNavHost(
                 screen<WebhookEditRoute> { entry ->
                     WebhookEditScreen(
                         webhookId = entry.toRoute<WebhookEditRoute>().webhookId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
@@ -645,20 +690,20 @@ fun AppNavHost(
 
                 screen<ServerRoute> {
                     ServerScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onNavigate = { navController.navigate(it) },
                     )
                 }
 
-                screen<ServerUsersRoute> { ServerUsersScreen(onBack = navController::popBackStack) }
-                screen<ServerEmailRoute> { ServerEmailScreen(onBack = navController::popBackStack) }
-                screen<PayoutProcessorsRoute> { PayoutProcessorsScreen(onBack = navController::popBackStack) }
+                screen<ServerUsersRoute> { ServerUsersScreen(onBack = back) }
+                screen<ServerEmailRoute> { ServerEmailScreen(onBack = back) }
+                screen<PayoutProcessorsRoute> { PayoutProcessorsScreen(onBack = back) }
 
                 // --- App-level -----------------------------------------------------
 
                 screen<AppSettingsRoute> {
                     AppSettingsScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onAccounts = { navController.navigate(AccountsRoute) },
                         onAbout = { navController.navigate(AboutRoute) },
                     )
@@ -666,7 +711,7 @@ fun AppNavHost(
 
                 screen<AccountsRoute> {
                     AccountsScreen(
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onAddAccount = { navController.navigate(ConnectRoute) },
                         onOpenAccount = { navController.navigate(AccountDetailRoute(it)) },
                     )
@@ -675,21 +720,22 @@ fun AppNavHost(
                 screen<AccountDetailRoute> { entry ->
                     AccountDetailScreen(
                         accountId = entry.toRoute<AccountDetailRoute>().accountId,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                     )
                 }
 
-                screen<AboutRoute> { AboutScreen(onBack = navController::popBackStack) }
+                screen<AboutRoute> { AboutScreen(onBack = back) }
 
                 screen<ScanRoute> { entry ->
                     ScanScreen(
                         purpose = entry.toRoute<ScanRoute>().purpose,
-                        onBack = navController::popBackStack,
+                        onBack = back,
                         onResult = { raw ->
-                            navController.previousBackStackEntry
-                                ?.savedStateHandle
-                                ?.set(SCAN_RESULT_KEY, raw)
-                            navController.popBackStack()
+                            // Only while the scanner is on top; see backFrom.
+                            if (navController.currentBackStackEntry == entry) {
+                                navController.previousBackStackEntry?.savedStateHandle?.set(SCAN_RESULT_KEY, raw)
+                                back()
+                            }
                         },
                     )
                 }
@@ -731,6 +777,22 @@ private fun NavHostController.consumeScanResult(): String? {
     val value = handle.get<String>(SCAN_RESULT_KEY)
     if (value != null) handle.remove<String>(SCAN_RESULT_KEY)
     return value
+}
+
+/**
+ * Goes back when the screen underneath is already [route], and opens it
+ * otherwise.
+ *
+ * Checkout and invoice detail link to each other. Pushing on every tap would
+ * stack them without limit, and back would have to walk through each copy.
+ */
+private inline fun <reified T : Any> NavHostController.navigateOrPop(route: T) {
+    val previous = previousBackStackEntry
+    if (previous != null && previous.destination.hasRoute(T::class) && previous.toRoute<T>() == route) {
+        popBackStack()
+    } else {
+        navigate(route)
+    }
 }
 
 private fun String.splitPins(): List<String> =

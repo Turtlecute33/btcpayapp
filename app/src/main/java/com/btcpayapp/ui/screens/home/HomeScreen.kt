@@ -36,11 +36,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.ripple
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -50,6 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -60,6 +65,7 @@ import com.btcpayapp.R
 import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.InvoiceData
 import com.btcpayapp.data.api.dto.InvoiceStatus
 import com.btcpayapp.data.api.dto.LightningBalanceData
@@ -81,15 +87,21 @@ import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.SectionHeader
+import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusChip
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.maskedIfPrivate
 import com.btcpayapp.ui.components.pressScale
+import com.btcpayapp.ui.screens.invoice.statusDetail
+import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
+import com.btcpayapp.ui.screens.wallet.formatOnChain
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -100,9 +112,13 @@ import java.time.ZoneId
 
 data class HomeState(
     val recent: List<InvoiceData> = emptyList(),
-    val settledToday: BigDecimal = BigDecimal.ZERO,
     val settledTodayCount: Int = 0,
     val todayTotals: Map<String, Pair<BigDecimal, Int>> = emptyMap(),
+    /**
+     * The last today-query failed. The totals are then the previous ones, not
+     * zero: "$0.00 today" after a timeout would state a fact nobody measured.
+     */
+    val todayStale: Boolean = false,
     val onChain: Map<String, WalletOverviewData> = emptyMap(),
     /** Keyed by payment method id, e.g. `BTC-LN`. Absent when the node did not answer. */
     val lightning: Map<String, LightningBalanceData> = emptyMap(),
@@ -110,17 +126,53 @@ data class HomeState(
     val refreshing: Boolean = false,
     val loading: Boolean = true,
     val error: ApiException? = null,
+    /** A one-off line for the snackbar, such as a store switch that was refused. */
+    val message: String? = null,
 )
+
+/**
+ * The state after a today-query: [invoices] are the settled ones, or null when
+ * the query failed. A failure keeps the previous totals and marks them stale.
+ */
+internal fun HomeState.withToday(invoices: List<InvoiceData>?): HomeState =
+    if (invoices == null) {
+        copy(todayStale = true)
+    } else {
+        copy(
+            settledTodayCount = invoices.size,
+            todayTotals = invoices.groupBy { it.currency }.mapValues { (_, paid) ->
+                paid.fold(BigDecimal.ZERO) { sum, invoice -> sum + invoice.paidAmount } to paid.size
+            },
+            todayStale = false,
+        )
+    }
+
+/**
+ * One card per currency. Nothing settled today yet is one card at zero in the
+ * store's currency; nothing known (the first query failed) is the same card
+ * with no figure (null).
+ */
+internal fun todayCards(
+    totals: Map<String, Pair<BigDecimal, Int>>,
+    stale: Boolean,
+    defaultCurrency: String?,
+): Map<String, Pair<BigDecimal, Int>?> =
+    totals.ifEmpty { mapOf((defaultCurrency ?: "USD") to (BigDecimal.ZERO to 0).takeUnless { stale }) }
 
 class HomeViewModel(private val graph: AppGraph) : ViewModel() {
 
     private val _state = MutableStateFlow(HomeState())
     val state = _state.asStateFlow()
-    private var loadJob: kotlinx.coroutines.Job? = null
+    private var dashboardJob: Job? = null
+    private var balanceJob: Job? = null
 
     val store = graph.session.activeStore
     val stores = graph.session.stores
     val account = graph.session.activeAccount
+
+    /** False until the store list has loaded: "no store yet" before that would be a guess. */
+    val storesLoaded = graph.session.storesLoaded
+    val serverVersion = graph.session.serverVersion
 
     /**
      * Surfaced on the empty state. Without it a rejected key, an unreachable
@@ -131,14 +183,25 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
 
     init {
         viewModelScope.launch {
-            kotlinx.coroutines.flow.combine(graph.session.activeStore, graph.session.paymentMethodsLoaded) { store, loaded ->
+            // Two triggers, not one pair. The invoices and notifications need
+            // only the store; the balances need its payment methods too, which
+            // arrive a moment later. Keyed on the pair, that second emission
+            // cancelled the first load, blanked the dashboard and sent every
+            // request again.
+            var boundStore: String? = null
+            combine(graph.session.activeStore, graph.session.paymentMethodsLoaded) { store, loaded ->
                 store?.id to loaded
             }
                 .distinctUntilChanged()
-                .collectLatest { (storeId, _) ->
-                    loadJob?.cancel()
-                    _state.value = HomeState()
-                    if (storeId != null) load(refreshing = false)
+                .collect { (storeId, methodsLoaded) ->
+                    if (storeId != boundStore) {
+                        boundStore = storeId
+                        dashboardJob?.cancel()
+                        balanceJob?.cancel()
+                        _state.value = HomeState()
+                        if (storeId != null) loadDashboard(storeId, refreshing = false)
+                    }
+                    if (storeId != null && methodsLoaded) loadBalances(storeId) else balanceJob?.cancel()
                 }
         }
     }
@@ -151,21 +214,30 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
     fun refresh() {
         viewModelScope.launch {
             graph.session.refresh()
-            graph.session.activeStore.value?.id?.let { graph.session.refreshPaymentMethods(it) }
-            load(refreshing = true)
+            val storeId = graph.session.activeStore.value?.id ?: return@launch
+            graph.session.refreshPaymentMethods(storeId)
+            loadDashboard(storeId, refreshing = true)
+            loadBalances(storeId)
         }
     }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
+    fun consumeMessage() = _state.update { it.copy(message = null) }
+
+    /** A switch is refused while a payment runs, or when it cannot be saved; the reason is shown. */
     fun selectStore(storeId: String) {
-        viewModelScope.launch { graph.session.selectStore(storeId) }
+        viewModelScope.launch {
+            graph.session.selectStore(storeId)?.let { reason -> _state.update { it.copy(message = reason) } }
+        }
     }
 
-    private fun load(refreshing: Boolean) {
-        val storeId = graph.session.activeStore.value?.id ?: return
-        loadJob?.cancel()
-        loadJob = viewModelScope.launch {
+    /** Hides the Invoice button from a key that would get a 403 for it. */
+    fun canCreateInvoice(storeId: String): Boolean = graph.session.canCreateInvoice(storeId)
+
+    private fun loadDashboard(storeId: String, refreshing: Boolean) {
+        dashboardJob?.cancel()
+        dashboardJob = viewModelScope.launch {
             _state.update { it.copy(refreshing = refreshing, loading = !refreshing && it.recent.isEmpty()) }
 
             val api = runCatching { graph.session.requireApi() }.getOrNull()
@@ -181,6 +253,9 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
             // Independent calls, so they run together. A failure in one does not
             // blank the rest of the dashboard.
             val recent = async { runCatching { api.invoices(storeId, take = 8) } }
+            // Greenfield's startDate filters on when an invoice was *created*,
+            // so this is the takings of invoices created today, and the card
+            // says exactly that.
             val today = async {
                 runCatching {
                     api.invoices(
@@ -192,14 +267,34 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
                 }
             }
             val unseen = async { runCatching { api.notifications(seen = false, take = 20) } }
-            val wallets = graph.session.enabledPaymentMethodIds
+            awaitAll(recent, today, unseen)
+
+            _state.update { current ->
+                current.withToday(today.await().getOrNull()).copy(
+                    recent = recent.await().getOrElse { current.recent },
+                    unseenNotifications = unseen.await().getOrNull()?.size ?: current.unseenNotifications,
+                    loading = false,
+                    refreshing = false,
+                    error = recent.await().exceptionOrNull() as? ApiException,
+                )
+            }
+        }
+    }
+
+    /**
+     * Balances for the store's enabled methods, so it runs once those are
+     * known. `-LNURL` rides on the same node as `-LN`, so it would only double
+     * up the same balance. A wallet or node that fails is simply left out.
+     */
+    private fun loadBalances(storeId: String) {
+        balanceJob?.cancel()
+        balanceJob = viewModelScope.launch {
+            val api = runCatching { graph.session.requireApi() }.getOrNull() ?: return@launch
+            val methods = graph.session.enabledPaymentMethodIds
+            val wallets = methods
                 .filter { it.endsWith("-CHAIN", ignoreCase = true) }
                 .map { id -> id to async { runCatching { api.walletOverview(storeId, id) } } }
-
-            // `-LNURL` rides on the same node as `-LN`, so it would only double
-            // up the same balance. A node that is enabled but unreachable fails
-            // here and is simply left out, exactly as an on-chain failure is.
-            val nodes = graph.session.enabledPaymentMethodIds
+            val nodes = methods
                 .filter { it.endsWith("-LN", ignoreCase = true) }
                 .map { id ->
                     id to async {
@@ -212,45 +307,26 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
                     }
                 }
 
-            awaitAll(recent, today, unseen)
-
-            val todayInvoices = today.await().getOrNull().orEmpty()
             val balances = wallets.mapNotNull { (id, deferred) ->
                 deferred.await().getOrNull()?.let { id to it }
             }.toMap()
             val nodeBalances = nodes.mapNotNull { (id, deferred) ->
                 deferred.await().getOrNull()?.let { id to it }
             }.toMap()
-
-            _state.update { current ->
-                current.copy(
-                    recent = recent.await().getOrElse { current.recent },
-                    settledToday = todayInvoices.fold(BigDecimal.ZERO) { sum, invoice -> sum + invoice.paidAmount },
-                    settledTodayCount = todayInvoices.size,
-                    todayTotals = todayInvoices.groupBy { it.currency }.mapValues { (_, invoices) ->
-                        invoices.fold(BigDecimal.ZERO) { sum, invoice -> sum + invoice.paidAmount } to invoices.size
-                    },
-                    onChain = balances,
-                    lightning = nodeBalances,
-                    unseenNotifications = unseen.await().getOrNull()?.size ?: current.unseenNotifications,
-                    loading = false,
-                    refreshing = false,
-                    error = recent.await().exceptionOrNull() as? ApiException,
-                )
-            }
+            _state.update { it.copy(onChain = balances, lightning = nodeBalances) }
         }
     }
 }
 
 /**
- * What the screen is showing, as three flat values rather than as the store and
+ * What the screen is showing, as one flat value rather than as the store and
  * the error themselves.
  *
  * The distinction matters: a refresh hands back a new but equal [StoreData]
  * every time, and a swap keyed on that object would replay the whole dashboard
  * entrance on every pull-to-refresh.
  */
-private enum class HomePhase { Failed, Empty, Dashboard }
+private enum class HomePhase { Loading, Failed, Empty, Dashboard }
 
 @Composable
 fun HomeScreen(
@@ -270,15 +346,37 @@ fun HomeScreen(
     val stores by viewModel.stores.collectAsStateWithLifecycle()
     val account by viewModel.account.collectAsStateWithLifecycle()
     val sessionError by viewModel.sessionError.collectAsStateWithLifecycle()
+    val storesLoaded by viewModel.storesLoaded.collectAsStateWithLifecycle()
+    val serverVersion by viewModel.serverVersion.collectAsStateWithLifecycle()
     val settings = LocalSettings.current
+    val snackbarHostState = remember { SnackbarHostState() }
 
     var storePickerOpen by remember { mutableStateOf(false) }
     var invoicesOpen by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.message) {
+        val text = state.message ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(text)
+        viewModel.consumeMessage()
+    }
+
+    // An old server answers the routes it lacks with bare 404s, which read as
+    // this app being broken. Said once, here, with what to do about it.
+    val outdated = remember(serverVersion) {
+        serverVersion?.takeIf { it < ServerVersion.MINIMUM }?.let { version ->
+            val minimum = "${ServerVersion.MINIMUM.major}.${ServerVersion.MINIMUM.minor}"
+            ApiException.Unsupported(
+                "This server runs BTCPay Server $version. This app needs $minimum or later, " +
+                    "so some screens will not work. Update the server.",
+            )
+        }
+    }
 
     AppScreen(
         title = store?.name ?: stringResource(R.string.app_name),
         subtitle = account?.host,
         large = true,
+        snackbarHostState = snackbarHostState,
         refreshing = state.refreshing,
         onRefresh = viewModel::refresh,
         floatingActionButton = {
@@ -286,8 +384,9 @@ fun HomeScreen(
             // the bar at the bottom of this very screen and Scan is an icon at
             // the top of it. Repeating both would buy nothing and cost a
             // section header and a row of chrome. Creating an invoice is the
-            // one action with no other home.
-            if (store != null) {
+            // one action with no other home, and only for a key that may.
+            val current = store
+            if (current != null && viewModel.canCreateInvoice(current.id)) {
                 ExtendedFloatingActionButton(
                     onClick = onCreateInvoice,
                     icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
@@ -326,6 +425,9 @@ fun HomeScreen(
         val phase = when {
             store != null -> HomePhase.Dashboard
             sessionError != null -> HomePhase.Failed
+            // Every cold start spends a moment here, over Tor up to a minute;
+            // "no store yet" in that time would be a claim about the server.
+            !storesLoaded -> HomePhase.Loading
             else -> HomePhase.Empty
         }
 
@@ -335,6 +437,8 @@ fun HomeScreen(
             label = "home",
         ) { current ->
             when (current) {
+                HomePhase.Loading -> SkeletonList()
+
                 HomePhase.Failed -> lastFailure.value?.let { failure ->
                     ErrorState(
                         error = failure,
@@ -363,6 +467,7 @@ fun HomeScreen(
                         onDismiss = viewModel::dismissError,
                         onRetry = viewModel::refresh,
                     )
+                    ErrorBanner(error = outdated)
 
                     if (stores.size > 1) {
                         Row(
@@ -389,7 +494,7 @@ fun HomeScreen(
                                 stores.forEach { candidate ->
                                     StoreRow(
                                         store = candidate,
-                                        selected = candidate.id == store?.id,
+                                        active = candidate.id == store?.id,
                                         onClick = {
                                             viewModel.selectStore(candidate.id)
                                             storePickerOpen = false
@@ -401,7 +506,7 @@ fun HomeScreen(
                         }
                     }
 
-                    val totals = state.todayTotals.ifEmpty { mapOf((store?.defaultCurrency ?: "USD") to (BigDecimal.ZERO to 0)) }
+                    val totals = todayCards(state.todayTotals, state.todayStale, store?.defaultCurrency)
                     totals.forEach { (currency, summary) ->
                         // Keyed on the currency, because these cards remember
                         // the previous amount to decide which way the figure
@@ -413,11 +518,12 @@ fun HomeScreen(
                         // store's takings into another's.
                         key(currency) {
                             TodayCard(
-                                amount = summary.first,
+                                amount = summary?.first,
                                 currency = currency,
-                                count = summary.second,
+                                count = summary?.second,
                                 masked = settings.privacyMode,
                                 limited = state.settledTodayCount >= 100,
+                                stale = state.todayStale,
                             )
                         }
                     }
@@ -433,21 +539,23 @@ fun HomeScreen(
                             // this screen.
                             SectionHeader("Balances")
                             state.onChain.forEach { (methodId, overview) ->
+                                val cryptoCode = cryptoCodeOf(methodId)
                                 BalanceRow(
                                     // "BTC on-chain" says Bitcoin twice to anyone who has
                                     // only ever seen Bitcoin. The code earns its place on a
                                     // store that really does run two chains, and nowhere else.
-                                    label = chainSubtitle(methodId.substringBefore('-'), prefix = "On-chain")
-                                        ?: "On-chain",
+                                    label = chainSubtitle(cryptoCode, prefix = "On-chain") ?: "On-chain",
                                     overview = overview,
+                                    cryptoCode = cryptoCode,
                                     onClick = onOpenWallet,
                                 )
                             }
                             state.lightning.forEach { (methodId, balance) ->
-                                val cryptoCode = methodId.substringBefore('-')
+                                val cryptoCode = cryptoCodeOf(methodId)
                                 LightningBalanceRow(
                                     label = chainSubtitle(cryptoCode, prefix = "Lightning") ?: "Lightning",
                                     balance = balance,
+                                    cryptoCode = cryptoCode,
                                     onClick = { onOpenLightning(cryptoCode) },
                                 )
                             }
@@ -505,8 +613,19 @@ fun HomeScreen(
     }
 }
 
+/**
+ * The day's takings in one currency. [amount] and [count] are null when they
+ * are not known at all; [stale] when they are from before a failed refresh.
+ */
 @Composable
-private fun TodayCard(amount: BigDecimal, currency: String, count: Int, masked: Boolean, limited: Boolean) {
+private fun TodayCard(
+    amount: BigDecimal?,
+    currency: String,
+    count: Int?,
+    masked: Boolean,
+    limited: Boolean,
+    stale: Boolean,
+) {
     Card(
         modifier = Modifier.fillMaxWidth().padding(16.dp).arrive(1),
         colors = CardDefaults.cardColors(
@@ -515,9 +634,14 @@ private fun TodayCard(amount: BigDecimal, currency: String, count: Int, masked: 
         ),
     ) {
         Column(Modifier.padding(20.dp)) {
-            Text(if (limited) "Today · latest 100 settled invoices" else "Settled today", style = MaterialTheme.typography.labelLarge)
+            // "Created", because that is what the query filters on: an
+            // invoice created before midnight and paid after it is not here.
+            Text(
+                text = if (limited) "Latest 100 paid invoices created today" else "Paid invoices created today",
+                style = MaterialTheme.typography.labelLarge,
+            )
             Spacer(Modifier.height(6.dp))
-            val formatted = Amounts.format(amount, currency)
+            val formatted = amount?.let { Amounts.format(it, currency) } ?: "\u2014"
 
             // Formatted here rather than handed to `AmountText`, because this
             // figure is denominated in the *invoice's* currency: a BTC-priced
@@ -527,26 +651,33 @@ private fun TodayCard(amount: BigDecimal, currency: String, count: Int, masked: 
             //
             // Compared as numbers, not as strings: "9.99" to "10.00" is a rise
             // and sorting those two strings says the opposite.
-            var previous by remember { mutableStateOf(amount) }
-            val rising = amount >= previous
-            SideEffect { previous = amount }
+            var previous by remember { mutableStateOf(amount ?: BigDecimal.ZERO) }
+            val rising = (amount ?: previous) >= previous
+            SideEffect { if (amount != null) previous = amount }
 
             AnimatedValue(
-                value = if (masked) Amounts.masked(formatted) else formatted,
+                value = if (masked) Amounts.MASK else formatted,
                 upward = rising,
                 style = MaterialTheme.typography.displaySmall,
             )
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = if (count == 1) "1 invoice" else "$count invoices",
-                style = MaterialTheme.typography.bodyMedium,
-            )
+            if (count != null) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = if (count == 1) "1 invoice" else "$count invoices",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+            if (stale) {
+                Spacer(Modifier.height(4.dp))
+                Text(text = "Not up to date", style = MaterialTheme.typography.bodySmall)
+            }
         }
     }
 }
 
+/** [cryptoCode] is the wallet's coin: only Bitcoin is shown in the user's sat/BTC unit. */
 @Composable
-private fun BalanceRow(label: String, overview: WalletOverviewData, onClick: () -> Unit) {
+private fun BalanceRow(label: String, overview: WalletOverviewData, cryptoCode: String, onClick: () -> Unit) {
     val settings = LocalSettings.current
     val interactions = remember { MutableInteractionSource() }
     Row(
@@ -563,7 +694,7 @@ private fun BalanceRow(label: String, overview: WalletOverviewData, onClick: () 
             Text(label, style = MaterialTheme.typography.bodyLarge)
             if (overview.unconfirmedBalance.signum() != 0) {
                 Text(
-                    text = "${Amounts.formatBitcoin(overview.unconfirmedBalance, settings.bitcoinUnit)} unconfirmed",
+                    text = "${maskedIfPrivate(formatOnChain(overview.unconfirmedBalance, cryptoCode, settings.bitcoinUnit))} unconfirmed",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -574,7 +705,7 @@ private fun BalanceRow(label: String, overview: WalletOverviewData, onClick: () 
         // refresh should visibly change the balance, not silently replace it.
         AmountText(
             amount = overview.balance,
-            currency = "BTC",
+            currency = cryptoCode,
             style = MaterialTheme.typography.titleMedium,
             animated = true,
         )
@@ -587,10 +718,11 @@ private fun BalanceRow(label: String, overview: WalletOverviewData, onClick: () 
  * Remote balance is what the channel partner holds, i.e. what can still be
  * *received*; showing the two added together would overstate what the merchant
  * can actually pay out, so only the local side is the headline figure and the
- * receivable side is a subtitle.
+ * receivable side is a subtitle. [cryptoCode] is the node's coin, as on the
+ * on-chain row.
  */
 @Composable
-private fun LightningBalanceRow(label: String, balance: LightningBalanceData, onClick: () -> Unit) {
+private fun LightningBalanceRow(label: String, balance: LightningBalanceData, cryptoCode: String, onClick: () -> Unit) {
     val settings = LocalSettings.current
     val offchain = balance.offchain
     val interactions = remember { MutableInteractionSource() }
@@ -609,7 +741,7 @@ private fun LightningBalanceRow(label: String, balance: LightningBalanceData, on
             val receivable = Amounts.msatToSats(offchain?.remote)
             if (receivable.signum() != 0) {
                 Text(
-                    text = "${Amounts.formatMsat(offchain?.remote, settings.bitcoinUnit)} receivable",
+                    text = "${maskedIfPrivate(formatOnChain(Amounts.msatToBtc(offchain?.remote), cryptoCode, settings.bitcoinUnit))} receivable",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -619,21 +751,28 @@ private fun LightningBalanceRow(label: String, balance: LightningBalanceData, on
         // rolls to its new value for the same reason the on-chain row does.
         AmountText(
             amount = Amounts.msatToBtc(offchain?.local),
-            currency = "BTC",
+            currency = cryptoCode,
             style = MaterialTheme.typography.titleMedium,
             animated = true,
         )
     }
 }
 
+/** [active] is said to a screen reader as well as drawn: the dot alone is colour only. */
 @Composable
-private fun StoreRow(store: StoreData, selected: Boolean, onClick: () -> Unit) {
+private fun StoreRow(store: StoreData, active: Boolean, onClick: () -> Unit) {
     val interactions = remember { MutableInteractionSource() }
     Row(
         Modifier
             .fillMaxWidth()
             .pressScale(interactions)
             .clickable(interactionSource = interactions, indication = ripple(), onClick = onClick)
+            .semantics {
+                if (active) {
+                    selected = true
+                    stateDescription = "Active store"
+                }
+            }
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -642,7 +781,7 @@ private fun StoreRow(store: StoreData, selected: Boolean, onClick: () -> Unit) {
                 .size(8.dp)
                 .padding(end = 0.dp),
         ) {
-            if (selected) {
+            if (active) {
                 androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
                     drawCircle(color = androidx.compose.ui.graphics.Color(0xFF4CAF50))
                 }
@@ -681,7 +820,7 @@ private fun RecentInvoiceRow(invoice: InvoiceData, onClick: () -> Unit) {
             // of the most-travelled paths in the app. The list keeps the
             // transition; this row takes the ordinary push.
             Text(
-                text = Amounts.format(invoice.amount, invoice.currency),
+                text = maskedIfPrivate(Amounts.format(invoice.amount, invoice.currency)),
                 style = MaterialTheme.typography.bodyLarge,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -692,6 +831,7 @@ private fun RecentInvoiceRow(invoice: InvoiceData, onClick: () -> Unit) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        StatusChip(status = invoice.status)
+        // "Expired" alone hides that money came in and may need a refund.
+        StatusChip(status = invoice.status, detail = invoice.statusDetail())
     }
 }

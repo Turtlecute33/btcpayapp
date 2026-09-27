@@ -4,8 +4,11 @@ package com.btcpayapp.data.api.dto
 
 import com.btcpayapp.data.api.BigDecimalSerializer
 import com.btcpayapp.data.api.FallbackEnumSerializer
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.UseSerializers
+import kotlinx.serialization.json.JsonNames
 import kotlinx.serialization.json.JsonObject
 import java.math.BigDecimal
 
@@ -140,39 +143,54 @@ data class PayoutProcessorData(
     val payoutMethods: List<String> = emptyList(),
 )
 
+/**
+ * BTCPay's Lightning processor has only an interval and the instant flag
+ * (LightningAutomatedPayoutSettings, v2.4.4). `cancelPayoutAfterFailures` is in
+ * the swagger alone: the server drops it, so it is not modelled at all.
+ */
 @Serializable
 data class LightningPayoutProcessorSettings(
     val payoutMethodId: String = "",
     val intervalSeconds: Int = 3600,
-    val cancelPayoutAfterFailures: Int? = null,
     val processNewPayoutsInstantly: Boolean = false,
 )
 
 @Serializable
 data class UpdateLightningPayoutProcessorSettings(
     val intervalSeconds: Int,
-    val cancelPayoutAfterFailures: Int? = null,
     val processNewPayoutsInstantly: Boolean = false,
 )
 
+/**
+ * The wire key is `feeBlockTarget` (the C# `FeeBlockTarget`); the swagger's
+ * `feeTargetBlock` is a documentation error. Read under the wrong key, every
+ * processor showed 1 block. The swagger spelling is still accepted on read in
+ * case a server ever follows its own documentation.
+ */
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class OnChainPayoutProcessorSettings(
     val payoutMethodId: String = "",
+    @SerialName("feeBlockTarget")
+    @JsonNames("feeTargetBlock")
     val feeTargetBlock: Int = 1,
     val intervalSeconds: Int = 3600,
     val threshold: BigDecimal = BigDecimal.ZERO,
     val processNewPayoutsInstantly: Boolean = false,
 )
 
+/**
+ * Not a partial update: the server replaces the whole settings blob. An omitted
+ * [threshold] becomes 0 (every payout is swept, whatever minimum was set) and an
+ * omitted [feeTargetBlock] becomes 1 (next-block fees on every batch). So both
+ * are required here: callers send the loaded values when the user did not
+ * change them.
+ */
 @Serializable
 data class UpdateOnChainPayoutProcessorSettings(
-    val feeTargetBlock: Int? = null,
+    @SerialName("feeBlockTarget")
+    val feeTargetBlock: Int,
     val intervalSeconds: Int,
-    // Nullable, and null by default. `ApiJson` sets `encodeDefaults = true`, so
-    // a non-null default would be transmitted on every write: editing only the
-    // interval would send `threshold: "0"` and the processor would sweep every
-    // payout regardless of the minimum the merchant had configured. With
-    // `explicitNulls = false` a null is simply omitted, which is "leave it".
-    val threshold: BigDecimal? = null,
+    val threshold: BigDecimal,
     val processNewPayoutsInstantly: Boolean = false,
 )

@@ -6,6 +6,9 @@ import org.junit.Test
 
 class FeedPollingTest {
     private fun item(id: String, created: Long) = NotificationData(id = id, createdTime = created)
+    private fun event(identifier: String, link: String? = null) = NotificationData(id = "n", identifier = identifier, link = link)
+    private fun covered(identifier: String, payments: Boolean, payouts: Boolean, link: String? = null, announced: Set<String> = emptySet()) =
+        coveredByOwnAlerts(event(identifier, link), payments, payouts, announced)
 
     @Test fun `the first run adopts the backlog without announcing it`() {
         val first = evaluateFeed(null, listOf(item("a", 100), item("b", 90)))
@@ -39,21 +42,35 @@ class FeedPollingTest {
     }
 
     @Test fun `settlements and waiting payouts are left to the app's own alerts`() {
-        assertTrue(coveredByOwnAlerts("invoice_confirmed", payments = true, payouts = true))
-        assertTrue(coveredByOwnAlerts("invoice_paidAfterExpiration", payments = true, payouts = false))
-        assertTrue(coveredByOwnAlerts("payout_awaitingapproval", payments = false, payouts = true))
-        assertTrue(coveredByOwnAlerts("payout", payments = false, payouts = true))
+        assertTrue(covered("invoice_confirmed", payments = true, payouts = false))
+        assertTrue(covered("payout_awaitingapproval", payments = false, payouts = true))
+        assertTrue(covered("payout", payments = false, payouts = true))
+    }
+
+    @Test fun `a late payment or a failure to confirm comes from the feed unless the poll announced that invoice in this run`() {
+        val link = "https://pay.example.com/invoices/Inv123"
+        listOf("invoice_paidAfterExpiration", "invoice_expiredpaidpartial", "invoice_failedToConfirm").forEach {
+            assertFalse(it, covered(it, payments = true, payouts = true, link = link))
+            assertFalse(it, covered(it, payments = true, payouts = true, link = link, announced = setOf("Other9")))
+            assertFalse(it, covered(it, payments = true, payouts = true, link = null, announced = setOf("Inv123")))
+            assertTrue(it, covered(it, payments = true, payouts = true, link = link, announced = setOf("Inv123")))
+            assertFalse(it, covered(it, payments = false, payouts = true, link = link, announced = setOf("Inv123")))
+        }
+    }
+
+    @Test fun `an empty announced id covers nothing`() {
+        assertFalse(covered("invoice_paidafterexpiration", payments = true, payouts = true, link = "https://x/invoices/a", announced = setOf("")))
     }
 
     @Test fun `a switched-off alert leaves its events to the feed`() {
-        assertFalse(coveredByOwnAlerts("invoice_confirmed", payments = false, payouts = true))
-        assertFalse(coveredByOwnAlerts("payout_awaitingapproval", payments = true, payouts = false))
+        assertFalse(covered("invoice_confirmed", payments = false, payouts = true))
+        assertFalse(covered("payout_awaitingapproval", payments = true, payouts = false))
     }
 
     @Test fun `events the app does not poll for always come from the feed`() {
-        listOf("invoice_expiredpaidpartial", "invoice_failedtoconfirm", "payout_awaitingpayment",
+        listOf("invoice_expired", "payout_awaitingpayment",
             "newversion", "newuserrequiresapproval", "storeinvitation", "external-payout-transaction").forEach {
-            assertFalse(it, coveredByOwnAlerts(it, payments = true, payouts = true))
+            assertFalse(it, covered(it, payments = true, payouts = true, link = "https://x/invoices/a", announced = setOf("a")))
         }
     }
 }

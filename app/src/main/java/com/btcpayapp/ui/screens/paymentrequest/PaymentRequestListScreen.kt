@@ -43,7 +43,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -70,6 +72,7 @@ import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.components.copyToClipboard
+import com.btcpayapp.ui.screens.apps.publicLinkWarning
 import com.btcpayapp.ui.theme.AppTheme
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -93,6 +96,8 @@ enum class PaymentRequestFilter(val label: String) {
 }
 
 data class PaymentRequestListState(
+    /** The store [requests] belong to. Rows and actions never outlive it. */
+    val storeId: String? = null,
     val requests: List<PaymentRequestData> = emptyList(),
     val loading: Boolean = false,
     val refreshing: Boolean = false,
@@ -100,6 +105,8 @@ data class PaymentRequestListState(
     val filter: PaymentRequestFilter = PaymentRequestFilter.All,
     val storeMissing: Boolean = false,
     val baseUrl: String? = null,
+    /** Set when [baseUrl] is an address customers may not reach; see [publicLinkWarning]. */
+    val linkWarning: String? = null,
     val fallbackCurrency: String = "USD",
     val pendingArchive: PaymentRequestData? = null,
     val message: String? = null,
@@ -136,8 +143,17 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
                 .map { it?.id }
                 .distinctUntilChanged()
                 .collectLatest { id ->
+                    // The old store's rows go at once, not when the reload
+                    // lands: until then they would sit under the new store's
+                    // name, with Archive one tap away.
                     _state.update {
                         it.copy(
+                            storeId = id,
+                            requests = emptyList(),
+                            loading = false,
+                            refreshing = false,
+                            error = null,
+                            pendingArchive = null,
                             storeMissing = id == null,
                             fallbackCurrency = graph.session.activeStore.value?.defaultCurrency
                                 ?: it.fallbackCurrency,
@@ -148,7 +164,9 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
         }
         viewModelScope.launch {
             graph.session.activeAccount.collectLatest { account ->
-                _state.update { it.copy(baseUrl = account?.baseUrl) }
+                _state.update {
+                    it.copy(baseUrl = account?.baseUrl, linkWarning = account?.let { a -> publicLinkWarning(a.host) })
+                }
             }
         }
     }
@@ -156,6 +174,16 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
     fun setFilter(filter: PaymentRequestFilter) = _state.update { it.copy(filter = filter) }
 
     fun refresh() = load(refreshing = true)
+
+    /**
+     * A quiet reload when the screen comes back, from the edit screen or
+     * another app. Without it a request just created was missing from the
+     * list, and could be created a second time. Ignored while a load runs.
+     */
+    fun reload() {
+        val current = _state.value
+        if (!current.loading && !current.refreshing) load()
+    }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
@@ -169,9 +197,10 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun confirmArchive() {
         val target = _state.value.pendingArchive ?: return
+        val store = _state.value.storeId ?: return
         _state.update { it.copy(pendingArchive = null) }
         viewModelScope.launch {
-            runCatching { graph.session.requireApi().archivePaymentRequest(target.id) }
+            runCatching { graph.session.requireApi().archivePaymentRequest(store, target.id) }
                 .onSuccess {
                     _state.update { it.copy(message = "“${target.title}” archived") }
                     load(refreshing = true)
@@ -183,7 +212,7 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     private fun load(refreshing: Boolean = false) {
-        val store = graph.session.activeStore.value?.id ?: return
+        val store = _state.value.storeId ?: return
         viewModelScope.launch {
             _state.update {
                 it.copy(
@@ -192,20 +221,28 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
                     error = null,
                 )
             }
-            runCatching { graph.session.requireApi().paymentRequests(store) }
+            // Archived ones too: the server leaves them out by default, and
+            // the Archived filter below was always empty. The split is here.
+            runCatching { graph.session.requireApi().paymentRequests(store, includeArchived = true) }
                 .onSuccess { list ->
+                    // A late answer for a store the user has left is dropped.
                     _state.update {
-                        it.copy(
-                            requests = list.sortedByDescending(PaymentRequestData::createdTime),
-                            loading = false,
-                            refreshing = false,
-                            error = null,
-                        )
+                        if (it.storeId != store) {
+                            it
+                        } else {
+                            it.copy(
+                                requests = list.sortedByDescending(PaymentRequestData::createdTime),
+                                loading = false,
+                                refreshing = false,
+                                error = null,
+                            )
+                        }
                     }
                 }
                 .onFailure { failure ->
+                    val error = failure.asApiException()
                     _state.update {
-                        it.copy(loading = false, refreshing = false, error = failure.asApiException())
+                        if (it.storeId != store) it else it.copy(loading = false, refreshing = false, error = error)
                     }
                 }
         }
@@ -223,6 +260,8 @@ fun PaymentRequestListScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     var qrLink by remember { mutableStateOf<String?>(null) }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.reload() }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -322,7 +361,7 @@ fun PaymentRequestListScreen(
                                             viewModel.message("The account URL is not known yet.")
                                         } else {
                                             copyToClipboard(context, "Payment request link", link)
-                                            viewModel.message("Link copied")
+                                            viewModel.message(state.linkWarning?.let { "Link copied. $it" } ?: "Link copied")
                                         }
                                     },
                                     onShowQr = {
@@ -364,6 +403,14 @@ fun PaymentRequestListScreen(
                     style = MaterialTheme.typography.titleMedium,
                 )
                 Spacer(Modifier.height(16.dp))
+                state.linkWarning?.let { warning ->
+                    Text(
+                        text = warning,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Spacer(Modifier.height(16.dp))
+                }
                 // `QrCode` fades its own bitmap in once the encoder has run, so
                 // the card is not given a second entrance on top of that.
                 QrCode(content = link, contentDescription = "Payment request link")

@@ -2,11 +2,9 @@ package com.btcpayapp.ui.screens.lightning
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,13 +29,11 @@ import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Hub
-import androidx.compose.material.icons.rounded.Storefront
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
@@ -45,7 +41,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,9 +48,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -68,6 +64,7 @@ import com.btcpayapp.data.api.endpoints.LightningScope
 import com.btcpayapp.data.api.endpoints.lightningBalance
 import com.btcpayapp.data.api.endpoints.lightningNodeInfo
 import com.btcpayapp.data.model.BitcoinUnit
+import com.btcpayapp.data.session.SessionManager
 import com.btcpayapp.ui.LocalSettings
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.chainSubtitle
@@ -79,23 +76,24 @@ import com.btcpayapp.ui.components.CopyableField
 import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
+import com.btcpayapp.ui.components.FigureText
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.QrCode
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.maskedIfPrivate
+import com.btcpayapp.ui.components.NoStoreSelectedState
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.theme.AppTheme
 import com.btcpayapp.ui.theme.Motion
-import java.math.BigInteger
+import java.math.BigDecimal
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -106,26 +104,41 @@ import kotlinx.coroutines.launch
 internal const val LN_PLACEHOLDER = "—"
 
 /**
- * The store list is fetched after an account becomes active, so a null store at
- * first collection means "not known yet" rather than "none". Store-scoped
- * screens wait this long before saying there is no store, which stops an empty
- * state flashing up on every entry.
- */
-internal const val NO_STORE_GRACE_MS = 1_500L
-
-/**
- * The scope every Lightning call needs, or null when no store is selected.
+ * The scope every Lightning call needs, fixed once it is known.
  *
- * `SessionManager.requireStoreId()` throws, and these screens are reachable from
- * a deep link and from a freshly paired account that has no store yet, so the
- * absence of a store is modelled as a state instead of an exception.
+ * The server's own node needs no store. Any other node is the node of the
+ * store the screen opened in, or after a cold start of the first store to
+ * load, because the back stack comes back before the store list (see
+ * [StoreBinding]). It never follows a later switch. The shell drops every
+ * store screen when the active store changes, and a screen that followed one
+ * could act on store B from a form filled in for store A: a channel opened,
+ * or an invoice created, on the wrong node.
+ *
+ * `SessionManager.requireStoreId()` throws, and a freshly paired account can
+ * have no store yet, so the absence of a store is modelled as a state instead
+ * of an exception.
  */
-internal fun AppGraph.lightningScopeOrNull(serverNode: Boolean): LightningScope? =
-    if (serverNode) {
-        LightningScope.Server
-    } else {
-        session.activeStore.value?.id?.let { LightningScope.Store(it) }
+internal class LightningBinding(session: SessionManager, private val serverNode: Boolean) {
+    private val store = StoreBinding(session)
+
+    /** Null while no store is known. */
+    val scope: LightningScope?
+        get() = if (serverNode) LightningScope.Server else store.id?.let { LightningScope.Store(it) }
+
+    /** Whose node this is, for a confirmation that moves funds: the store's name, or the server's. */
+    val owner: String get() = if (serverNode) "the server node" else store.name
+
+    /** The store's name for a title bar; null for the server node, or while no store is known. */
+    val storeName: String? get() = if (serverNode) null else store.store?.name?.takeIf { it.isNotBlank() }
+
+    /**
+     * On a cold start, runs [block], the screen's load, once the first store
+     * has loaded. Does nothing when the scope is already known.
+     */
+    fun retryWhenKnown(coroutines: CoroutineScope, block: () -> Unit) {
+        if (!serverNode) store.retryWhenKnown(coroutines, block)
     }
+}
 
 
 /**
@@ -138,21 +151,19 @@ internal fun AppGraph.lightningScopeOrNull(serverNode: Boolean): LightningScope?
 internal fun ApiException.isNodeUnreachable(): Boolean =
     (this as? ApiException.Server)?.status == 503
 
+/**
+ * A msat string from the server, formatted, or [LN_PLACEHOLDER] when it is
+ * missing or not a number this app can work with. Read through
+ * [Amounts.serverDecimal], so "1e2147483647" from a broken node draws a dash
+ * instead of throwing in composition.
+ */
 internal fun msatLabel(msat: String?, unit: BitcoinUnit): String =
-    if (msat.isNullOrBlank()) LN_PLACEHOLDER else Amounts.formatMsat(msat, unit)
+    if (Amounts.serverDecimal(msat) == null) LN_PLACEHOLDER else Amounts.formatMsat(msat, unit)
 
+/** As [msatLabel], for the sat strings of the on-chain balance and address limits. */
 internal fun satsLabel(sats: String?, unit: BitcoinUnit): String {
-    val value = sats?.toBigDecimalOrNull() ?: return LN_PLACEHOLDER
+    val value = Amounts.serverDecimal(sats) ?: return LN_PLACEHOLDER
     return Amounts.formatBitcoin(Amounts.satsToBtc(value), unit)
-}
-
-@Composable
-internal fun NoStoreSelectedState() {
-    EmptyState(
-        title = "No store selected",
-        description = "Choose a store before using its Lightning node.",
-        icon = Icons.Rounded.Storefront,
-    )
 }
 
 @Composable
@@ -186,35 +197,33 @@ class LightningViewModel(
     private val serverNode: Boolean,
 ) : ViewModel() {
 
+    private val node = LightningBinding(graph.session, serverNode)
+
     private val _state = MutableStateFlow(LightningState(loading = true))
     val state = _state.asStateFlow()
 
     init {
-        if (serverNode) {
-            load()
-        } else {
-            viewModelScope.launch {
-                graph.session.activeStore
-                    .map { it?.id }
-                    .distinctUntilChanged()
-                    .collectLatest { storeId ->
-                        if (storeId != null) {
-                            load()
-                        } else {
-                            delay(NO_STORE_GRACE_MS)
-                            _state.update { it.copy(loading = false, noStore = true) }
-                        }
-                    }
-            }
-        }
+        load()
+        node.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun refresh() = load(refreshing = true)
 
+    /**
+     * Reloads quietly when the screen comes back, so the balance is the one
+     * after the payment just sent or the channel just opened. Skipped while a
+     * load runs, which also covers the first resume, straight after [init].
+     */
+    fun onResume() {
+        val current = _state.value
+        if (current.loading || current.refreshing) return
+        load()
+    }
+
     fun dismissError() = _state.update { it.copy(error = null) }
 
     private fun load(refreshing: Boolean = false) {
-        val scope = graph.lightningScopeOrNull(serverNode)
+        val scope = node.scope
         if (scope == null) {
             _state.update { it.copy(loading = false, refreshing = false, noStore = true) }
             return
@@ -285,8 +294,8 @@ fun LightningScreen(
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val unit = LocalSettings.current.bitcoinUnit
-    val snackbarHostState = remember { SnackbarHostState() }
-    val uiScope = rememberCoroutineScope()
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     AppScreen(
         title = "Lightning",
@@ -294,7 +303,6 @@ fun LightningScreen(
         onBack = onBack,
         refreshing = state.refreshing,
         onRefresh = viewModel::refresh,
-        snackbarHostState = snackbarHostState,
     ) { padding ->
         val phase = when {
             state.noStore -> LightningPhase.NoStore
@@ -384,15 +392,10 @@ fun LightningScreen(
                         // they are read as.
                         SectionHeader("Node address", Modifier.arrive(5))
                         Column(Modifier.padding(horizontal = 16.dp).arrive(5)) {
+                            // No snackbar on copy: `copyToClipboard` says "Copied"
+                            // below Android 13 and the system does from 13.
                             uris.forEach { uri ->
-                                CopyableField(
-                                    label = "Node URI",
-                                    value = uri,
-                                    truncate = true,
-                                    onCopied = {
-                                        uiScope.launch { snackbarHostState.showSnackbar("Node URI copied") }
-                                    },
-                                )
+                                CopyableField(label = "Node URI", value = uri, truncate = true)
                                 Spacer(Modifier.height(8.dp))
                             }
                         }
@@ -471,12 +474,7 @@ private fun Figure(label: String, value: String, modifier: Modifier = Modifier) 
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(2.dp))
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        FigureText(text = value, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -490,7 +488,12 @@ private fun Figure(label: String, value: String, modifier: Modifier = Modifier) 
  * the operator asks it to, which needs no announcing.
  *
  * Direction is taken from the raw millisatoshi rather than from the formatted
- * string, because the BTC/sat setting can make a rise sort as a fall.
+ * string, because the BTC/sat setting can make a rise sort as a fall. Read
+ * through [Amounts.serverDecimal]: a million-digit string from a broken node
+ * would otherwise be parsed on the main thread.
+ *
+ * The value is masked in privacy mode; a masked value never changes, so it
+ * does not roll either.
  */
 @Composable
 private fun LiveFigure(
@@ -499,7 +502,7 @@ private fun LiveFigure(
     msat: String?,
     modifier: Modifier = Modifier,
 ) {
-    val amount = msat?.toBigIntegerOrNull() ?: BigInteger.ZERO
+    val amount = Amounts.serverDecimal(msat) ?: BigDecimal.ZERO
     var previous by remember { mutableStateOf(amount) }
     val rising = amount >= previous
     SideEffect { previous = amount }
@@ -512,7 +515,7 @@ private fun LiveFigure(
         )
         Spacer(Modifier.height(2.dp))
         AnimatedValue(
-            value = value,
+            value = maskedIfPrivate(value),
             upward = rising,
             style = MaterialTheme.typography.bodyMedium,
         )
@@ -567,6 +570,8 @@ private fun RowScope.CountPill(count: Int?, noun: String, container: Color, cont
  * absent on several node backends, so as fixed rows they would be seven lines
  * of which four read "—". They appear only when there is really something in
  * them — which is also the only time anyone needs to see them.
+ *
+ * Every figure here is the store's own money, so privacy mode masks it.
  */
 @Composable
 private fun BalanceSection(balance: LightningBalanceData?, unit: BitcoinUnit) {
@@ -581,8 +586,8 @@ private fun BalanceSection(balance: LightningBalanceData?, unit: BitcoinUnit) {
                     LiveFigure("Receivable", msatLabel(offchain.remote, unit), offchain.remote, Modifier.weight(1f))
                 }
                 val pending = listOfNotNull(
-                    offchain.opening.takeIfPositive()?.let { "opening ${msatLabel(it, unit)}" },
-                    offchain.closing.takeIfPositive()?.let { "closing ${msatLabel(it, unit)}" },
+                    offchain.opening.takeIfPositive()?.let { "opening ${maskedIfPrivate(msatLabel(it, unit))}" },
+                    offchain.closing.takeIfPositive()?.let { "closing ${maskedIfPrivate(msatLabel(it, unit))}" },
                 )
                 if (pending.isNotEmpty()) {
                     Spacer(Modifier.height(10.dp))
@@ -601,12 +606,12 @@ private fun BalanceSection(balance: LightningBalanceData?, unit: BitcoinUnit) {
         AppCard(modifier = Modifier.arrive(4)) {
             Column(Modifier.padding(16.dp)) {
                 Row(Modifier.fillMaxWidth()) {
-                    Figure("Confirmed", satsLabel(onchain.confirmed, unit), Modifier.weight(1f))
+                    Figure("Confirmed", maskedIfPrivate(satsLabel(onchain.confirmed, unit)), Modifier.weight(1f))
                     onchain.unconfirmed.takeIfPositive()?.let {
-                        Figure("Unconfirmed", satsLabel(it, unit), Modifier.weight(1f))
+                        Figure("Unconfirmed", maskedIfPrivate(satsLabel(it, unit)), Modifier.weight(1f))
                     }
                     onchain.reserved.takeIfPositive()?.let {
-                        Figure("Reserved", satsLabel(it, unit), Modifier.weight(1f))
+                        Figure("Reserved", maskedIfPrivate(satsLabel(it, unit)), Modifier.weight(1f))
                     }
                 }
             }
@@ -615,8 +620,8 @@ private fun BalanceSection(balance: LightningBalanceData?, unit: BitcoinUnit) {
 }
 
 /** Null for absent, unparsable, or zero — the three cases worth hiding. */
-private fun String?.takeIfPositive(): String? =
-    this?.takeIf { it.toBigDecimalOrNull()?.signum() == 1 }
+internal fun String?.takeIfPositive(): String? =
+    this?.takeIf { Amounts.serverDecimal(it)?.signum() == 1 }
 
 @Composable
 private fun ActionRow(icon: ImageVector, title: String, onClick: () -> Unit) {

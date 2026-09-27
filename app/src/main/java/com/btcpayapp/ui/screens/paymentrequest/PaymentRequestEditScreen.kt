@@ -1,12 +1,6 @@
 package com.btcpayapp.ui.screens.paymentrequest
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -20,22 +14,15 @@ import androidx.compose.material.icons.automirrored.rounded.ReceiptLong
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DatePicker
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -44,7 +31,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Amounts
-import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
@@ -53,9 +39,11 @@ import com.btcpayapp.data.api.endpoints.createPaymentRequest
 import com.btcpayapp.data.api.endpoints.payPaymentRequest
 import com.btcpayapp.data.api.endpoints.paymentRequest
 import com.btcpayapp.data.api.endpoints.updatePaymentRequest
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.DateRow
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.FormField
@@ -63,12 +51,13 @@ import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.arrive
-import com.btcpayapp.ui.theme.Motion
+import com.btcpayapp.ui.components.confirmDiscardChanges
 import java.math.BigDecimal
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 
 /** Field keys, matching the `path` the server puts on a validation error. */
 private const val FIELD_TITLE = "title"
@@ -86,6 +75,16 @@ data class PaymentRequestEditState(
     val expiryDate: Long? = null,
     val referenceId: String = "",
     val allowCustomAmounts: Boolean = false,
+    /**
+     * The description as the server holds it: HTML from the web editor, with
+     * links, lists and images. The form edits its text; see [descriptionToSend].
+     */
+    val originalHtml: String? = null,
+    /** Not on the form, but sent back: the server detaches a form it is not sent and deletes the buyer's answers. */
+    val formId: String? = null,
+    /** As [formId]: the buyer's answers, which a server that rebuilds the request would delete. */
+    val formResponse: JsonObject? = null,
+    val dirty: Boolean = false,
     val loading: Boolean = false,
     val saving: Boolean = false,
     val payingNow: Boolean = false,
@@ -95,17 +94,28 @@ data class PaymentRequestEditState(
     val message: String? = null,
     val done: Boolean = false,
     val storeMissing: Boolean = false,
-)
+) {
+    /** The description has markup the text field cannot hold, which an edit drops. */
+    val formatted: Boolean get() = originalHtml?.let { TextUtil.stripHtml(it) != it.trim() } == true
+}
 
 class PaymentRequestEditViewModel(
     private val graph: AppGraph,
     private val paymentRequestId: String?,
 ) : ViewModel() {
 
+    /**
+     * The store this screen was opened for, and the only one it acts on (see
+     * [StoreBinding]). A store switch closes the screen (the shell's reset),
+     * so it never changes.
+     */
+    private val bound = StoreBinding(graph.session)
+    private val storeId: String? get() = bound.id
+
     private val _state = MutableStateFlow(
         PaymentRequestEditState(
-            currency = graph.session.activeStore.value?.defaultCurrency.orEmpty(),
-            storeMissing = graph.session.activeStore.value == null,
+            currency = bound.store?.defaultCurrency.orEmpty(),
+            storeMissing = storeId == null,
         ),
     )
     val state = _state.asStateFlow()
@@ -114,6 +124,13 @@ class PaymentRequestEditViewModel(
 
     init {
         if (paymentRequestId != null) load()
+        // After a cold start the store comes later: bind it, then load.
+        bound.retryWhenKnown(viewModelScope) {
+            _state.update {
+                it.copy(storeMissing = false, currency = it.currency.ifBlank { bound.store?.defaultCurrency.orEmpty() })
+            }
+            if (paymentRequestId != null) load()
+        }
     }
 
     fun setTitle(value: String) = edit(FIELD_TITLE) { it.copy(title = value) }
@@ -129,24 +146,30 @@ class PaymentRequestEditViewModel(
 
     fun clearMessage() = _state.update { it.copy(message = null) }
 
+    private fun requireStore(): String = storeId ?: throw ApiException.NoAccount()
+
     fun load() {
         val id = paymentRequestId ?: return
         viewModelScope.launch {
             _state.update { it.copy(loading = true, loadError = null) }
-            runCatching { graph.session.requireApi().paymentRequest(id) }
+            runCatching { graph.session.requireApi().paymentRequest(requireStore(), id) }
                 .onSuccess { data ->
                     _state.update {
                         it.copy(
                             title = data.title,
-                            amount = data.amount.toPlainString(),
+                            // `toInput`, not `toPlainString`: "12.500" would be
+                            // refused as ambiguous when saved unchanged.
+                            amount = Amounts.toInput(data.amount, 8),
                             currency = data.currency ?: it.currency,
-                            // The API stores description as HTML; edit it as the
-                            // text it almost always is and send it back as-is.
+                            originalHtml = data.description,
                             description = TextUtil.stripHtml(data.description.orEmpty()),
                             email = data.email.orEmpty(),
                             expiryDate = data.expiryDate,
                             referenceId = data.referenceId.orEmpty(),
                             allowCustomAmounts = data.allowCustomPaymentAmounts,
+                            formId = data.formId,
+                            formResponse = data.formResponse,
+                            dirty = false,
                             loading = false,
                             loadError = null,
                         )
@@ -167,7 +190,9 @@ class PaymentRequestEditViewModel(
         val amount = Amounts.parse(snapshot.amount)
         val problems = buildMap {
             if (snapshot.title.isBlank()) put(FIELD_TITLE, "Give this request a title.")
-            if (amount == null || amount.signum() < 0) put(FIELD_AMOUNT, "Enter a valid amount.")
+            if (amount == null || amount.signum() < 0) {
+                put(FIELD_AMOUNT, Amounts.parseProblem(snapshot.amount) ?: "Enter a valid amount.")
+            }
             if (snapshot.currency.isBlank()) put(FIELD_CURRENCY, "Enter a currency code.")
         }
         if (problems.isNotEmpty()) {
@@ -175,19 +200,23 @@ class PaymentRequestEditViewModel(
             return
         }
 
+        // Every field, changed or not: the update is not partial, and the
+        // server clears whatever the body leaves out.
         val request = PaymentRequestRequest(
             amount = amount ?: BigDecimal.ZERO,
             title = snapshot.title.trim(),
             currency = snapshot.currency.trim(),
             email = snapshot.email.trim().ifBlank { null },
-            description = snapshot.description.trim().ifBlank { null },
+            description = descriptionToSend(snapshot.originalHtml, snapshot.description),
             expiryDate = snapshot.expiryDate,
             referenceId = snapshot.referenceId.trim().ifBlank { null },
             allowCustomPaymentAmounts = snapshot.allowCustomAmounts,
+            formId = snapshot.formId,
+            formResponse = snapshot.formResponse,
         )
 
-        val storeId = graph.session.activeStore.value?.id
-        if (paymentRequestId == null && storeId == null) {
+        val store = storeId
+        if (store == null) {
             _state.update { it.copy(storeMissing = true) }
             return
         }
@@ -197,26 +226,26 @@ class PaymentRequestEditViewModel(
             runCatching {
                 val api = graph.session.requireApi()
                 if (paymentRequestId == null) {
-                    api.createPaymentRequest(storeId!!, request)
+                    api.createPaymentRequest(store, request)
                 } else {
-                    api.updatePaymentRequest(paymentRequestId, request)
+                    api.updatePaymentRequest(store, paymentRequestId, request)
                 }
             }
-                .onSuccess { _state.update { it.copy(saving = false, done = true) } }
+                .onSuccess { _state.update { it.copy(saving = false, done = true, dirty = false) } }
                 .onFailure { failure -> _state.update { it.withFailure(failure.asApiException()) } }
         }
     }
 
     /**
-     * Turns a payment request into a payable invoice. This endpoint is **not**
-     * store-scoped — it is addressed by payment request id alone, so no store id
-     * is passed and none is needed.
+     * Turns the saved payment request (not the edits on screen) into a
+     * payable invoice. Store-scoped like every payment-request route: the
+     * unscoped one exists only from 2.4.0.
      */
     fun payNow() {
         val id = paymentRequestId ?: return
         viewModelScope.launch {
             _state.update { it.copy(payingNow = true, error = null) }
-            runCatching { graph.session.requireApi().payPaymentRequest(id) }
+            runCatching { graph.session.requireApi().payPaymentRequest(requireStore(), id) }
                 .onSuccess { invoice ->
                     _state.update {
                         it.copy(
@@ -238,9 +267,22 @@ class PaymentRequestEditViewModel(
             } else {
                 current.fieldErrors - clearField
             }
-            transform(current).copy(fieldErrors = cleared)
+            transform(current).copy(fieldErrors = cleared, dirty = true)
         }
     }
+}
+
+/**
+ * The description to send back.
+ *
+ * The server holds HTML and the form edits its text, so sending the text
+ * back would flatten every link, list and image the web editor made, on any
+ * save, even one that only changed the title. While the text is unchanged
+ * the original HTML goes back as it came; only a real edit replaces it.
+ */
+internal fun descriptionToSend(originalHtml: String?, edited: String): String? {
+    val text = edited.trim()
+    return if (text == TextUtil.stripHtml(originalHtml.orEmpty())) originalHtml else text.ifBlank { null }
 }
 
 /**
@@ -291,6 +333,8 @@ fun PaymentRequestEditScreen(
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    // The toolbar and the system back both ask first once something changed.
+    val back = confirmDiscardChanges(state.dirty, onBack)
 
     LaunchedEffect(state.done) { if (state.done) onBack() }
 
@@ -303,7 +347,7 @@ fun PaymentRequestEditScreen(
 
     AppScreen(
         title = if (viewModel.isNew) "New payment request" else "Payment request",
-        onBack = onBack,
+        onBack = back,
         snackbarHostState = snackbarHostState,
         actions = {
             AnimatedSwap(state.saving, label = "save") { busy ->
@@ -376,7 +420,12 @@ fun PaymentRequestEditScreen(
                             value = state.description,
                             onValueChange = viewModel::setDescription,
                             singleLine = false,
-                            supportingText = "Shown on the public page.",
+                            supportingText = if (state.formatted) {
+                                "Shown on the public page. Editing it removes the links, images and " +
+                                    "formatting added on the web."
+                            } else {
+                                "Shown on the public page."
+                            },
                         )
                         FormField(
                             label = "Buyer email",
@@ -388,9 +437,14 @@ fun PaymentRequestEditScreen(
                     }
 
                     FormSection(title = "Options", modifier = Modifier.arrive(1)) {
-                        ExpiryRow(
-                            expiryDate = state.expiryDate,
+                        // The end of the picked day: a request picked to expire
+                        // on the 10th stays payable all of the 10th.
+                        DateRow(
+                            label = "Expiry date",
+                            epochSeconds = state.expiryDate,
+                            endOfDay = true,
                             onPick = viewModel::setExpiry,
+                            emptyText = "No expiry",
                         )
                         FormField(
                             label = "Reference id",
@@ -431,52 +485,3 @@ fun PaymentRequestEditScreen(
         }
     }
 }
-
-@Composable
-private fun ExpiryRow(expiryDate: Long?, onPick: (Long?) -> Unit) {
-    var picking by remember { mutableStateOf(false) }
-
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 12.dp, bottom = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text("Expiry date", style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = expiryDate?.let(Dates::date) ?: "No expiry",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        // "Clear" only exists once a date has been chosen, and it appears right
-        // beside the button that was just tapped to choose one.
-        AnimatedVisibility(
-            visible = expiryDate != null,
-            enter = expandHorizontally(Motion.spatialSize) + fadeIn(Motion.effects),
-            exit = shrinkHorizontally(Motion.spatialSize) + fadeOut(Motion.effectsFast),
-        ) {
-            TextButton(onClick = { onPick(null) }) { Text("Clear") }
-        }
-        TextButton(onClick = { picking = true }) { Text("Choose") }
-    }
-
-    if (picking) {
-        val picker = rememberDatePickerState(initialSelectedDateMillis = expiryDate?.times(1000))
-        DatePickerDialog(
-            onDismissRequest = { picking = false },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        // BTCPay wants unix seconds; the picker returns millis.
-                        onPick(picker.selectedDateMillis?.div(1000))
-                        picking = false
-                    },
-                ) { Text("Set") }
-            },
-            dismissButton = { TextButton(onClick = { picking = false }) { Text("Cancel") } },
-        ) {
-            DatePicker(state = picker)
-        }
-    }
-}
-

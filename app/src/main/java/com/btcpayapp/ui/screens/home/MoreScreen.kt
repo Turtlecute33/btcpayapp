@@ -71,9 +71,13 @@ import com.btcpayapp.ui.nav.WebhooksRoute
 /**
  * Everything that does not deserve a tab.
  *
- * Rows for features the connected key cannot use are hidden rather than shown
+ * Store rows the connected key cannot use are hidden rather than shown
  * disabled — an operator with a read-only key should not be looking at a list
- * of things that will 403.
+ * of things that will 403. Each row names the policy its screen needs, and the
+ * check follows the server's policy tree, so a store owner's
+ * `canmodifystoresettings` shows them all. A key whose grant the app cannot
+ * read shows every row and lets the server decide. The Server section is for
+ * server admins only.
  */
 @Composable
 fun MoreScreen(onNavigate: (Any) -> Unit) {
@@ -82,6 +86,8 @@ fun MoreScreen(onNavigate: (Any) -> Unit) {
     val user by graph.session.user.collectAsStateWithLifecycle()
     val serverInfo by graph.session.serverInfo.collectAsStateWithLifecycle()
     val lightningCodes = graph.session.lightningCryptoCodes
+    val storeId = store?.id
+    val can = { policy: String -> graph.session.hasPermission("btcpay.store.$policy", storeId) }
 
     AppScreen(title = "More", large = true) { padding ->
         Column(
@@ -94,24 +100,44 @@ fun MoreScreen(onNavigate: (Any) -> Unit) {
             // wrappers carry nothing but that entrance — they leave the layout
             // exactly as it was — and the stagger is what stops a screen that
             // is nothing but rows from appearing as one undifferentiated wall.
-            Column(Modifier.arrive(0)) {
-                SectionHeader("Money in")
-                MenuRow("Payment requests", Icons.Rounded.RequestQuote) { onNavigate(PaymentRequestsRoute) }
-                MenuRow("Point of sale and crowdfunds", Icons.Rounded.Apps) { onNavigate(AppsRoute) }
+            val paymentRequests = can("canviewpaymentrequests")
+            val apps = can("canviewstoresettings")
+            if (paymentRequests || apps) {
+                Column(Modifier.arrive(0)) {
+                    SectionHeader("Money in")
+                    if (paymentRequests) {
+                        MenuRow("Payment requests", Icons.Rounded.RequestQuote) { onNavigate(PaymentRequestsRoute) }
+                    }
+                    if (apps) {
+                        MenuRow("Point of sale and crowdfunds", Icons.Rounded.Apps) { onNavigate(AppsRoute) }
+                    }
+                }
             }
 
-            Column(Modifier.arrive(1)) {
-                SectionHeader("Money out")
-                MenuRow("Pull payments", Icons.Rounded.Receipt) { onNavigate(PullPaymentsRoute) }
-                MenuRow("Payouts", Icons.Rounded.Payments) { onNavigate(PayoutsRoute) }
-                MenuRow(
-                    title = "Automated payouts",
-                    icon = Icons.Rounded.Tune,
-                    subtitle = "Let the server send approved payouts on its own",
-                ) { onNavigate(PayoutProcessorsRoute) }
+            val pullPayments = can("canviewpullpayments")
+            val payouts = can("canviewpayouts")
+            val processors = can("canmodifystoresettings")
+            if (pullPayments || payouts || processors) {
+                Column(Modifier.arrive(1)) {
+                    SectionHeader("Money out")
+                    if (pullPayments) {
+                        MenuRow("Pull payments", Icons.Rounded.Receipt) { onNavigate(PullPaymentsRoute) }
+                    }
+                    if (payouts) {
+                        MenuRow("Payouts", Icons.Rounded.Payments) { onNavigate(PayoutsRoute) }
+                    }
+                    if (processors) {
+                        MenuRow(
+                            title = "Automated payouts",
+                            icon = Icons.Rounded.Tune,
+                            subtitle = "Let the server send approved payouts on its own",
+                        ) { onNavigate(PayoutProcessorsRoute) }
+                    }
+                }
             }
 
-            if (lightningCodes.isNotEmpty()) {
+            // The node screen reads the node's info and balance.
+            if (lightningCodes.isNotEmpty() && can("canuselightningnode")) {
                 Column(Modifier.arrive(2)) {
                     SectionHeader("Lightning")
                     lightningCodes.forEach { code ->
@@ -122,14 +148,32 @@ fun MoreScreen(onNavigate: (Any) -> Unit) {
                 }
             }
 
-            Column(Modifier.arrive(3)) {
-                SectionHeader(store?.name ?: "Store")
-                MenuRow("Store settings", Icons.Rounded.Storefront) { onNavigate(StoreSettingsRoute) }
-                MenuRow("Payment methods", Icons.Rounded.CurrencyExchange) { onNavigate(PaymentMethodsRoute) }
-                MenuRow("Rates", Icons.Rounded.CurrencyExchange) { onNavigate(StoreRatesRoute) }
-                MenuRow("Users and roles", Icons.Rounded.Group) { onNavigate(StoreUsersRoute) }
-                MenuRow("Email", Icons.Rounded.AlternateEmail) { onNavigate(StoreEmailRoute) }
-                MenuRow("Webhooks", Icons.Rounded.Webhook) { onNavigate(WebhooksRoute) }
+            // Settings and rates can be read with the view policy (the server
+            // refuses a save). Payment methods, users and email are read
+            // through routes that need `canmodifystoresettings`.
+            val storeSettings = can("canviewstoresettings")
+            val manageStore = can("canmodifystoresettings")
+            val webhooks = can("webhooks.canmodifywebhooks")
+            if (storeSettings || manageStore || webhooks) {
+                Column(Modifier.arrive(3)) {
+                    SectionHeader(store?.name ?: "Store")
+                    if (storeSettings) {
+                        MenuRow("Store settings", Icons.Rounded.Storefront) { onNavigate(StoreSettingsRoute) }
+                    }
+                    if (manageStore) {
+                        MenuRow("Payment methods", Icons.Rounded.CurrencyExchange) { onNavigate(PaymentMethodsRoute) }
+                    }
+                    if (storeSettings) {
+                        MenuRow("Rates", Icons.Rounded.CurrencyExchange) { onNavigate(StoreRatesRoute) }
+                    }
+                    if (manageStore) {
+                        MenuRow("Users and roles", Icons.Rounded.Group) { onNavigate(StoreUsersRoute) }
+                        MenuRow("Email", Icons.Rounded.AlternateEmail) { onNavigate(StoreEmailRoute) }
+                    }
+                    if (webhooks) {
+                        MenuRow("Webhooks", Icons.Rounded.Webhook) { onNavigate(WebhooksRoute) }
+                    }
+                }
             }
 
             if (user?.isAdmin == true) {

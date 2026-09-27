@@ -51,6 +51,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -87,12 +88,23 @@ import com.btcpayapp.ui.components.SecretField
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.theme.AppTheme
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+
+/** What the new-user sheet asks for; held by the screen while an administrator is confirmed. */
+data class NewUser(
+    val email: String,
+    val name: String,
+    val password: String,
+    val isAdministrator: Boolean,
+    val sendInvitationEmail: Boolean,
+)
 
 data class ServerUsersState(
     val users: List<ApplicationUserData> = emptyList(),
@@ -158,14 +170,9 @@ class ServerUsersViewModel(private val graph: AppGraph) : ViewModel() {
         act(target) { api -> api.deleteUser(target.id) }
     }
 
-    fun create(
-        email: String,
-        name: String,
-        password: String,
-        isAdministrator: Boolean,
-        sendInvitationEmail: Boolean,
-    ) {
-        if (email.isBlank()) {
+    /** An administrator is confirmed by the screen first; see [ServerUsersScreen]. */
+    fun create(user: NewUser) {
+        if (user.email.isBlank()) {
             _state.update { it.copy(createError = "An email address is required.") }
             return
         }
@@ -174,11 +181,11 @@ class ServerUsersViewModel(private val graph: AppGraph) : ViewModel() {
             runCatching {
                 graph.session.requireApi().createUser(
                     CreateUserRequest(
-                        email = email.trim(),
-                        password = password.takeIf { it.isNotBlank() },
-                        name = name.takeIf { it.isNotBlank() },
-                        isAdministrator = isAdministrator,
-                        sendInvitationEmail = sendInvitationEmail,
+                        email = user.email.trim(),
+                        password = user.password.takeIf { it.isNotBlank() },
+                        name = user.name.takeIf { it.isNotBlank() },
+                        isAdministrator = user.isAdministrator,
+                        sendInvitationEmail = user.sendInvitationEmail,
                     ),
                 )
             }.onSuccess { created ->
@@ -248,6 +255,11 @@ fun ServerUsersScreen(onBack: () -> Unit) {
     val viewModel = appViewModel { ServerUsersViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+    val gate = rememberSpendGate()
+    var pendingAdmin by remember { mutableStateOf<NewUser?>(null) }
+    // Shown in the sheet: a snackbar would sit behind it.
+    var refusal by remember { mutableStateOf<String?>(null) }
 
     val visible = remember(state.users, state.query) {
         val needle = state.query.trim().lowercase()
@@ -283,9 +295,35 @@ fun ServerUsersScreen(onBack: () -> Unit) {
         CreateUserSheet(
             creating = state.creating,
             error = state.createError,
+            refusal = refusal,
             invitationUrl = state.invitationUrl,
-            onDismiss = viewModel::closeCreate,
-            onCreate = viewModel::create,
+            onDismiss = {
+                refusal = null
+                viewModel.closeCreate()
+            },
+            onCreate = { request ->
+                refusal = null
+                if (request.isAdministrator && request.email.isNotBlank()) pendingAdmin = request else viewModel.create(request)
+            },
+        )
+    }
+
+    // An administrator controls the server, every store and every user, so
+    // making one takes the same confirmation as sending funds.
+    // Drawn after the sheet, so its window sits on top of it.
+    pendingAdmin?.let { request ->
+        ConfirmDialog(
+            title = "Create an administrator?",
+            message = "${request.email.trim()} will have full control of this server, every store and every user.",
+            confirmLabel = "Create administrator",
+            destructive = true,
+            onConfirm = {
+                pendingAdmin = null
+                scope.afterSpendGate(gate, "Confirm new administrator", request.email.trim(), { refusal = it }) {
+                    viewModel.create(request)
+                }
+            },
+            onDismiss = { pendingAdmin = null },
         )
     }
 
@@ -311,7 +349,8 @@ fun ServerUsersScreen(onBack: () -> Unit) {
                 value = state.query,
                 onValueChange = viewModel::setQuery,
                 placeholder = "Email, name or role",
-                imeAction = ImeAction.Search,
+                // The list filters as you type, so the key only closes the keyboard.
+                imeAction = ImeAction.Done,
             )
 
             if (state.users.isNotEmpty()) {
@@ -501,9 +540,10 @@ private fun UserCard(
 private fun CreateUserSheet(
     creating: Boolean,
     error: String?,
+    refusal: String?,
     invitationUrl: String?,
     onDismiss: () -> Unit,
-    onCreate: (String, String, String, Boolean, Boolean) -> Unit,
+    onCreate: (NewUser) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var email by remember { mutableStateOf("") }
@@ -596,6 +636,14 @@ private fun CreateUserSheet(
                             modifier = Modifier.arrive(5),
                             description = "Needs working SMTP settings on this server.",
                         )
+                        refusal?.let {
+                            Text(
+                                text = it,
+                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                         Spacer(Modifier.height(12.dp))
                         Row(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp).arrive(6),
@@ -613,7 +661,7 @@ private fun CreateUserSheet(
                                 }
                             }
                             Button(
-                                onClick = { onCreate(email, name, password, administrator, sendInvitation) },
+                                onClick = { onCreate(NewUser(email, name, password, administrator, sendInvitation)) },
                                 enabled = !creating,
                             ) { Text("Create") }
                         }

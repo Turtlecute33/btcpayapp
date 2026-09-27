@@ -34,6 +34,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -54,8 +55,10 @@ import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.pressScale
 import com.btcpayapp.ui.theme.Motion
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -76,8 +79,18 @@ class AccountsViewModel(private val graph: AppGraph) : ViewModel() {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000),
             AccountsState(graph.accounts.vault.value.accounts, graph.accounts.vault.value.activeAccount?.id))
 
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message.asStateFlow()
+
+    fun consumeMessage() { _message.value = null }
+
+    /**
+     * A switch that happens rebuilds the shell for the new account, which is
+     * its own confirmation. One that does not says why: a payment is still in
+     * flight, or the choice could not be saved.
+     */
     fun setActive(id: String) {
-        viewModelScope.launch { graph.session.selectAccount(id) }
+        viewModelScope.launch { graph.session.selectAccount(id)?.let { _message.value = it } }
     }
 }
 
@@ -92,10 +105,17 @@ fun AccountsScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
-    val activate: (Account) -> Unit = { account ->
-        viewModel.setActive(account.id)
-        scope.launch { snackbarHostState.showSnackbar("Now using ${account.label}") }
+    val message by viewModel.message.collectAsStateWithLifecycle()
+
+    // Shown from the composition scope: consuming the message changes the
+    // effect's key, which would cancel a snackbar still on its way up.
+    LaunchedEffect(message) {
+        val text = message ?: return@LaunchedEffect
+        viewModel.consumeMessage()
+        scope.launch { snackbarHostState.showSnackbar(text) }
     }
+
+    val activate: (Account) -> Unit = { account -> viewModel.setActive(account.id) }
 
     AppScreen(
         title = "Accounts",

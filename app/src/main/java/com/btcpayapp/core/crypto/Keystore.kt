@@ -34,20 +34,34 @@ object Keystore {
     private const val GCM_TAG_BITS = 128
     private const val GCM_IV_BYTES = 12
 
-    /** Wraps the credential vault. Usable whenever the app process runs. */
+    /**
+     * Wraps the credential vault, settings and sync state. Usable whenever the
+     * app process runs: it is not bound to user authentication, because
+     * background sync must read the vault while the phone is locked.
+     */
     const val ALIAS_VAULT = "btcpay.vault.v1"
 
     /**
-     * Wraps a secondary copy of the vault key check-value and is configured with
-     * [KeyGenParameterSpec.Builder.setUserAuthenticationRequired]. Unlocking it
-     * is what proves a biometric/device-credential prompt actually succeeded,
-     * rather than trusting a boolean returned by the UI layer.
+     * Needs a fresh biometric or device-credential check for every use. The app
+     * lock initialises a cipher with it inside the prompt, so the lock opens
+     * only when the system prompt really succeeded, not on a callback's word.
+     *
+     * It wraps nothing. The app lock is a UI gate: [ALIAS_VAULT] is not bound
+     * to it, so the lock adds no protection to the data at rest.
      */
     const val ALIAS_LOCK = "btcpay.lock.v1"
 
     private val keyStore: KeyStore by lazy {
         KeyStore.getInstance(PROVIDER).apply { load(null) }
     }
+
+    /**
+     * Key handles by alias, guarded by this object's lock. Every document read
+     * and write asks for [ALIAS_VAULT], and `getEntry` is a binder call to the
+     * Keystore daemon each time. A handle is only a reference; the
+     * key material stays in the secure hardware. [deleteKey] drops the entry.
+     */
+    private val handles = HashMap<String, SecretKey>()
 
     /**
      * Synchronised because this is a check-then-act on a process-global alias.
@@ -60,14 +74,18 @@ object Keystore {
      * undecryptable — i.e. the user's accounts and API keys are lost.
      */
     @Synchronized
-    fun secretKey(alias: String, requireUserAuthentication: Boolean = false): SecretKey {
-        (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.let { return it.secretKey }
-        return generate(alias, requireUserAuthentication, strongBox = true)
-    }
+    fun secretKey(alias: String, requireUserAuthentication: Boolean = false): SecretKey =
+        handles.getOrPut(alias) {
+            (keyStore.getEntry(alias, null) as? KeyStore.SecretKeyEntry)?.secretKey
+                ?: generate(alias, requireUserAuthentication, strongBox = true)
+        }
 
     fun containsKey(alias: String): Boolean = keyStore.containsAlias(alias)
 
+    /** Synchronised with [secretKey], so a cached handle never outlives its key. */
+    @Synchronized
     fun deleteKey(alias: String) {
+        handles.remove(alias)
         if (keyStore.containsAlias(alias)) keyStore.deleteEntry(alias)
     }
 
@@ -95,8 +113,9 @@ object Keystore {
                         @Suppress("DEPRECATION")
                         setUserAuthenticationValidityDurationSeconds(-1)
                     }
-                    // Enrolling a new fingerprint invalidates the key, so a
-                    // coerced enrolment cannot silently gain access to the vault.
+                    // A new biometric enrolment invalidates the key. AppLock then
+                    // deletes it and makes a new one, and the key guards no data,
+                    // so this is not a defence against a coerced enrolment.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                         setInvalidatedByBiometricEnrollment(true)
                     }
@@ -151,9 +170,9 @@ object Keystore {
     }
 
     /**
-     * A [Cipher] that the biometric prompt will unlock. Passing this to
-     * `BiometricPrompt` and getting it back initialised is cryptographic proof
-     * the user authenticated; a `Boolean` from a callback is not.
+     * A [Cipher] that the biometric prompt will unlock. Getting it back usable
+     * from `BiometricPrompt` shows the system prompt succeeded; a `Boolean`
+     * from a callback does not. It proves presence only: see [ALIAS_LOCK].
      */
     fun lockCipherForEncrypt(): Cipher =
         Cipher.getInstance(TRANSFORMATION).apply {

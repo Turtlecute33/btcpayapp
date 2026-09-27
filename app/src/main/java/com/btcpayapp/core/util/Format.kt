@@ -3,9 +3,12 @@ package com.btcpayapp.core.util
 import com.btcpayapp.data.model.BitcoinUnit
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.text.DecimalFormatSymbols
 import java.text.NumberFormat
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Currency
 import java.util.Locale
@@ -62,15 +65,41 @@ object Amounts {
     }
 
     /**
+     * The locale's integer format and decimal separator, looked up once per
+     * locale for the same reason as [currencyFormats]: sat labels are drawn
+     * per row, in composition, while a list scrolls. The format is not
+     * thread-safe, so each use is synchronised on it.
+     */
+    private class LocaleNumbers(val integer: NumberFormat, val decimalSeparator: Char)
+
+    private val localeNumbers = ConcurrentHashMap<Locale, LocaleNumbers>()
+
+    private fun numbersFor(locale: Locale): LocaleNumbers = localeNumbers.getOrPut(locale) {
+        LocaleNumbers(NumberFormat.getIntegerInstance(locale), DecimalFormatSymbols.getInstance(locale).decimalSeparator)
+    }
+
+    /**
+     * [trim] with the locale's decimal separator, for display only. BTC and
+     * the other codes without a platform format use it, so they follow the
+     * same convention as fiat and sats. With a fixed '.', a German screen
+     * showed "25.000 sat" (twenty-five thousand) next to "1.234 BTC" (one and
+     * a bit): the same mark meant two things. [parse] reads every separator
+     * this can show ('.', ',' and the Arabic '٫'). A copied value with the
+     * ambiguous shape is refused, not misread.
+     */
+    private fun display(value: BigDecimal, maxScale: Int, locale: Locale): String =
+        trim(value, maxScale).replace('.', numbersFor(locale).decimalSeparator)
+
+    /**
      * Formats an amount in whatever currency the invoice is denominated in.
      * Falls back to `12.34 XYZ` for codes the platform does not know, which is
      * every crypto code and a few regional ones.
      */
     fun format(amount: BigDecimal, currency: String, locale: Locale = Locale.getDefault()): String {
         val code = currency.uppercase(Locale.ROOT)
-        if (isCrypto(code)) return "${trim(amount, cryptoScale(code))} $code"
+        if (isCrypto(code)) return "${display(amount, cryptoScale(code), locale)} $code"
 
-        val iso = isoCurrency(code) ?: return "${trim(amount, 2)} $code"
+        val iso = isoCurrency(code) ?: return "${display(amount, 2, locale)} $code"
 
         val format = currencyFormats.getOrPut("${locale.toLanguageTag()}|$code") {
             NumberFormat.getCurrencyInstance(locale).apply {
@@ -94,12 +123,21 @@ object Amounts {
         unit: BitcoinUnit,
         locale: Locale = Locale.getDefault(),
     ): String = when (unit) {
-        BitcoinUnit.Btc -> "${trim(btc, 8)} BTC"
+        BitcoinUnit.Btc -> "${display(btc, 8, locale)} BTC"
         BitcoinUnit.Sat -> {
             val sats = btc.multiply(SATS_PER_BTC_DECIMAL).setScale(0, RoundingMode.HALF_UP)
-            "${NumberFormat.getIntegerInstance(locale).format(sats)} sat"
+            val integer = numbersFor(locale).integer
+            "${synchronized(integer) { integer.format(sats) }} sat"
         }
     }
+
+    /**
+     * The same value in the unit the user did not choose, for the echo under
+     * an amount field and on confirmations: "21,000 sat" under "0.00021", so a
+     * slip of three zeros shows before anything is sent.
+     */
+    fun inOtherUnit(btc: BigDecimal, unit: BitcoinUnit, locale: Locale = Locale.getDefault()): String =
+        formatBitcoin(btc, if (unit == BitcoinUnit.Btc) BitcoinUnit.Sat else BitcoinUnit.Btc, locale)
 
     fun btcToSats(btc: BigDecimal): BigDecimal =
         btc.multiply(SATS_PER_BTC_DECIMAL).setScale(0, RoundingMode.HALF_UP)
@@ -107,9 +145,27 @@ object Amounts {
     fun satsToBtc(sats: BigDecimal): BigDecimal =
         sats.divide(SATS_PER_BTC_DECIMAL, 8, RoundingMode.HALF_UP)
 
-    /** Lightning amounts arrive as millisatoshi strings. */
+    /**
+     * Lightning amounts arrive as millisatoshi strings. A missing or unreadable
+     * one counts as zero; see [serverDecimal] for why unreadable includes
+     * "1e2147483647".
+     */
     fun msatToSats(msat: String?): BigDecimal =
-        (msat?.toBigDecimalOrNull() ?: BigDecimal.ZERO).divide(MSAT_PER_SAT, 3, RoundingMode.DOWN)
+        (serverDecimal(msat) ?: BigDecimal.ZERO).divide(MSAT_PER_SAT, 3, RoundingMode.DOWN)
+
+    /**
+     * A number the server sent as text (Lightning msat and sat strings, rate
+     * spreads), or null when it is not one this app can work with.
+     *
+     * The bounds are the ones [parse] and the JSON decimal serializer use.
+     * Without them one bad value is enough to take down a screen: "1e2147483647"
+     * makes the msat-to-sat divide throw, and "1e999999999" makes it build a
+     * billion-digit number, both inside composition. Home draws the Lightning
+     * balance, so that would crash every launch.
+     */
+    fun serverDecimal(text: String?): BigDecimal? =
+        text?.trim()?.takeIf { it.length <= 128 }?.toBigDecimalOrNull()
+            ?.takeIf { it.scale() in -32..32 && it.precision() <= 100 }
 
     fun msatToBtc(msat: String?): BigDecimal = satsToBtc(msatToSats(msat))
 
@@ -126,8 +182,34 @@ object Amounts {
         return if (stripped.scale() < 0) stripped.setScale(0).toPlainString() else stripped.toPlainString()
     }
 
-    /** Masks an amount when privacy mode is on, keeping the layout stable. */
-    fun masked(text: String): String = "•".repeat(text.length.coerceIn(3, 8))
+    /**
+     * What privacy mode draws in place of an amount. Fixed width on purpose:
+     * a mask as long as the text it hides tells a shoulder-surfer whether the
+     * day's takings have three digits or five.
+     */
+    const val MASK: String = "••••••"
+
+    /**
+     * One separator with exactly three digits after it and one to three before,
+     * no leading zero: "1,000", "21.000", "500,000", "1.125". Half the world
+     * reads that as a thousand-something and the other half as a decimal.
+     */
+    private val AMBIGUOUS = Regex("[-+]?[1-9][0-9]{0,2}[.,][0-9]{3}")
+
+    /**
+     * U+066B, the decimal mark of Persian and many Arabic locales, which
+     * [display] shows there. It is never a thousands mark (that is U+066C,
+     * which stays refused), so it is never ambiguous.
+     */
+    private const val ARABIC_DECIMAL = '\u066B'
+
+    /**
+     * [input] trimmed, with every decimal digit written in ASCII.
+     * `toBigDecimalOrNull` also reads Arabic-Indic and other Unicode digits,
+     * so without this "٢١,٠٠٠" would slip past [AMBIGUOUS] and become 21.
+     */
+    private fun normalised(input: String): String =
+        input.trim().map { if (it.isDigit()) '0' + it.digitToInt() else it }.joinToString("")
 
     /**
      * Parses an amount the user typed, or null if it is not a number.
@@ -138,17 +220,89 @@ object Amounts {
      * grey out the submit button with no message or, worse, fall back to a
      * default: a point-of-sale item saved with no price, or a payout
      * processor's minimum threshold of zero, which makes it sweep on every run.
+     * So ',' and '.' both mean the decimal point, as does [ARABIC_DECIMAL],
+     * and only one may appear.
      *
-     * Group separators are rejected rather than stripped: "1,234" is ambiguous
-     * between one-thousand-something and 1.234, and guessing wrong about money
-     * is worse than asking the user to retype it.
+     * The one shape that stays refused is [AMBIGUOUS]. Read as a decimal,
+     * "21,000" sat became 21 sat and "1,500" USD became $1.50, a 1000x
+     * underbill with nothing on screen to show it. Read as a thousands group,
+     * "1.125" BTC would become 1125 BTC. Guessing wrong about money is worse
+     * than asking, so [parseProblem] asks. "0.125", ".125", "1234.567",
+     * "12,50" and "1.1250" are not ambiguous and parse as decimals.
      */
     fun parse(input: String): BigDecimal? {
-        val trimmed = input.trim()
+        val trimmed = normalised(input)
         if (trimmed.isEmpty() || trimmed.length > 128) return null
-        if (trimmed.count { it == ',' || it == '.' } > 1) return null
-        return trimmed.replace(',', '.').toBigDecimalOrNull()
+        if (trimmed.count { it == ',' || it == '.' || it == ARABIC_DECIMAL } > 1) return null
+        if (AMBIGUOUS.matches(trimmed)) return null
+        return trimmed.replace(',', '.').replace(ARABIC_DECIMAL, '.').toBigDecimalOrNull()
             ?.takeIf { it.scale() in -32..32 && it.precision() <= 100 }
+    }
+
+    /**
+     * The field error for [input]: null when it is blank or [parse] accepts
+     * it. For the ambiguous shape the text is built from what was typed and
+     * says how to write each reading, so the fix is one edit away.
+     */
+    fun parseProblem(input: String): String? {
+        val trimmed = normalised(input)
+        if (trimmed.isEmpty() || parse(trimmed) != null) return null
+        if (!AMBIGUOUS.matches(trimmed)) return "Enter a number, for example 12.50."
+        val whole = trimmed.filter { it != ',' && it != '.' }
+        return "$trimmed can mean $whole or a decimal. Type $whole, or ${trimmed}0 for the decimal."
+    }
+
+    /**
+     * The text to put in an amount field for [value]: [trim] to [maxScale],
+     * plus one '0' when that would have the ambiguous shape ("1.125" becomes
+     * "1.1250"). Every prefill from a loaded or scanned value goes through
+     * here, so [parse] always accepts what the app wrote itself.
+     */
+    fun toInput(value: BigDecimal, maxScale: Int): String {
+        val text = trim(value, maxScale)
+        return if (AMBIGUOUS.matches(text)) "${text}0" else text
+    }
+
+    /**
+     * [text] as a positive amount in [currency], or null. More decimals than
+     * [currency] shows are refused, because every review rounds to that scale:
+     * "10.0051" USD was confirmed as $10.01 and then sent as typed.
+     */
+    fun inCurrency(text: String, currency: String): BigDecimal? =
+        parse(text)?.takeIf { it.signum() > 0 && it.stripTrailingZeros().scale() <= scaleFor(currency) }
+
+    /**
+     * The field error for [text] in [currency]: not a number, or more decimals
+     * than [inCurrency] takes. Null for a blank, and for zero or less, which
+     * each caller words for itself. A blank [currency] has no scale to check yet.
+     */
+    fun inCurrencyProblem(text: String, currency: String): String? {
+        parseProblem(text)?.let { return it }
+        val value = parse(text) ?: return null
+        if (currency.isBlank()) return null
+        val scale = scaleFor(currency)
+        return when {
+            value.stripTrailingZeros().scale() <= scale -> null
+            scale == 0 -> "Enter a whole number of $currency."
+            else -> "Use at most $scale decimal places for $currency."
+        }
+    }
+
+    /** Digits, one ',' or '.', then exactly three digits: "1.125", "2,500". */
+    private val THREE_DECIMALS = Regex("\\p{Nd}*[.,]\\p{Nd}{3}")
+
+    /**
+     * A typed fee rate in sat/vB, or null when it is not a number above zero.
+     *
+     * Here ',' and '.' always mark the decimal. [parse] refuses "1.125"
+     * because, as an amount, it can also mean 1125. A fee rate never has a
+     * thousands mark, so here "1.125" is read as "1.1250": the same value, with
+     * only one reading. To ask instead would offer 1125 sat/vB, a rate 1000
+     * times too high.
+     */
+    fun feeRate(text: String): BigDecimal? {
+        val typed = text.trim()
+        return parse(if (THREE_DECIMALS.matches(typed)) "${typed}0" else typed)?.takeIf { it.signum() > 0 }
     }
 }
 
@@ -165,19 +319,59 @@ object Dates {
 
     private val timeOnly: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
+    /** 9999-12-31T23:59:59Z, the last second with a four-digit year. */
+    private const val MAX_EPOCH_SECONDS = 253_402_300_799L
+
+    /**
+     * Timestamps come off the server as plain longs, and `Instant.ofEpochSecond`
+     * throws for Long.MAX_VALUE. One bad `createdTime` would then crash the
+     * invoice list in composition, so every conversion clamps to years
+     * 1970..9999 first. A wrong date on screen is the safe failure.
+     */
+    private fun clamp(epochSeconds: Long): Long = epochSeconds.coerceIn(0, MAX_EPOCH_SECONDS)
+
+    private fun instant(epochSeconds: Long): Instant = Instant.ofEpochSecond(clamp(epochSeconds))
+
     /** [epochSeconds] — BTCPay sends unix seconds, not milliseconds. */
     fun full(epochSeconds: Long): String = dateTime.withZone(ZoneId.systemDefault())
-        .format(Instant.ofEpochSecond(epochSeconds))
+        .format(instant(epochSeconds))
 
     fun date(epochSeconds: Long): String = dateOnly.withZone(ZoneId.systemDefault())
-        .format(Instant.ofEpochSecond(epochSeconds))
+        .format(instant(epochSeconds))
 
     fun time(epochSeconds: Long): String = timeOnly.withZone(ZoneId.systemDefault())
-        .format(Instant.ofEpochSecond(epochSeconds))
+        .format(instant(epochSeconds))
+
+    // The Material date picker speaks UTC midnight: selectedDateMillis is
+    // 00:00Z of the chosen day, and initialSelectedDateMillis is read the same
+    // way. Stored as is, an expiry picked for 10 Oct fell on 9 Oct 20:00 in New
+    // York and at 09:00 on the 10th in Tokyo, so requests and crowdfunds closed
+    // before the day the merchant chose. These convert between that and the
+    // local calendar day, in the zone the device is in now.
+
+    private fun pickerDate(pickerUtcMillis: Long): LocalDate =
+        Instant.ofEpochMilli(pickerUtcMillis).atZone(ZoneOffset.UTC).toLocalDate()
+
+    /** Epoch seconds of local 00:00:00 on the picked day, for start dates. */
+    fun pickerStartOfDay(pickerUtcMillis: Long): Long =
+        pickerDate(pickerUtcMillis).atStartOfDay(ZoneId.systemDefault()).toEpochSecond()
+
+    /**
+     * Epoch seconds of local 23:59:59 on the picked day, for expiry and end
+     * dates: next local midnight minus one second, which stays right on a day
+     * that DST makes 23 or 25 hours long.
+     */
+    fun pickerEndOfDay(pickerUtcMillis: Long): Long =
+        pickerDate(pickerUtcMillis).plusDays(1).atStartOfDay(ZoneId.systemDefault()).toEpochSecond() - 1
+
+    /** The picker's value for the local calendar day that holds [epochSeconds]. */
+    fun pickerMillis(epochSeconds: Long): Long =
+        instant(epochSeconds).atZone(ZoneId.systemDefault()).toLocalDate()
+            .atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
 
     /** "just now", "12 min ago", "3 h ago", then an absolute date. */
     fun relative(epochSeconds: Long, nowSeconds: Long = System.currentTimeMillis() / 1000): String {
-        val delta = nowSeconds - epochSeconds
+        val delta = clamp(nowSeconds) - clamp(epochSeconds)
         val future = delta < 0
         val seconds = abs(delta)
         return when {
@@ -260,4 +454,16 @@ object Text {
             }
         }
         .joinToString(" ")
+}
+
+private const val HEX_DIGITS = "0123456789abcdef"
+
+/** Lowercase hex, two digits per byte. The one encoder for txids, hashes, keys and fingerprints. */
+internal fun ByteArray.toHex(): String {
+    val builder = StringBuilder(size * 2)
+    for (byte in this) {
+        val value = byte.toInt() and 0xff
+        builder.append(HEX_DIGITS[value shr 4]).append(HEX_DIGITS[value and 0x0f])
+    }
+    return builder.toString()
 }

@@ -2,14 +2,16 @@
 <!--
   Debug-only transport policy.
 
-  Identical to the release policy in `src/main`, plus 10.0.2.2 — the Android
-  emulator's alias for the host machine's loopback, needed to reach a BTCPay
-  instance running on the developer's laptop.
+  The release policy in `src/main`, plus cleartext to loopback (localhost,
+  127.0.0.1, ::1) and to 10.0.2.2 — the Android emulator's alias for the host
+  machine's loopback — to reach a BTCPay instance on the developer's laptop.
+  For development only: release refuses cleartext to loopback, because any app
+  on the phone can hold a loopback port.
 
-  This file exists so that alias CANNOT ship. On a real handset 10.0.2.2 is an
-  ordinary routable RFC-1918 address, so permitting cleartext to it would mean
-  an `Authorization: token <apikey>` header travelling in the clear across any
-  10.0.0.0/8 network the phone happens to join.
+  This file exists so these exceptions CANNOT ship. On a real handset
+  10.0.2.2 is an ordinary routable RFC-1918 address, so permitting cleartext to
+  it would mean an `Authorization: token <apikey>` header travelling in the
+  clear across any 10.0.0.0/8 network the phone happens to join.
 
   Resource merging replaces the main file wholesale for the debug variant, so
   the base and .onion rules are repeated here deliberately. Keep the two in

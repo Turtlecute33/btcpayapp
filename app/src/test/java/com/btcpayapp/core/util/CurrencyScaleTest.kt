@@ -3,16 +3,16 @@ package com.btcpayapp.core.util
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import java.math.BigDecimal
-import java.math.RoundingMode
 import org.junit.Test
 
 /**
- * Tests for the terminal keypad's minor-unit handling.
+ * How many minor units each currency has.
  *
- * The keypad accumulates an integer of minor units and only divides at the end,
- * so the scale it divides by *is* the price. The currency chips offer SATS and
- * the store's own default, so a scale hard-coded to 2 for every currency except
- * BTC would bill a 1000 sat sale as 10 sat.
+ * The terminal keypad accumulates an integer of minor units and only divides
+ * at the end, so the scale it divides by *is* the price. The currency chips
+ * offer SATS and the store's own default, so a scale hard-coded to 2 for every
+ * currency except BTC would bill a 1000 sat sale as 10 sat. The keypad's own
+ * arithmetic is tested against the real code in TerminalStateTest.
  */
 class CurrencyScaleTest {
 
@@ -50,27 +50,6 @@ class CurrencyScaleTest {
     @Test
     fun `an unknown code falls back to two rather than throwing`() {
         assertEquals(2, Amounts.scaleFor("NOTACURRENCY"))
-    }
-
-    /** The exact arithmetic the terminal performs, at the scale it uses. */
-    private fun keypad(digits: String, currency: String): BigDecimal {
-        val scale = Amounts.scaleFor(currency)
-        return BigDecimal(digits).movePointLeft(scale).setScale(scale, RoundingMode.DOWN)
-    }
-
-    @Test
-    fun `typing 1000 in sats charges 1000 sats, not 10`() {
-        assertEquals(BigDecimal("1000"), keypad("1000", "SATS"))
-    }
-
-    @Test
-    fun `typing 1000 in yen charges 1000 yen, not 10`() {
-        assertEquals(BigDecimal("1000"), keypad("1000", "JPY"))
-    }
-
-    @Test
-    fun `typing 1000 in dollars still means ten dollars`() {
-        assertEquals(BigDecimal("10.00"), keypad("1000", "USD"))
     }
 }
 
@@ -118,6 +97,9 @@ class AmountParseTest {
         // "1,234" could be 1234 or 1.234. Guessing wrong about money is worse
         // than asking the user to retype it.
         assertNull(Amounts.parse("1,234.56"))
+        assertNull(Amounts.parse("1,234"))
+        assertNull(Amounts.parse("1.234"))
+        assertNull(Amounts.parse("21,000"))
     }
 }
 

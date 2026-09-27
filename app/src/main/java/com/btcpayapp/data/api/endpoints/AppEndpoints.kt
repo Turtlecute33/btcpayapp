@@ -1,6 +1,7 @@
 package com.btcpayapp.data.api.endpoints
 
 import com.btcpayapp.data.api.BtcPayApi
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.AppData
 import com.btcpayapp.data.api.dto.AppItem
 import com.btcpayapp.data.api.dto.AppItemStats
@@ -12,6 +13,7 @@ import com.btcpayapp.data.api.dto.PointOfSaleAppRequest
 import com.btcpayapp.data.api.dto.WebhookData
 import com.btcpayapp.data.api.dto.WebhookDeliveryData
 import com.btcpayapp.data.api.dto.WebhookRequest
+import kotlinx.serialization.json.JsonObject
 
 // ---------------------------------------------------------------------------
 // Apps
@@ -34,15 +36,28 @@ internal suspend fun BtcPayApi.deleteApp(appId: String) {
 internal suspend fun BtcPayApi.pointOfSaleApp(appId: String): PointOfSaleAppData =
     get("api/v1/apps/pos/${appId.pathSegment()}")
 
+/**
+ * The same GET, kept as raw JSON. An app update replaces every setting, also
+ * the ones this client does not model (per-item extension data, fields added in
+ * newer releases). Editing the raw object and sending it back leaves those
+ * untouched; a round trip through the typed [PointOfSaleAppData] drops them.
+ */
+internal suspend fun BtcPayApi.pointOfSaleAppJson(appId: String): JsonObject =
+    get("api/v1/apps/pos/${appId.pathSegment()}")
+
 internal suspend fun BtcPayApi.createPointOfSaleApp(
     storeId: String,
     request: PointOfSaleAppRequest,
 ): PointOfSaleAppData = post("api/v1/stores/${storeId.pathSegment()}/apps/pos", body(request))
 
-internal suspend fun BtcPayApi.updatePointOfSaleApp(
-    appId: String,
-    request: PointOfSaleAppRequest,
-): PointOfSaleAppData = put("api/v1/apps/pos/${appId.pathSegment()}", body(request))
+/**
+ * Sends [body] as it is. The server replaces the whole app from it, so callers
+ * start from [pointOfSaleAppJson] and change only the keys the user edited. The
+ * items are the exception: they are read as `items` but written as the
+ * `template` string ([encodeItemTemplate]).
+ */
+internal suspend fun BtcPayApi.updatePointOfSaleApp(appId: String, body: JsonObject): PointOfSaleAppData =
+    put("api/v1/apps/pos/${appId.pathSegment()}", body.toString())
 
 /**
  * The server reads the item list as a JSON-encoded **string** in `template`
@@ -58,15 +73,22 @@ internal fun BtcPayApi.encodeItemTemplate(items: List<AppItem>): String = body(i
 internal suspend fun BtcPayApi.crowdfundApp(appId: String): CrowdfundAppData =
     get("api/v1/apps/crowdfund/${appId.pathSegment()}")
 
+/** The same GET as raw JSON, for the reason given on [pointOfSaleAppJson]. */
+internal suspend fun BtcPayApi.crowdfundAppJson(appId: String): JsonObject =
+    get("api/v1/apps/crowdfund/${appId.pathSegment()}")
+
 internal suspend fun BtcPayApi.createCrowdfundApp(
     storeId: String,
     request: CrowdfundAppRequest,
 ): CrowdfundAppData = post("api/v1/stores/${storeId.pathSegment()}/apps/crowdfund", body(request))
 
-internal suspend fun BtcPayApi.updateCrowdfundApp(
-    appId: String,
-    request: CrowdfundAppRequest,
-): CrowdfundAppData = put("api/v1/apps/crowdfund/${appId.pathSegment()}", body(request))
+/**
+ * Sends [body] as it is; see [updatePointOfSaleApp]. The route exists only from
+ * 2.3.7 ([ServerVersion.CROWDFUND_EDIT]); older servers
+ * can create a crowdfund but not edit one.
+ */
+internal suspend fun BtcPayApi.updateCrowdfundApp(appId: String, body: JsonObject): CrowdfundAppData =
+    put("api/v1/apps/crowdfund/${appId.pathSegment()}", body.toString())
 
 // ---------------------------------------------------------------------------
 // App statistics

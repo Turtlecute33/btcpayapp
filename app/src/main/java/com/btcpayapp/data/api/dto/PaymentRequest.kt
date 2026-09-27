@@ -42,6 +42,11 @@ data class PaymentRequestRequest(
     val referenceId: String? = null,
     val allowCustomPaymentAmounts: Boolean? = null,
     val formId: String? = null,
+    /**
+     * The buyer's answers, sent back unchanged. A server that rebuilds the
+     * request from the body would delete them otherwise; newer ones ignore it.
+     */
+    val formResponse: JsonObject? = null,
 )
 
 @Serializable(with = PaymentRequestStatusSerializer::class)

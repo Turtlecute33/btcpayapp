@@ -1,11 +1,13 @@
 package com.btcpayapp.core.net
 
-import android.util.Base64
+import com.btcpayapp.core.util.toHex
 import java.net.InetAddress
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.cert.CertificateException
 import java.security.cert.X509Certificate
+import java.util.Base64
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.HostnameVerifier
 import javax.net.ssl.SSLContext
@@ -15,6 +17,125 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
+
+/**
+ * What a certificate probe found, for the trust-on-first-use dialog.
+ *
+ * Everything here is read from a certificate nobody has verified yet. The
+ * names and dates are the *claims* of whoever answered the handshake, so
+ * they may explain a failure or raise a warning, but they never make a key
+ * trustworthy. Only [pin] matched against a value the operator read on the
+ * server itself does that.
+ */
+data class CertificateProbe(
+    val pin: String,
+    val subject: String,
+    val notBefore: Long,
+    val notAfter: Long,
+    val subjectAlternativeNames: List<String>,
+    /**
+     * Lowercase hex SHA-256 of the leaf's DER encoding: the value
+     * `openssl x509 -noout -fingerprint -sha256` prints (there in capitals, with
+     * colons), so an operator can compare it on the server without computing an
+     * SPKI hash. Empty when unknown.
+     */
+    val certificateSha256Hex: String = "",
+) {
+    val commonName: String
+        get() = subject.split(',')
+            .firstOrNull { it.trim().startsWith("CN=", ignoreCase = true) }
+            ?.substringAfter('=')
+            ?.trim()
+            ?: subject
+
+    /**
+     * Pinning replaces the authority check, not the validity check, so an
+     * expired key can never be made to work by trusting it. Offering it anyway
+     * would be a dead end that also teaches users to accept prompts.
+     */
+    fun isCurrentlyValid(nowMs: Long = System.currentTimeMillis()): Boolean = nowMs in notBefore..notAfter
+
+    /**
+     * Whether the certificate claims [host] (RFC 6125, simplified): a
+     * case-insensitive match on the subject alternative names, where `*.` covers
+     * exactly one left-most label, and the common name only when there are no
+     * SANs at all. IP literals are compared as text; nothing is resolved.
+     */
+    fun namesHost(host: String): Boolean {
+        val wanted = host.normalisedHost()
+        if (wanted.isEmpty()) return false
+        val names = subjectAlternativeNames.ifEmpty { listOf(commonName) }
+        return names.any { name -> matchesName(name.normalisedHost(), wanted) }
+    }
+
+    private fun matchesName(name: String, host: String): Boolean {
+        if (name == host) return true
+        // A wildcard never stands for part of an IP address.
+        if (!name.startsWith("*.") || host.isIpLiteral()) return false
+        val suffix = name.substring(1) // ".example.com"
+        val label = host.removeSuffix(suffix)
+        return host.endsWith(suffix) && label.isNotEmpty() && '.' !in label
+    }
+}
+
+/**
+ * Why a handshake failed. The UI says each one plainly, and only
+ * [UntrustedIssuer] may ever lead to an offer to trust the key: a wrong name,
+ * an expired certificate or a changed pinned key are exactly what an
+ * interception looks like, and pinning cannot repair any of them.
+ */
+enum class TlsProblem(val userMessage: String) {
+    UntrustedIssuer("The server's certificate is not signed by an authority this phone trusts."),
+    HostnameMismatch("The server's certificate is for a different name than this address."),
+    Expired("The server's certificate has expired or is not valid yet."),
+    KeyChanged("The server presented a different key from the one this account trusts."),
+    Other("A secure connection to the server could not be set up."),
+}
+
+/** A pinned account saw a key it has not accepted. Its own type, so it classifies as [TlsProblem.KeyChanged]. */
+internal class PinMismatchException(message: String) : CertificateException(message)
+
+/**
+ * Whether [host] is, by its text alone, a private-network, loopback or onion
+ * address: RFC 1918, loopback, link-local and CGNAT IPv4 literals; `::1`,
+ * `fc00::/7` and `fe80::/10` (with or without brackets); a name without a dot;
+ * or a name under a suffix only a local resolver or Tor answers.
+ *
+ * Never resolves a name: a lookup would send the host to the network's DNS,
+ * and on a hostile network the attacker writes the answer.
+ */
+fun isLocalNetworkHost(host: String): Boolean {
+    val name = host.normalisedHost().substringBefore('%') // an IPv6 zone id
+    if (name.isEmpty()) return false
+
+    if (':' in name) {
+        if (name == "::1" || name == "0:0:0:0:0:0:0:1") return true
+        val first = name.substringBefore(':').ifEmpty { "0" }.toIntOrNull(16) ?: return false
+        return first in 0xfc00..0xfdff || first in 0xfe80..0xfebf
+    }
+
+    if (name.isIpLiteral()) {
+        val octets = name.split('.').map(String::toInt)
+        if (octets.any { it > 255 }) return false
+        val (a, b) = octets
+        return a == 10 || a == 127 ||
+            (a == 172 && b in 16..31) ||
+            (a == 192 && b == 168) ||
+            (a == 169 && b == 254) ||
+            (a == 100 && b in 64..127)
+    }
+
+    return '.' !in name || LOCAL_SUFFIXES.any { name.endsWith(it) }
+}
+
+private val LOCAL_SUFFIXES = listOf(".local", ".lan", ".home", ".internal", ".home.arpa", ".localdomain", ".onion")
+
+private fun String.normalisedHost(): String =
+    trim().removePrefix("[").removeSuffix("]").trimEnd('.').lowercase(Locale.ROOT)
+
+/** Text shaped like an IP literal: IPv6 has a colon, IPv4 is four groups of one to three ASCII digits. */
+private fun String.isIpLiteral(): Boolean =
+    ':' in this || split('.').let { parts -> parts.size == 4 && parts.all { it.length in 1..3 && it.all { c -> c in '0'..'9' } } }
 
 /**
  * Transport-security policy.
@@ -27,59 +148,52 @@ import javax.net.ssl.X509TrustManager
  *    intercept.
  *
  *  2. **Pinned trust**. Used for self-hosted instances with a private CA or a
- *    self-signed certificate — the common case for a BTCPay box. The user is
- *    shown the SPKI SHA-256 fingerprint once and accepts it; from then on the
- *    pin *is* the server identity. This is deliberately narrower than adding a
- *    CA to the trust store: the pin authenticates exactly one key, for exactly
- *    one account, and nothing else in the app or the OS is affected.
+ *    self-signed certificate — the common case for a BTCPay box. The user runs
+ *    one command on the server and types the start of the fingerprint it
+ *    prints; only a match pins the key. The app never offers the fingerprint
+ *    it received for the user to accept, because whoever answered the
+ *    handshake chose it. From then on the pin *is* the server identity. This
+ *    is deliberately narrower than adding a CA to the trust store: the pin
+ *    authenticates exactly one key, for exactly one account, and nothing else
+ *    in the app or the OS is affected.
  *
  * There is no third mode. "Accept all certificates" is not offered, because a
  * toggle that disables authentication is always eventually left on.
  */
-/** What a certificate probe found, for the trust-on-first-use dialog. */
-data class CertificateProbe(
-    val pin: String,
-    val subject: String,
-    val issuer: String,
-    val notBefore: Long,
-    val notAfter: Long,
-    val subjectAlternativeNames: List<String>,
-    val selfSigned: Boolean,
-) {
-    val fingerprint: String get() = Tls.fingerprintForDisplay(pin)
-    val commonName: String
-        get() = subject.split(',')
-            .firstOrNull { it.trim().startsWith("CN=", ignoreCase = true) }
-            ?.substringAfter('=')
-            ?.trim()
-            ?: subject
-}
-
 object Tls {
 
     /** TLS 1.2 is the floor; anything older is off even where the OS allows it. */
     private val ENABLED_PROTOCOLS = arrayOf("TLSv1.3", "TLSv1.2")
 
     /** SHA-256 over the DER SubjectPublicKeyInfo, base64. Pins the key, not the cert,
-     *  so a routine certificate renewal that keeps the key does not break the pin. */
+     *  so a routine certificate renewal that keeps the key does not break the pin.
+     *
+     *  `java.util.Base64` (API 26+) rather than `android.util.Base64`: the same
+     *  unwrapped, padded output, and it runs in a JVM unit test. */
     fun spkiPin(certificate: X509Certificate): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(certificate.publicKey.encoded)
-        return Base64.encodeToString(digest, Base64.NO_WRAP)
+        return Base64.getEncoder().encodeToString(digest)
     }
 
-    /** Human-readable form for the confirmation dialog: `AB:CD:EF:…`. */
+    /**
+     * Human-readable form of a pin the account already trusts: `AB:CD:EF:…`.
+     * A stored pin that is not valid base64 is shown as it is rather than
+     * crashing the screen that displays it.
+     */
     fun fingerprintForDisplay(pin: String): String =
-        Base64.decode(pin, Base64.NO_WRAP).joinToString(":") { "%02X".format(it) }
+        runCatching { Base64.getDecoder().decode(pin.trim()) }.getOrNull()
+            ?.joinToString(":") { "%02X".format(it) }
+            ?: pin
 
     /**
      * Opens a handshake purely to read back the certificate the server offers,
-     * so the user can be shown a fingerprint to accept.
+     * so a fingerprint the user reads on the server can be checked against it.
      *
      * This is the one place that talks to a server without validating it, and
      * it is deliberately a dead end: the socket is closed immediately, no
      * request is ever written to it, and nothing it returns is trusted until
-     * the user says so. The resulting pin is then enforced on every later
-     * connection by [PinnedTrustManager].
+     * the user's fingerprint matches. The resulting pin is then enforced on
+     * every later connection by [PinnedTrustManager].
      */
     fun probeCertificate(host: String, port: Int, timeoutMs: Int = 15_000): CertificateProbe? {
         val context = SSLContext.getInstance("TLS")
@@ -107,21 +221,29 @@ object Tls {
                 it.soTimeout = timeoutMs
                 it.startHandshake()
             }
-            val chain = captured[0]?.toList().orEmpty()
-            val leaf = chain.firstOrNull() ?: return@runCatching null
-            CertificateProbe(
-                pin = spkiPin(leaf),
-                subject = leaf.subjectX500Principal.name,
-                issuer = leaf.issuerX500Principal.name,
-                notBefore = leaf.notBefore.time,
-                notAfter = leaf.notAfter.time,
-                subjectAlternativeNames = runCatching {
-                    leaf.subjectAlternativeNames.orEmpty().mapNotNull { it.getOrNull(1)?.toString() }
-                }.getOrDefault(emptyList()),
-                selfSigned = leaf.subjectX500Principal == leaf.issuerX500Principal,
-            )
+            val leaf = captured[0]?.firstOrNull() ?: return@runCatching null
+            probeOf(leaf)
         }.getOrNull()
     }
+
+    /** The dialog's view of [leaf]. Split out so a test can build one from a fixture. */
+    internal fun probeOf(leaf: X509Certificate): CertificateProbe = CertificateProbe(
+        pin = spkiPin(leaf),
+        subject = leaf.subjectX500Principal.name,
+        notBefore = leaf.notBefore.time,
+        notAfter = leaf.notAfter.time,
+        // DNS names (2) and IP addresses (7) only: the names a certificate can
+        // be *for*. An e-mail or URI entry must never satisfy [namesHost].
+        subjectAlternativeNames = runCatching {
+            leaf.subjectAlternativeNames.orEmpty()
+                .filter { it.getOrNull(0) == SAN_DNS || it.getOrNull(0) == SAN_IP }
+                .mapNotNull { it.getOrNull(1)?.toString() }
+        }.getOrDefault(emptyList()),
+        certificateSha256Hex = MessageDigest.getInstance("SHA-256").digest(leaf.encoded).toHex(),
+    )
+
+    private const val SAN_DNS = 2
+    private const val SAN_IP = 7
 
     /**
      * Cached per pin set, and the verifiers per (pin set, host).
@@ -172,7 +294,8 @@ object Tls {
         factory.trustManagers.filterIsInstance<X509TrustManager>().first()
     }
 
-    private class PinnedTrustManager(private val pins: Set<String>) : X509TrustManager {
+    /** `internal` only so a unit test can hand it certificate chains. */
+    internal class PinnedTrustManager(private val pins: Set<String>) : X509TrustManager {
 
         override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
             val certificates = chain?.toList().orEmpty()
@@ -193,7 +316,7 @@ object Tls {
             // under the attacker's key. Only the key that actually terminates
             // the connection may be compared against the pin set.
             if (spkiPin(leaf) !in pins) {
-                throw CertificateException(
+                throw PinMismatchException(
                     "certificate pin mismatch: the server presented a key this account has not accepted",
                 )
             }
@@ -206,7 +329,8 @@ object Tls {
         override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
     }
 
-    private class PinnedHostnameVerifier(private val expectedHost: String) : HostnameVerifier {
+    /** `internal` only so a unit test can check it. */
+    internal class PinnedHostnameVerifier(private val expectedHost: String) : HostnameVerifier {
         override fun verify(hostname: String?, session: SSLSession?): Boolean =
             hostname != null && hostname.equals(expectedHost, ignoreCase = true)
     }

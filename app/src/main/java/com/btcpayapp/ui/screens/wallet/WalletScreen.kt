@@ -40,7 +40,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -49,7 +51,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -58,6 +62,7 @@ import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.asApiException
 import com.btcpayapp.data.api.dto.LightningInvoiceData
 import com.btcpayapp.data.api.dto.LightningInvoiceStatus
@@ -88,8 +93,10 @@ import com.btcpayapp.ui.components.SkeletonRow
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.continuity
+import com.btcpayapp.ui.components.maskedIfPrivate
 import com.btcpayapp.ui.theme.AppTheme
 import com.btcpayapp.ui.theme.Motion
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,8 +108,20 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 
-private const val RECENT_TRANSACTION_LIMIT = 25
-private const val RECENT_LIGHTNING_LIMIT = 15
+/** On-chain history arrives in pages of this many rows, fetched as the list nears its end. */
+private const val TRANSACTION_PAGE = 25
+
+/**
+ * The most rows a reload asks for in one call. A reload keeps the depth the
+ * user has scrolled to, so coming back from a transaction does not throw
+ * them back to the top; past this, the rest pages in again.
+ */
+private const val TRANSACTION_RELOAD_LIMIT = 500
+
+/** How many rows before the end of the list the next page is asked for. */
+private const val TRANSACTION_PAGE_AHEAD = 5
+
+internal const val RECENT_LIGHTNING_LIMIT = 15
 
 /**
  * Which of the four screens the wallet currently is.
@@ -121,9 +140,10 @@ internal const val TAB_LIGHTNING = 1
 internal fun cryptoCodeOf(paymentMethodId: String): String = paymentMethodId.substringBefore('-')
 
 /**
- * On-chain values arrive BTC-denominated from Greenfield. Bitcoin honours the
- * user's sat/BTC preference; the altcoins BTCPay supports have no sat unit, so
- * they keep their own code.
+ * An amount in whole coins of [cryptoCode]: on-chain values arrive that way
+ * from Greenfield, and Lightning msat become it through [Amounts.msatToBtc].
+ * Bitcoin honours the user's sat/BTC preference; the altcoins BTCPay supports
+ * have no sat unit, so they keep their own code.
  */
 internal fun formatOnChain(amount: BigDecimal, cryptoCode: String, unit: BitcoinUnit): String =
     if (cryptoCode.equals("BTC", ignoreCase = true)) {
@@ -131,6 +151,46 @@ internal fun formatOnChain(amount: BigDecimal, cryptoCode: String, unit: Bitcoin
     } else {
         Amounts.format(amount, cryptoCode)
     }
+
+/**
+ * The newest paid invoices, at most [RECENT_LIGHTNING_LIMIT]. Paid first, then
+ * newest, then cut. An unpaid invoice is a request, not something that
+ * happened, and every open checkout makes one: cut first, they would fill all
+ * the slots and push out the payments that did land.
+ */
+internal fun recentPaid(invoices: List<LightningInvoiceData>): List<LightningInvoiceData> =
+    invoices
+        .filter { it.status == LightningInvoiceStatus.Paid }
+        .sortedByDescending { it.paidAt ?: it.expiresAt }
+        .take(RECENT_LIGHTNING_LIMIT)
+
+/** The balance card's figure, null when no rail is known, and whether it covers every rail. */
+internal data class BalanceHeadline(val amount: BigDecimal?, val complete: Boolean)
+
+/**
+ * [onChain] and [lightning] are null when not known: a rail that failed to
+ * load is not a rail holding nothing, and a 0 there would read as a fact.
+ * Only Bitcoin ([bitcoin]) is added across the rails: an altcoin wallet and a
+ * Lightning node are different assets, and their sum would be a made-up number.
+ * A sum with a rail missing is still worth showing, but it is not complete: a
+ * payout or refund decided from half a balance is the mistake the label prevents.
+ */
+internal fun balanceHeadline(
+    onChain: BigDecimal?,
+    lightning: BigDecimal?,
+    hasOnChain: Boolean,
+    hasLightning: Boolean,
+    bitcoin: Boolean,
+): BalanceHeadline {
+    val parts = if (bitcoin) listOfNotNull(onChain, lightning) else listOfNotNull(onChain)
+    val complete = if (bitcoin) {
+        (!hasOnChain || onChain != null) && (!hasLightning || lightning != null)
+    } else {
+        onChain != null
+    }
+    val amount = parts.takeIf { it.isNotEmpty() }?.fold(BigDecimal.ZERO) { sum, part -> sum + part }
+    return BalanceHeadline(amount, complete)
+}
 
 data class WalletState(
     val paymentMethodIds: List<String> = emptyList(),
@@ -142,20 +202,48 @@ data class WalletState(
 
     val overview: WalletOverviewData? = null,
     val transactions: List<WalletTransactionData> = emptyList(),
+    /**
+     * The last on-chain load failed, so [overview] and [transactions] are from
+     * before it, or empty. Apart from [error] because dismissing the banner
+     * does not make them current.
+     */
+    val onChainError: ApiException? = null,
+    /** True once a page came back short: the server has nothing older. */
+    val transactionsComplete: Boolean = false,
+    val loadingMoreTransactions: Boolean = false,
+    /** The next page failed. The rows already shown stay; the footer offers a retry. */
+    val moreTransactionsError: ApiException? = null,
 
-    /** Spendable channel balance, in msat. Null when the node did not answer. */
+    /**
+     * Spendable channel balance, in msat. Null when it is not known, and also
+     * while the node is not answering: the last figure it gave is not money
+     * the store can count on now, so it is never added to a total.
+     */
     val lightningLocalMsat: String? = null,
+    /** The newest paid invoices, at most [RECENT_LIGHTNING_LIMIT]. */
     val lightningInvoices: List<LightningInvoiceData> = emptyList(),
     val lightningPayments: List<LightningPaymentData> = emptyList(),
-    /** False until the Lightning tab has been opened at least once. */
+    /** False until the Lightning history loaded, and again once it is out of date. */
     val lightningHistoryLoaded: Boolean = false,
     val lightningHistoryLoading: Boolean = false,
+    /** The last history load failed. Kept apart from an empty history, which is a fact. */
+    val lightningHistoryError: ApiException? = null,
     /** The node is configured but not answering; not an error worth a banner. */
     val lightningOffline: Boolean = false,
 
     /** False when this app is certain it cannot sign for [selected]. */
     val canSpendOnChain: Boolean = true,
-    /** False when the paired key was granted without the use-node permission. */
+    /**
+     * False on a server older than [ServerVersion.SIGNED_BROADCAST]. The send
+     * flow signs first and broadcasts the reviewed transaction second, and
+     * older servers have no route for the second step.
+     */
+    val onChainSendSupported: Boolean = true,
+    /**
+     * False when the paired key cannot use the node: its grant lacks the
+     * use-node policy, or the node refused it. Such a key may still read the
+     * node's invoices, but not its balance, payments, channels or info.
+     */
     val canSpendLightning: Boolean = true,
 
     val loading: Boolean = false,
@@ -173,7 +261,17 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
 
     private val _state = MutableStateFlow(WalletState())
     val state = _state.asStateFlow()
-    private var loadJob: kotlinx.coroutines.Job? = null
+    private var loadJob: Job? = null
+    private var moreJob: Job? = null
+    private var historyJob: Job? = null
+
+    /**
+     * A next page that a reload stopped: asked for while the reload ran, or
+     * on its way when the reload began. The reload asks for it once it lands,
+     * because a list that comes back as long as before does not make the row
+     * that asked ask again. Cleared when the list itself is replaced.
+     */
+    private var pageWanted = false
 
     init {
         viewModelScope.launch {
@@ -184,6 +282,9 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                 Triple(store?.id, methods, loaded)
             }.distinctUntilChanged().collectLatest { (storeId, methods, loaded) ->
                 loadJob?.cancel()
+                moreJob?.cancel()
+                historyJob?.cancel()
+                pageWanted = false
                 val enabled = methods.filter { it.enabled }
                 val onChain = enabled
                     .map { it.paymentMethodId }
@@ -204,10 +305,16 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                         tab = if (onChain.isEmpty() && lightning != null) TAB_LIGHTNING else current.tab,
                         overview = null,
                         transactions = emptyList(),
+                        onChainError = null,
+                        transactionsComplete = false,
+                        loadingMoreTransactions = false,
+                        moreTransactionsError = null,
                         lightningLocalMsat = null,
                         lightningInvoices = emptyList(),
                         lightningPayments = emptyList(),
                         lightningHistoryLoaded = false,
+                        lightningHistoryLoading = false,
+                        lightningHistoryError = null,
                         lightningOffline = false,
                         canSpendOnChain = selected?.let(graph.session::canSpendOnChain) ?: true,
                         canSpendLightning = graph.session.canSpendLightning(),
@@ -228,6 +335,15 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
             }
         }
         viewModelScope.launch {
+            // The version arrives with `server/info`, a moment after the
+            // wallet itself, and is cached on the account for the next start.
+            graph.session.serverVersion.collect {
+                _state.update {
+                    it.copy(onChainSendSupported = graph.session.serverAtLeast(ServerVersion.SIGNED_BROADCAST))
+                }
+            }
+        }
+        viewModelScope.launch {
             // A send that the server refused to sign disables the button here
             // too, rather than only on the screen that found out.
             graph.session.unspendableMethods.collectLatest {
@@ -242,11 +358,17 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun select(paymentMethodId: String) {
         if (_state.value.selected == paymentMethodId) return
+        moreJob?.cancel()
+        pageWanted = false
         _state.update {
             it.copy(
                 selected = paymentMethodId,
                 overview = null,
                 transactions = emptyList(),
+                onChainError = null,
+                transactionsComplete = false,
+                loadingMoreTransactions = false,
+                moreTransactionsError = null,
                 canSpendOnChain = graph.session.canSpendOnChain(paymentMethodId),
             )
         }
@@ -276,27 +398,116 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
     fun dismissError() = _state.update { it.copy(error = null) }
 
     /**
+     * Reloads what is on screen each time the screen comes back: from a send,
+     * from a transaction, or from the background. Without it a send lands on
+     * the balance from before it, which reads as a send that did nothing and
+     * invites a second one. Skipped until the first load has started, and
+     * while any load runs.
+     */
+    fun onResume() {
+        val snapshot = _state.value
+        if (!snapshot.methodsKnown || snapshot.loading || snapshot.refreshing || loadJob?.isActive == true) return
+        load(resumed = true)
+    }
+
+    /**
+     * The next page of on-chain history, when the list nears its end. Not
+     * while a reload runs: the reload rebuilds the list the page would extend,
+     * so the request waits for it in [pageWanted].
+     */
+    fun loadMoreTransactions() {
+        if (loadJob?.isActive == true) {
+            pageWanted = true
+            return
+        }
+        fetchNextPage()
+    }
+
+    /**
+     * Paged by position, so a transaction that arrives meanwhile shifts the
+     * server's list by one and the next page repeats a row; rows are
+     * de-duplicated by hash for that reason. A page shorter than asked for is
+     * the end.
+     */
+    private fun fetchNextPage() {
+        val snapshot = _state.value
+        val paymentMethodId = snapshot.selected ?: return
+        val storeId = graph.session.activeStore.value?.id ?: return
+        if (snapshot.transactionsComplete || snapshot.transactions.isEmpty()) return
+        if (moreJob?.isActive == true) return
+        moreJob = viewModelScope.launch {
+            _state.update { it.copy(loadingMoreTransactions = true, moreTransactionsError = null) }
+            runCatching {
+                graph.session.requireApi().walletTransactions(
+                    storeId = storeId,
+                    paymentMethodId = paymentMethodId,
+                    skip = snapshot.transactions.size,
+                    limit = TRANSACTION_PAGE,
+                )
+            }.onSuccess { page ->
+                _state.update { current ->
+                    current.copy(
+                        transactions = (current.transactions + page).distinctBy { it.transactionHash ?: it },
+                        transactionsComplete = page.size < TRANSACTION_PAGE,
+                        loadingMoreTransactions = false,
+                    )
+                }
+            }.onFailure { failure ->
+                val error = failure.asApiException()
+                _state.update { it.copy(loadingMoreTransactions = false, moreTransactionsError = error) }
+            }
+        }
+    }
+
+    /** Retry for a failed Lightning history load. */
+    fun reloadLightningHistory() = loadLightningHistory()
+
+    /**
      * Loads both rails together.
      *
      * The on-chain wallet and the Lightning node are separate subsystems on the
      * server and fail separately — a node that is down must not blank the
      * on-chain balance, and a store with no on-chain wallet must still show its
      * channels. So every call is independent and its failure is local.
+     *
+     * [resumed] is a return to the screen, which reloads the Lightning
+     * history only when the node's balance moved.
      */
-    private fun load(refreshing: Boolean = false) {
+    private fun load(refreshing: Boolean = false, resumed: Boolean = false) {
         val storeId = graph.session.activeStore.value?.id ?: return
         val snapshot = _state.value
         val paymentMethodId = snapshot.selected
         val lightningCode = snapshot.lightningCryptoCode
         if (paymentMethodId == null && lightningCode == null) return
+        // As deep as the list already goes, so a reload does not cut it back
+        // to one page under the reader's thumb.
+        val depth = snapshot.transactions.size.coerceIn(TRANSACTION_PAGE, TRANSACTION_RELOAD_LIMIT)
+        // Not asked of a key that cannot use the node: the server refuses it.
+        // A pull-to-refresh asks again whatever the last answer was, because a
+        // refusal can go away: a proxy's 403, or a role the admin gives back.
+        val nodeAllowed = if (refreshing) graph.session.canSpendLightning() else snapshot.canSpendLightning
+        val nodeCode = lightningCode?.takeIf { nodeAllowed }
+        val lightningBefore = snapshot.lightningLocalMsat
+        // A page on its way is dropped here and asked for again once the
+        // reload lands.
+        if (moreJob?.isActive == true) pageWanted = true
 
         loadJob?.cancel()
+        moreJob?.cancel()
         loadJob = viewModelScope.launch {
             _state.update {
                 it.copy(
-                    loading = !refreshing && it.overview == null && it.lightningLocalMsat == null,
+                    // Not for a node already known to be offline: its balance
+                    // is null by design, and a reload on return must not blank
+                    // the screen for as long as the node takes to time out.
+                    // Nor for a Lightning-only store whose node this key
+                    // cannot read: its balance never arrives.
+                    loading = !refreshing && it.overview == null && it.lightningLocalMsat == null &&
+                        !it.lightningOffline && (it.hasOnChain || it.canSpendLightning),
                     refreshing = refreshing,
                     error = null,
+                    loadingMoreTransactions = false,
+                    moreTransactionsError = null,
                 )
             }
 
@@ -315,14 +526,14 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                             val transactions = api.walletTransactions(
                                 storeId = storeId,
                                 paymentMethodId = it,
-                                limit = RECENT_TRANSACTION_LIMIT,
+                                limit = depth,
                             )
                             overview to transactions
                         }
                     }
                 }
                 val balance = async {
-                    lightningCode?.let {
+                    nodeCode?.let {
                         runCatching { api.lightningBalance(LightningScope.Store(storeId), it) }
                     }
                 }
@@ -335,14 +546,22 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                 // gets a quiet line in the Lightning tab instead.
                 val onChainError = onChainResult?.exceptionOrNull()?.asApiException()
                 val nodeError = balanceResult?.exceptionOrNull()?.asApiException()
+                // Refused is not offline: the node may be fine, and the server
+                // will not let this key use it, whatever its grant said.
+                val nodeRefused = nodeError is ApiException.Forbidden
 
+                val page = onChainResult?.getOrNull()?.second
                 _state.update { current ->
                     current.copy(
                         overview = onChainResult?.getOrNull()?.first ?: current.overview,
-                        transactions = onChainResult?.getOrNull()?.second ?: current.transactions,
-                        lightningLocalMsat = balanceResult?.getOrNull()?.offchain?.local
-                            ?: current.lightningLocalMsat,
-                        lightningOffline = nodeError != null,
+                        transactions = page ?: current.transactions,
+                        onChainError = onChainError,
+                        transactionsComplete = page?.let { it.size < depth } ?: current.transactionsComplete,
+                        // No offchain block on an answer means no channels,
+                        // which is a balance of zero. No answer is unknown.
+                        lightningLocalMsat = balanceResult?.getOrNull()?.let { it.offchain?.local ?: "0" },
+                        lightningOffline = nodeError != null && !nodeRefused,
+                        canSpendLightning = nodeAllowed && !nodeRefused,
                         loading = false,
                         refreshing = false,
                         error = onChainError,
@@ -350,41 +569,72 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                 }
             }
 
-            // Kept fresh once it has been looked at, so pull-to-refresh on the
-            // Lightning tab does what it says.
-            if (_state.value.lightningHistoryLoaded || _state.value.tab == TAB_LIGHTNING) {
-                loadLightningHistory()
+            if (pageWanted) {
+                pageWanted = false
+                fetchNextPage()
+            }
+
+            // Reloaded only when it is on screen, so pull-to-refresh on the
+            // Lightning tab does what it says. Elsewhere it is marked out of
+            // date and reloads when the tab opens. On a return to the screen
+            // only when the balance moved: on some nodes the history is the
+            // whole invoice list, too much to fetch on every return. A key
+            // that cannot read the balance has no such sign, so it reloads.
+            val loaded = _state.value
+            val moved = !resumed || !loaded.canSpendLightning || loaded.lightningLocalMsat != lightningBefore
+            if (loaded.effectiveTab == TAB_LIGHTNING) {
+                if (moved || !loaded.lightningHistoryLoaded) loadLightningHistory()
+            } else if (moved) {
+                _state.update { it.copy(lightningHistoryLoaded = false) }
             }
         }
     }
 
+    /**
+     * The node's own invoice and payment lists, which is all Greenfield
+     * offers here, and neither can be paged: LND answers with its *oldest*
+     * page and Core Lightning with its whole list. So the screen says whose
+     * list it is, and a failure (a slow node, or an answer over the size
+     * cap) is shown as a failure rather than as "nothing has moved".
+     */
     private fun loadLightningHistory() {
         val storeId = graph.session.activeStore.value?.id ?: return
         val cryptoCode = _state.value.lightningCryptoCode ?: return
-        viewModelScope.launch {
+        historyJob?.cancel()
+        historyJob = viewModelScope.launch {
             _state.update { it.copy(lightningHistoryLoading = true) }
-            val api = runCatching { graph.session.requireApi() }.getOrElse {
-                _state.update { it.copy(lightningHistoryLoading = false) }
+            val api = runCatching { graph.session.requireApi() }.getOrElse { failure ->
+                _state.update {
+                    it.copy(lightningHistoryLoading = false, lightningHistoryError = failure.asApiException())
+                }
                 return@launch
             }
             val scope = LightningScope.Store(storeId)
+            // A key that cannot use the node may read its invoices, but is
+            // refused its payments, so it is not asked for them.
+            val readPayments = _state.value.canSpendLightning
             val (invoices, payments) = coroutineScope {
                 val a = async { runCatching { api.lightningInvoices(scope = scope, cryptoCode = cryptoCode) } }
-                val b = async { runCatching { api.lightningPayments(scope = scope, cryptoCode = cryptoCode) } }
+                val b = async {
+                    if (readPayments) {
+                        runCatching { api.lightningPayments(scope = scope, cryptoCode = cryptoCode) }
+                    } else {
+                        Result.success(emptyList<LightningPaymentData>())
+                    }
+                }
                 a.await() to b.await()
             }
+            val failure = (invoices.exceptionOrNull() ?: payments.exceptionOrNull())?.asApiException()
             _state.update { current ->
                 current.copy(
-                    lightningInvoices = invoices.getOrNull()
-                        ?.sortedByDescending { it.paidAt ?: it.expiresAt }
-                        ?.take(RECENT_LIGHTNING_LIMIT)
-                        ?: current.lightningInvoices,
+                    lightningInvoices = invoices.getOrNull()?.let(::recentPaid) ?: current.lightningInvoices,
                     lightningPayments = payments.getOrNull()
                         ?.sortedByDescending { it.createdAt ?: 0L }
                         ?.take(RECENT_LIGHTNING_LIMIT)
                         ?: current.lightningPayments,
                     lightningHistoryLoaded = true,
                     lightningHistoryLoading = false,
+                    lightningHistoryError = failure,
                 )
             }
         }
@@ -407,9 +657,14 @@ fun WalletScreen(
     val selected = state.selected
     val tab = state.effectiveTab
 
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
+
     // Hoisted above the list, so `substringBefore` does not re-run for every
     // row on every recomposition.
     val txCryptoCode = remember(selected) { cryptoCodeOf(selected.orEmpty()) }
+    // The node's own screens read its info and channels, which a key that
+    // cannot use the node is refused; they are not offered to it.
+    val nodeCode = state.lightningCryptoCode?.takeIf { state.canSpendLightning }
 
     AppScreen(
         title = "Wallet",
@@ -419,7 +674,7 @@ fun WalletScreen(
             var menuOpen by remember { mutableStateOf(false) }
             IconButton(
                 onClick = { menuOpen = true },
-                enabled = selected != null || state.hasLightning,
+                enabled = selected != null || nodeCode != null,
             ) {
                 Icon(Icons.Rounded.MoreVert, contentDescription = "More")
             }
@@ -433,7 +688,7 @@ fun WalletScreen(
                         },
                     )
                 }
-                state.lightningCryptoCode?.let { code ->
+                nodeCode?.let { code ->
                     DropdownMenuItem(
                         text = { Text("Lightning node") },
                         onClick = {
@@ -533,7 +788,7 @@ fun WalletScreen(
                     // than a trip back to here.
                     item {
                         ActionRow(
-                            canSend = (state.hasOnChain && state.canSpendOnChain) ||
+                            canSend = (state.hasOnChain && state.canSpendOnChain && state.onChainSendSupported) ||
                                 (state.hasLightning && state.canSpendLightning),
                             onReceive = {
                                 if (tab == TAB_LIGHTNING) {
@@ -554,30 +809,41 @@ fun WalletScreen(
                     // the rows below it down — it can only replace one of them.
                     item {
                         CapabilityNote(
+                            visible = tab == TAB_ON_CHAIN && state.hasOnChain && !state.onChainSendSupported,
+                            text = "Sending from the app needs BTCPay Server ${ServerVersion.SIGNED_BROADCAST} or later.",
+                        )
+                    }
+                    item {
+                        CapabilityNote(
                             visible = tab == TAB_ON_CHAIN && !state.canSpendOnChain,
-                            title = "Watch only",
-                            detail = "the server will not sign for this wallet",
+                            text = "Watch only · the server will not sign for this wallet",
                         )
                     }
                     item {
                         CapabilityNote(
                             visible = tab == TAB_LIGHTNING && !state.canSpendLightning,
-                            title = "Read only",
-                            detail = "this app\u2019s key cannot use the node",
+                            text = "Read only · this app\u2019s key cannot use the node",
                         )
                     }
 
                     if (tab == TAB_LIGHTNING) {
-                        lightningActivity(state, unit)
+                        lightningActivity(state, unit, onRetry = viewModel::reloadLightningHistory)
                         // The node's own screens — channels, peers, addresses —
                         // are an operator's tools rather than a merchant's, so
                         // they sit at the end of the history instead of above
                         // it. The overflow menu reaches them without scrolling.
-                        state.lightningCryptoCode?.let { code ->
+                        nodeCode?.let { code ->
                             item { ManageNodeRow(onClick = { onOpenLightning(code) }) }
                         }
                     } else {
-                        onChainActivity(state, txCryptoCode, selected, onOpenTransaction)
+                        onChainActivity(
+                            state = state,
+                            cryptoCode = txCryptoCode,
+                            selected = selected,
+                            onOpenTransaction = onOpenTransaction,
+                            onLoadMore = viewModel::loadMoreTransactions,
+                            onRetry = viewModel::refresh,
+                        )
                     }
 
                     item { Spacer(Modifier.height(24.dp)) }
@@ -603,38 +869,31 @@ fun WalletScreen(
 @Composable
 private fun BalanceCard(state: WalletState, cryptoCode: String, unit: BitcoinUnit) {
     val bitcoin = cryptoCode.equals("BTC", ignoreCase = true) || !state.hasOnChain
-    val onChainBtc = state.overview?.balance
+    val onChainBtc = state.overview?.balance?.takeIf { state.hasOnChain }
     val lightningBtc = state.lightningLocalMsat?.let(Amounts::msatToBtc)
+    val headline = balanceHeadline(onChainBtc, lightningBtc, state.hasOnChain, state.hasLightning, bitcoin)
 
     AppCard {
         Column(Modifier.padding(20.dp)) {
             Text(
-                text = "Total balance",
+                text = if (headline.complete) "Total balance" else "Partial balance",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(6.dp))
 
-            // Only Bitcoin can be totalled across the two rails. An altcoin
-            // on-chain wallet and a Lightning node are different assets, and
-            // adding them would be a made-up number.
-            //
             // The one figure in the app that changes while somebody is looking
             // at it, so it is also the one that rolls rather than redraws: a
             // payment landing at the counter should be visible as the number
             // moving, and the direction it moves in is the answer to the only
             // question being asked.
-            if (bitcoin) {
-                AmountText(
-                    amount = (onChainBtc ?: BigDecimal.ZERO) + (lightningBtc ?: BigDecimal.ZERO),
-                    currency = "BTC",
-                    style = MaterialTheme.typography.headlineMedium,
-                    animated = true,
-                )
+            val total = headline.amount
+            if (total == null) {
+                Text(text = "\u2014", style = MaterialTheme.typography.headlineMedium)
             } else {
                 AmountText(
-                    amount = onChainBtc ?: BigDecimal.ZERO,
-                    currency = cryptoCode,
+                    amount = total,
+                    currency = if (bitcoin) "BTC" else cryptoCode,
                     style = MaterialTheme.typography.headlineMedium,
                     animated = true,
                 )
@@ -645,7 +904,7 @@ private fun BalanceCard(state: WalletState, cryptoCode: String, unit: BitcoinUni
                 if (state.hasOnChain) {
                     RailFigure(
                         label = "On-chain",
-                        value = formatOnChain(onChainBtc ?: BigDecimal.ZERO, cryptoCode, unit),
+                        value = onChainBtc?.let { maskedIfPrivate(formatOnChain(it, cryptoCode, unit)) } ?: "\u2014",
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -654,12 +913,24 @@ private fun BalanceCard(state: WalletState, cryptoCode: String, unit: BitcoinUni
                         label = "Lightning",
                         value = when {
                             state.lightningOffline -> "Node offline"
-                            lightningBtc != null -> Amounts.formatBitcoin(lightningBtc, unit)
-                            else -> "—"
+                            lightningBtc != null -> maskedIfPrivate(Amounts.formatBitcoin(lightningBtc, unit))
+                            !state.canSpendLightning -> "No access"
+                            else -> "\u2014"
                         },
                         modifier = Modifier.weight(1f),
                     )
                 }
+            }
+
+            // A failed reload keeps the figure from before it. The banner that
+            // says so can be dismissed; this line stays until a reload works.
+            if (state.onChainError != null && onChainBtc != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "On-chain balance not up to date",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             // Unconfirmed is the one on-chain figure that changes a decision:
@@ -673,7 +944,7 @@ private fun BalanceCard(state: WalletState, cryptoCode: String, unit: BitcoinUni
             // the good news it is.
             val note = remember { mutableStateOf("") }
             if (unconfirmed != null) {
-                note.value = "${formatOnChain(unconfirmed, cryptoCode, unit)} still unconfirmed"
+                note.value = "${maskedIfPrivate(formatOnChain(unconfirmed, cryptoCode, unit))} still unconfirmed"
             }
 
             AnimatedVisibility(
@@ -752,11 +1023,28 @@ private fun LazyListScope.onChainActivity(
     cryptoCode: String,
     selected: String?,
     onOpenTransaction: (String, String) -> Unit,
+    onLoadMore: () -> Unit,
+    onRetry: () -> Unit,
 ) {
     if (state.transactions.isEmpty()) {
-        item { ActivityEmpty("Nothing has moved through this wallet yet.") }
+        // An empty list after a failed load is not known to be empty, and
+        // "nothing has moved" would read as "no payment arrived".
+        val failure = state.onChainError
+        item {
+            if (failure != null) {
+                ActivityError(message = "Could not load transactions.", error = failure, onRetry = onRetry)
+            } else {
+                ActivityEmpty("Nothing has moved through this wallet yet.")
+            }
+        }
         return
     }
+    // The row a few before the last one asks for the next page as it comes
+    // into view, so the footer rows below never trigger it. Keyed on the
+    // count, so each page asks once; a reload that stops a page asks for it
+    // again itself.
+    val count = state.transactions.size
+    val trigger = (count - TRANSACTION_PAGE_AHEAD).coerceAtLeast(0)
     // Keyed on the transaction hash so a refresh moves rows rather than
     // discarding and re-measuring every visible one, which would make the
     // balance list jump and lose scroll position on every pull-to-refresh. The
@@ -766,6 +1054,9 @@ private fun LazyListScope.onChainActivity(
         count = state.transactions.size,
         key = { index -> state.transactions[index].transactionHash ?: "row-$index" },
     ) { index ->
+        if (index == trigger && !state.transactionsComplete) {
+            LaunchedEffect(count) { onLoadMore() }
+        }
         val transaction = state.transactions[index]
         // The row and its divider are one moving object. Animating the row
         // alone would leave the line it sits on behind, which reads as the
@@ -788,6 +1079,18 @@ private fun LazyListScope.onChainActivity(
             ThinDivider()
         }
     }
+    when {
+        state.loadingMoreTransactions -> item(key = "tx-more") {
+            SkeletonRow(Modifier.padding(horizontal = 16.dp, vertical = 14.dp))
+        }
+        state.moreTransactionsError != null -> item(key = "tx-more-error") {
+            ActivityError(
+                message = "Could not load older transactions.",
+                error = state.moreTransactionsError,
+                onRetry = onLoadMore,
+            )
+        }
+    }
 }
 
 /**
@@ -798,24 +1101,41 @@ private fun LazyListScope.onChainActivity(
  * interleaving them by time is the only way "what happened this afternoon"
  * reads as one answer.
  */
-private fun LazyListScope.lightningActivity(state: WalletState, unit: BitcoinUnit) {
+private fun LazyListScope.lightningActivity(state: WalletState, unit: BitcoinUnit, onRetry: () -> Unit) {
     if (state.lightningOffline) {
         item { ActivityEmpty("The node is not answering. Its balance and history will appear once it is up.") }
         return
     }
 
     val rows = lightningRows(state)
+    val failed = state.lightningHistoryError != null && !state.lightningHistoryLoading
+    if (failed) {
+        // Above any rows it did keep: those are from an earlier load, and a
+        // failure must not read as "this is everything".
+        item(key = "ln-error") {
+            ActivityError(
+                message = "Could not load Lightning payments.",
+                error = state.lightningHistoryError,
+                onRetry = onRetry,
+            )
+        }
+    }
     if (rows.isEmpty()) {
         // The node's history is two more round trips, often over Tor, so the
         // wait is long enough to be worth describing. Rows in outline say what
         // is coming and hold the space it will take; the word "Loading" would
         // say only that something was happening somewhere.
-        if (state.lightningHistoryLoading || !state.lightningHistoryLoaded) {
-            items(count = 3, key = { "ln-skeleton-$it" }) {
-                SkeletonRow(Modifier.padding(horizontal = 16.dp, vertical = 14.dp))
+        when {
+            // The line above already says it; "nothing has moved" would not be true.
+            failed -> Unit
+            state.lightningHistoryLoading || !state.lightningHistoryLoaded ->
+                items(count = 3, key = { "ln-skeleton-$it" }) {
+                    SkeletonRow(Modifier.padding(horizontal = 16.dp, vertical = 14.dp))
+                }
+            else -> {
+                item { ActivityEmpty("Nothing has moved over Lightning yet.") }
+                item(key = "ln-source") { LightningSourceNote() }
             }
-        } else {
-            item { ActivityEmpty("Nothing has moved over Lightning yet.") }
         }
         return
     }
@@ -831,6 +1151,23 @@ private fun LazyListScope.lightningActivity(state: WalletState, unit: BitcoinUni
             ThinDivider()
         }
     }
+    item(key = "ln-source") { LightningSourceNote() }
+}
+
+/**
+ * Whose list this is. Greenfield can only relay the node's own invoice list,
+ * and LND sends its oldest page of it, so on a busy node the newest payments
+ * can be missing here. Invoices is the store's own record of every payment.
+ */
+@Composable
+private fun LightningSourceNote() {
+    Text(
+        text = "Listed by your Lightning node. Some nodes send only their oldest invoices, " +
+            "so recent ones can be missing. The store's Invoices screen lists every store payment.",
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /** One row of Lightning history, from either collection. */
@@ -846,10 +1183,8 @@ private data class LightningActivity(
 )
 
 private fun lightningRows(state: WalletState): List<LightningActivity> {
+    // Already only paid invoices: see WalletViewModel.loadLightningHistory.
     val invoices = state.lightningInvoices
-        // An unpaid invoice is a request, not something that happened. Showing
-        // every expired one would bury the payments that did land.
-        .filter { it.status == LightningInvoiceStatus.Paid }
         .map { invoice ->
             LightningActivity(
                 key = "in:${invoice.paymentHash.ifBlank { invoice.BOLT11 }}",
@@ -936,7 +1271,7 @@ private fun LightningRow(row: LightningActivity, unit: BitcoinUnit) {
         }
         Spacer(Modifier.width(12.dp))
         Text(
-            text = if (row.amountMsat.isNullOrBlank()) "—" else Amounts.formatMsat(row.amountMsat, unit),
+            text = if (row.amountMsat.isNullOrBlank()) "—" else maskedIfPrivate(Amounts.formatMsat(row.amountMsat, unit)),
             style = MaterialTheme.typography.titleMedium,
             color = if (row.incoming) colors.incoming else MaterialTheme.colorScheme.onSurface,
             maxLines = 1,
@@ -952,7 +1287,7 @@ private fun LightningRow(row: LightningActivity, unit: BitcoinUnit) {
  * that the button above is off on purpose.
  */
 @Composable
-private fun CapabilityNote(visible: Boolean, title: String, detail: String) {
+private fun CapabilityNote(visible: Boolean, text: String) {
     AnimatedVisibility(
         visible = visible,
         enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
@@ -970,7 +1305,7 @@ private fun CapabilityNote(visible: Boolean, title: String, detail: String) {
             )
             Spacer(Modifier.width(10.dp))
             Text(
-                text = "$title · $detail",
+                text = text,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -1015,6 +1350,29 @@ private fun ActivityEmpty(message: String) {
         style = MaterialTheme.typography.bodyMedium,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
+}
+
+/**
+ * A load that failed inside the list, with its reason and a retry. Quieter
+ * than the banner at the top, which belongs to the balance: the rows above
+ * or below it are still worth reading.
+ */
+@Composable
+private fun ActivityError(message: String, error: ApiException?, onRetry: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp, top = 16.dp, bottom = 4.dp)) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        error?.let {
+            Text(
+                text = it.userMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onRetry) { Text("Try again") }
+    }
 }
 
 @Composable

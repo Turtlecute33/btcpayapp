@@ -46,6 +46,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.dto.CreateStoreRequest
 import com.btcpayapp.data.api.dto.StoreData
 import com.btcpayapp.data.api.endpoints.createStore
 import com.btcpayapp.ui.appViewModel
@@ -62,6 +64,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.Locale
 
 /**
  * Picks the store the rest of the app works against.
@@ -69,6 +72,9 @@ import kotlinx.coroutines.launch
  * The list is the session's copy rather than a fresh fetch: the session already
  * keeps it current, and re-reading it here would make switching stores feel
  * slower than it is.
+ *
+ * A switch can be refused (a payment is still in flight) or fail to save, so
+ * the screen leaves only when the switch happened, and says why otherwise.
  */
 data class StoreListState(
     val stores: List<StoreData> = emptyList(),
@@ -77,6 +83,7 @@ data class StoreListState(
     val creating: Boolean = false,
     val showCreate: Boolean = false,
     val error: ApiException? = null,
+    val message: String? = null,
     val done: Boolean = false,
 )
 
@@ -109,8 +116,8 @@ class StoreListViewModel(private val graph: AppGraph) : ViewModel() {
             return
         }
         viewModelScope.launch {
-            graph.session.selectStore(storeId)
-            _state.update { it.copy(done = true) }
+            val problem = graph.session.selectStore(storeId)
+            _state.update { if (problem == null) it.copy(done = true) else it.copy(message = problem) }
         }
     }
 
@@ -118,26 +125,27 @@ class StoreListViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
+    fun clearMessage() = _state.update { it.copy(message = null) }
+
     fun create(name: String, currency: String) {
+        if (currencyProblem(currency) != null) return
         viewModelScope.launch {
             _state.update { it.copy(creating = true, error = null) }
             runCatching {
+                // Name and currency only: the server lays the request over the
+                // admin's default store template, and every value sent wins.
                 graph.session.requireApi().createStore(
-                    StoreData(name = name.trim(), defaultCurrency = currency.trim().uppercase()),
+                    CreateStoreRequest(name = name.trim(), defaultCurrency = currency.trim().uppercase(Locale.ROOT)),
                 )
             }.onSuccess { created ->
                 graph.session.refresh()
                 // A new store is almost always the one you want to work in next.
-                graph.session.selectStore(created.id)
-                _state.update { it.copy(creating = false, showCreate = false, done = true) }
-            }.onFailure { failure ->
+                val problem = graph.session.selectStore(created.id)
                 _state.update {
-                    it.copy(
-                        creating = false,
-                        error = failure as? ApiException
-                            ?: ApiException.Transport(failure.message ?: "Unexpected failure"),
-                    )
+                    it.copy(creating = false, showCreate = false, done = problem == null, message = problem)
                 }
+            }.onFailure { failure ->
+                _state.update { it.copy(creating = false, error = failure.asApiException()) }
             }
         }
     }
@@ -149,8 +157,17 @@ fun StoreListScreen(onBack: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // onBack, not a pop: the switch drops this screen, and this can still run
+    // while it leaves, when only the shell's guarded back is safe.
     LaunchedEffect(state.done) {
         if (state.done) onBack()
+    }
+
+    LaunchedEffect(state.message) {
+        state.message?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.clearMessage()
+        }
     }
 
     AppScreen(
@@ -267,6 +284,7 @@ private fun CreateStoreDialog(
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var currency by rememberSaveable { mutableStateOf("USD") }
+    val currencyError = currency.takeIf { it.isNotBlank() }?.let(::currencyProblem)
 
     AlertDialog(
         onDismissRequest = { if (!busy) onDismiss() },
@@ -282,16 +300,17 @@ private fun CreateStoreDialog(
                 FormField(
                     label = "Default currency",
                     value = currency,
-                    onValueChange = { currency = it.uppercase() },
+                    onValueChange = { currency = it.uppercase(Locale.ROOT) },
                     enabled = !busy,
                     supportingText = "Everything else can be changed afterwards.",
+                    error = currencyError,
                 )
             }
         },
         confirmButton = {
             TextButton(
                 onClick = { onCreate(name, currency) },
-                enabled = !busy && name.isNotBlank() && currency.isNotBlank(),
+                enabled = !busy && name.isNotBlank() && currencyProblem(currency) == null,
             ) {
                 AnimatedSwap(busy, label = "create") { working ->
                     if (working) {

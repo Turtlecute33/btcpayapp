@@ -34,6 +34,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -50,11 +52,13 @@ import com.btcpayapp.data.api.dto.WalletTransactionData
 import com.btcpayapp.data.api.dto.WalletTransactionStatus
 import com.btcpayapp.data.api.endpoints.patchTransaction
 import com.btcpayapp.data.api.endpoints.walletTransaction
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.chainSubtitle
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
 import com.btcpayapp.ui.components.BigAmount
+import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.CopyableField
 import com.btcpayapp.ui.components.DetailRow
 import com.btcpayapp.ui.components.ErrorBanner
@@ -105,11 +109,28 @@ class TransactionDetailViewModel(
     private val transactionId: String,
 ) : ViewModel() {
 
+    /**
+     * The store this screen was opened in (see [StoreBinding]), so a save can
+     * only ever label the transaction on screen. The shell drops the screen
+     * when the store changes.
+     */
+    private val store = StoreBinding(graph.session)
+    private val storeId: String? get() = store.id
+
+    /**
+     * An account reached as an .onion host or through a proxy (usually Tor)
+     * hides the phone's address. The browser does not take that route, so an
+     * explorer link asks first. The account cannot change under an open
+     * screen: an account switch rebuilds every screen.
+     */
+    val privateRoute: Boolean = graph.session.activeAccount.value?.let { it.isOnion || it.proxy != null } == true
+
     private val _state = MutableStateFlow(TransactionDetailState())
     val state = _state.asStateFlow()
 
     init {
         load(refreshing = false)
+        store.retryWhenKnown(viewModelScope) { load(refreshing = false) }
     }
 
     fun refresh() = load(refreshing = true)
@@ -134,7 +155,7 @@ class TransactionDetailViewModel(
     fun consumeMessage() = _state.update { it.copy(message = null) }
 
     private fun load(refreshing: Boolean) {
-        val storeId = graph.session.activeStore.value?.id ?: return
+        val storeId = storeId ?: return fail(ApiException.NoAccount())
         viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.transaction == null, refreshing = refreshing, error = null)
@@ -158,7 +179,7 @@ class TransactionDetailViewModel(
     }
 
     fun save() {
-        val storeId = graph.session.activeStore.value?.id ?: return
+        val storeId = storeId ?: return fail(ApiException.NoAccount())
         val snapshot = _state.value
         if (snapshot.saving) return
 
@@ -214,6 +235,25 @@ fun TransactionDetailScreen(
     val guardedBack = com.btcpayapp.ui.components.confirmDiscardChanges(state.dirty, onBack)
     val cryptoCode = remember(paymentMethodId) { cryptoCodeOf(paymentMethodId) }
     val explorer = remember(cryptoCode, transactionId) { mempoolUrl(cryptoCode, transactionId) }
+    var confirmExplorer by rememberSaveable { mutableStateOf(false) }
+    val openExplorer = { explorer?.let { context.safeStartActivity(Intent(Intent.ACTION_VIEW, Uri.parse(it))) } }
+
+    // The explorer is on the normal internet. For an account reached as an
+    // .onion host or through a proxy, that is the one request that would tie
+    // this transaction to the phone's address, so it is said before it happens.
+    if (confirmExplorer) {
+        ConfirmDialog(
+            title = "View in explorer",
+            message = "This opens mempool.space over the normal internet. " +
+                "It learns this transaction id and your IP address. Open anyway?",
+            confirmLabel = "Open",
+            onConfirm = {
+                confirmExplorer = false
+                openExplorer()
+            },
+            onDismiss = { confirmExplorer = false },
+        )
+    }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -235,7 +275,7 @@ fun TransactionDetailScreen(
                 // device's IP — to a third party that has nothing to do with the
                 // user's own server. It is therefore always an explicit tap and
                 // never a lookup the screen performs by itself.
-                IconButton(onClick = { context.safeStartActivity(Intent(Intent.ACTION_VIEW, Uri.parse(explorer))) }) {
+                IconButton(onClick = { if (viewModel.privateRoute) confirmExplorer = true else openExplorer() }) {
                     Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = "View in explorer")
                 }
             }
@@ -423,7 +463,9 @@ fun TransactionDetailScreen(
 
 /**
  * Only Bitcoin gets an explorer link: mempool.space does not index the other
- * chains BTCPay supports, and a guessed URL is worse than no button.
+ * chains BTCPay supports, and a guessed URL is worse than no button. The link
+ * is mainnet's: Greenfield does not say which network a server runs, so on a
+ * testnet or signet server the page finds nothing.
  */
 private fun mempoolUrl(cryptoCode: String, transactionId: String): String? =
     if (cryptoCode.equals("BTC", ignoreCase = true)) {

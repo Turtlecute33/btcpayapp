@@ -2,6 +2,7 @@ package com.btcpayapp.core.pairing
 
 import com.btcpayapp.core.crypto.Keystore
 import com.btcpayapp.core.util.Log
+import com.btcpayapp.core.util.toHex
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -16,9 +17,11 @@ import java.util.concurrent.atomic.AtomicReference
 import java.io.BufferedInputStream
 import java.io.Closeable
 import java.io.IOException
+import java.io.InputStream
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.net.URLDecoder
 
 /**
@@ -44,6 +47,9 @@ import java.net.URLDecoder
  *    cannot read the response.
  *  - Request size and header count are capped, so a local process cannot use it
  *    to exhaust memory.
+ *  - Each connection gets [CONNECTION_DEADLINE_MS] in total and the backlog
+ *    holds [BACKLOG] more, so a local app that trickles bytes cannot hold the
+ *    listener for the whole window and keep the browser's POST out.
  *  - Only `POST` to the nonce path is answered; everything else gets a 404 and
  *    the listener keeps waiting.
  */
@@ -108,10 +114,9 @@ class PairingReceiver private constructor(
             Log.w("PairingReceiver") { "rejected a non-loopback connection" }
             return null
         }
-        socket.soTimeout = SOCKET_TIMEOUT_MS
-
         return try {
-            val input = BufferedInputStream(socket.getInputStream())
+            val deadline = System.nanoTime() + CONNECTION_DEADLINE_MS * 1_000_000
+            val input = BufferedInputStream(DeadlineInputStream(socket, deadline))
             val requestLine = input.readLine(MAX_LINE) ?: return null
             val parts = requestLine.split(' ')
             if (parts.size < 2) {
@@ -235,14 +240,19 @@ class PairingReceiver private constructor(
 
     companion object {
         const val DEFAULT_TIMEOUT_MS = 5 * 60 * 1000L
-        private const val SOCKET_TIMEOUT_MS = 15_000
+
+        /** For the whole request. A browser on loopback sends it in milliseconds. */
+        private const val CONNECTION_DEADLINE_MS = 5_000L
+
+        /** Room for the browser's POST behind a stalled or preconnected socket. */
+        private const val BACKLOG = 8
         private const val MAX_LINE = 8 * 1024
         private const val MAX_HEADERS = 64
         private const val MAX_BODY = 64 * 1024
 
         fun open(): PairingReceiver {
             val nonce = Keystore.randomBytes(32).toHex()
-            val socket = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            val socket = ServerSocket(0, BACKLOG, InetAddress.getByName("127.0.0.1"))
             return PairingReceiver(socket, nonce)
         }
 
@@ -276,7 +286,39 @@ data class ApiKeyGrant(
         get() = permissions.mapNotNull { it.substringAfter(':', "").takeIf(String::isNotBlank) }.distinct()
 }
 
-private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+/**
+ * Reads [socket] with a total [deadlineNanos] (from [System.nanoTime]). A plain
+ * `soTimeout` bounds each read only, so a peer sending one byte every few
+ * seconds could keep a connection open for as long as it liked. Before each
+ * read the timeout is set to the time left; once none is left the read fails
+ * with a [SocketTimeoutException], which the handler treats as a failed
+ * connection.
+ */
+private class DeadlineInputStream(
+    private val socket: Socket,
+    private val deadlineNanos: Long,
+) : InputStream() {
+
+    private val input = socket.getInputStream()
+
+    private fun arm() {
+        val leftMs = (deadlineNanos - System.nanoTime()) / 1_000_000
+        // Never 0: to a socket, 0 means wait forever.
+        if (leftMs <= 0) throw SocketTimeoutException("request took too long")
+        socket.soTimeout = leftMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    override fun read(): Int {
+        arm()
+        return input.read()
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        arm()
+        return input.read(b, off, len)
+    }
+}
 
 /** Reads a CRLF-terminated line, refusing to grow past [limit] bytes. */
 private fun BufferedInputStream.readLine(limit: Int): String? {

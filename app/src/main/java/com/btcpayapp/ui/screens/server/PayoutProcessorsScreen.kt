@@ -31,6 +31,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -40,11 +41,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
@@ -78,13 +83,15 @@ import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.maskedIfPrivate
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.afterSpendGate
+import com.btcpayapp.data.session.StoreBinding
+import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
 import com.btcpayapp.ui.theme.Motion
 import java.math.BigDecimal
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -108,6 +115,46 @@ enum class ProcessorKind { Lightning, OnChain }
 private fun displayInterval(seconds: Int): String = java.math.BigDecimal(seconds)
     .divide(java.math.BigDecimal(60), 9, java.math.RoundingMode.HALF_UP).stripTrailingZeros().toPlainString()
 
+/**
+ * The threshold to send: blank keeps [loaded] (0 for a new processor), and
+ * anything else must be 0 or more with at most 8 decimals; null when it is
+ * not. Always sent: the server replaces the whole settings blob, and an
+ * absent threshold becomes 0, which sweeps every approved payout on each run.
+ */
+internal fun thresholdToSend(text: String, loaded: BigDecimal): BigDecimal? =
+    if (text.isBlank()) {
+        loaded
+    } else {
+        Amounts.parse(text)?.takeIf { it.signum() >= 0 && it.stripTrailingZeros().scale() <= 8 }
+    }
+
+/** As [thresholdToSend], for the fee target: blank keeps [loaded], else whole blocks from 1. */
+internal fun feeTargetToSend(text: String, loaded: Int): Int? =
+    if (text.isBlank()) loaded else text.toIntOrNull()?.takeIf { it > 0 }
+
+/** A checked editor: what the confirmation shows, and exactly what is then saved. */
+data class ProcessorValues(
+    val seconds: Int,
+    val instant: Boolean,
+    val feeTarget: Int,
+    val threshold: BigDecimal,
+)
+
+/**
+ * [values] as the confirmation lists them, so what is turned on is read
+ * before it runs. The fee target and threshold only apply on-chain. The
+ * threshold is not masked in privacy mode: this is where it is checked.
+ */
+internal fun processorSummary(kind: ProcessorKind, payoutMethodId: String, values: ProcessorValues): String =
+    buildList {
+        add("Runs every ${formatMinutes(values.seconds)}.")
+        add(if (values.instant) "New payouts are sent at once." else "New payouts wait for the next run.")
+        if (kind == ProcessorKind.OnChain) {
+            add("Fee target: ${values.feeTarget} blocks.")
+            add("Threshold: ${Amounts.trim(values.threshold, 8)} ${cryptoCodeOf(payoutMethodId)}.")
+        }
+    }.joinToString("\n")
+
 data class ProcessorEditor(
     val kind: ProcessorKind,
     val payoutMethodId: String,
@@ -115,10 +162,17 @@ data class ProcessorEditor(
     val minutes: String = "60",
     val originalIntervalSeconds: Int? = null,
     val processInstantly: Boolean = false,
-    val cancelAfterFailures: String = "",
     val feeTargetBlock: String = "1",
+    /** What a blank fee target keeps: the loaded value, 1 for a new processor. */
+    val loadedFeeTarget: Int = 1,
     val threshold: String = "0",
+    /** What a blank threshold keeps: the loaded value, 0 for a new processor. */
+    val loadedThreshold: BigDecimal = BigDecimal.ZERO,
     val minutesError: String? = null,
+    val feeTargetError: String? = null,
+    val thresholdError: String? = null,
+    /** The values the "automatic payouts" confirmation is showing, while it shows. */
+    val confirming: ProcessorValues? = null,
     val saving: Boolean = false,
     val error: String? = null,
 )
@@ -127,6 +181,13 @@ data class PayoutProcessorsState(
     val available: List<PayoutProcessorData> = emptyList(),
     val lightning: List<LightningPayoutProcessorSettings> = emptyList(),
     val onChain: List<OnChainPayoutProcessorSettings> = emptyList(),
+    /**
+     * Kinds whose list failed on the last read. Their methods are not offered
+     * under "Available": a processor that exists but did not load would look
+     * unconfigured, and "Turn on" would replace its settings with the
+     * defaults.
+     */
+    val failedKinds: Set<ProcessorKind> = emptySet(),
     val loading: Boolean = false,
     val refreshing: Boolean = false,
     val error: ApiException? = null,
@@ -137,19 +198,27 @@ data class PayoutProcessorsState(
 
 class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
 
-    private val _state = MutableStateFlow(PayoutProcessorsState())
+    /**
+     * The store this screen was opened in. An editor opened for one store
+     * must save to that store, whatever became active meanwhile (see
+     * [StoreBinding]).
+     */
+    private val bound = StoreBinding(graph.session)
+
+    /** Whose funds a processor sends, for the confirmation. */
+    val storeName: String get() = bound.name
+
+    // Loading from the start: the first read waits for the screen to resume,
+    // and until then "no processors" would be a claim nobody has checked.
+    private val _state = MutableStateFlow(PayoutProcessorsState(loading = bound.id != null))
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
-
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { if (it != null) load(refreshing = false) }
-        }
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
+
+    /** Reads on every return to the screen: a processor changed in the web UI shows as it is now. */
+    fun onResume() = load()
 
     fun refresh() = load(refreshing = true)
 
@@ -157,7 +226,12 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun consumeMessage() = _state.update { it.copy(message = null) }
 
-    fun closeEditor() = _state.update { it.copy(editor = null) }
+    /**
+     * Not while a save runs: its answer lands in the editor, and with the
+     * editor gone a refused save was dropped with no word, so the user took
+     * the old settings for the new ones.
+     */
+    fun closeEditor() = _state.update { if (it.editor?.saving == true) it else it.copy(editor = null) }
 
     fun editLightning(settings: LightningPayoutProcessorSettings) = _state.update {
         it.copy(
@@ -168,7 +242,6 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
                 minutes = displayInterval(settings.intervalSeconds),
                 originalIntervalSeconds = settings.intervalSeconds,
                 processInstantly = settings.processNewPayoutsInstantly,
-                cancelAfterFailures = settings.cancelPayoutAfterFailures?.toString().orEmpty(),
             ),
         )
     }
@@ -183,7 +256,9 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
                 originalIntervalSeconds = settings.intervalSeconds,
                 processInstantly = settings.processNewPayoutsInstantly,
                 feeTargetBlock = settings.feeTargetBlock.toString(),
-                threshold = Amounts.trim(settings.threshold, 8),
+                loadedFeeTarget = settings.feeTargetBlock,
+                threshold = Amounts.toInput(settings.threshold, 8),
+                loadedThreshold = settings.threshold,
             ),
         )
     }
@@ -196,12 +271,10 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun setProcessInstantly(value: Boolean) = mutateEditor { it.copy(processInstantly = value) }
 
-    fun setCancelAfterFailures(value: String) =
-        mutateEditor { it.copy(cancelAfterFailures = value.filter(Char::isDigit)) }
+    fun setFeeTargetBlock(value: String) =
+        mutateEditor { it.copy(feeTargetBlock = value.filter(Char::isDigit), feeTargetError = null) }
 
-    fun setFeeTargetBlock(value: String) = mutateEditor { it.copy(feeTargetBlock = value.filter(Char::isDigit)) }
-
-    fun setThreshold(value: String) = mutateEditor { it.copy(threshold = value) }
+    fun setThreshold(value: String) = mutateEditor { it.copy(threshold = value, thresholdError = null) }
 
     fun askRemove(kind: ProcessorKind, payoutMethodId: String) =
         _state.update { it.copy(pendingRemoval = kind to payoutMethodId) }
@@ -209,7 +282,7 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
     fun dismissRemove() = _state.update { it.copy(pendingRemoval = null) }
 
     fun confirmRemove() {
-        val store = storeId ?: return
+        val store = bound.id ?: return
         val (kind, payoutMethodId) = _state.value.pendingRemoval ?: return
         _state.update { it.copy(pendingRemoval = null) }
         val factory = if (kind == ProcessorKind.Lightning) lightningFactoryName() else onChainFactoryName()
@@ -225,58 +298,94 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun save() {
-        val store = storeId ?: return
+    /**
+     * Checks the editor and asks for the confirmation. Every save runs a
+     * processor that spends without asking, so each one is confirmed and then
+     * passes the spend prompt before [save].
+     */
+    fun review() {
         val editor = _state.value.editor ?: return
-        val seconds = if (editor.originalIntervalSeconds?.let(::displayInterval) == editor.minutes) {
+        if (editor.saving) return
+        val values = checked(editor) ?: return
+        mutateEditor { it.copy(confirming = values, error = null) }
+    }
+
+    fun dismissConfirm() = mutateEditor { it.copy(confirming = null) }
+
+    fun reportEditorError(text: String) = mutateEditor { it.copy(error = text) }
+
+    /** The values [editor] saves, or null after marking what is wrong in it. */
+    private fun checked(editor: ProcessorEditor): ProcessorValues? {
+        val interval = if (editor.originalIntervalSeconds?.let(::displayInterval) == editor.minutes) {
             editor.originalIntervalSeconds
-        } else runCatching { Amounts.parse(editor.minutes)?.multiply(java.math.BigDecimal(60))?.intValueExact() }.getOrNull()
-        if (seconds == null || seconds < 1) {
-            mutateEditor { it.copy(minutesError = "Enter a positive interval that converts to whole seconds.") }
-            return
+        } else {
+            runCatching { Amounts.parse(editor.minutes)?.multiply(BigDecimal(60))?.intValueExact() }.getOrNull()
         }
-        if ((editor.cancelAfterFailures.isNotBlank() && editor.cancelAfterFailures.toIntOrNull()?.let { it >= 0 } != true) ||
-            (editor.feeTargetBlock.isNotBlank() && editor.feeTargetBlock.toIntOrNull()?.let { it > 0 } != true) ||
-            (editor.threshold.isNotBlank() && Amounts.parse(editor.threshold)?.let { it.signum() >= 0 } != true)) {
-            mutateEditor { it.copy(error = "Check the failure count, fee target and minimum amount.") }
-            return
+        val seconds = interval?.takeIf { it >= 1 }
+        // A Lightning editor keeps the defaults of these two, which pass.
+        val feeTarget = feeTargetToSend(editor.feeTargetBlock, editor.loadedFeeTarget)
+        val threshold = thresholdToSend(editor.threshold, editor.loadedThreshold)
+        mutateEditor {
+            it.copy(
+                minutesError = if (seconds == null) "Enter a positive interval that converts to whole seconds." else null,
+                feeTargetError = if (feeTarget == null) "Enter a whole number of blocks, 1 or more." else null,
+                thresholdError = if (threshold == null) {
+                    Amounts.parseProblem(editor.threshold) ?: "Enter 0 or more, with at most 8 decimals."
+                } else {
+                    null
+                },
+            )
         }
+        return if (seconds != null && feeTarget != null && threshold != null) {
+            ProcessorValues(seconds, editor.processInstantly, feeTarget, threshold)
+        } else {
+            null
+        }
+    }
+
+    /**
+     * Saves [values], the ones the confirmation showed, to the processor the
+     * editor is open for. Marked as a payment in flight, since it sets how the
+     * server spends: a store switch must not cancel it and lose the answer.
+     */
+    fun save(values: ProcessorValues) {
+        val store = bound.id ?: return
+        val editor = _state.value.editor ?: return
+        if (editor.saving) return
 
         viewModelScope.launch {
-            mutateEditor { it.copy(saving = true, error = null) }
+            mutateEditor { it.copy(saving = true, confirming = null, error = null) }
             val api = runCatching { graph.session.requireApi() }.getOrElse { failure ->
                 mutateEditor { it.copy(saving = false, error = failure.asApiException().userMessage) }
                 return@launch
             }
 
             val outcome = runCatching {
-                when (editor.kind) {
-                    ProcessorKind.Lightning -> api.updateLightningPayoutProcessor(
-                        storeId = store,
-                        payoutMethodId = editor.payoutMethodId,
-                        settings = UpdateLightningPayoutProcessorSettings(
-                            intervalSeconds = seconds,
-                            cancelPayoutAfterFailures = editor.cancelAfterFailures.toIntOrNull(),
-                            processNewPayoutsInstantly = editor.processInstantly,
-                        ),
-                    )
+                graph.session.spending {
+                    when (editor.kind) {
+                        ProcessorKind.Lightning -> api.updateLightningPayoutProcessor(
+                            storeId = store,
+                            payoutMethodId = editor.payoutMethodId,
+                            settings = UpdateLightningPayoutProcessorSettings(
+                                intervalSeconds = values.seconds,
+                                processNewPayoutsInstantly = values.instant,
+                            ),
+                        )
 
-                    ProcessorKind.OnChain -> api.updateOnChainPayoutProcessor(
-                        storeId = store,
-                        paymentMethodId = editor.payoutMethodId,
-                        settings = UpdateOnChainPayoutProcessorSettings(
-                            feeTargetBlock = editor.feeTargetBlock.toIntOrNull(),
-                            intervalSeconds = seconds,
-                            // Blank means "leave unchanged", not zero. Parsed
-                            // through `Amounts.parse` so a comma decimal
-                            // separator is accepted — `toBigDecimalOrNull`
-                            // returns null for "2,5", and a `?: ZERO` fallback
-                            // would then set the minimum to zero, making the
-                            // processor sweep every payout on every run.
-                            threshold = Amounts.parse(editor.threshold),
-                            processNewPayoutsInstantly = editor.processInstantly,
-                        ),
-                    )
+                        // Both always sent, from the loaded settings when left
+                        // blank: the server replaces the whole blob, so an absent
+                        // one becomes 0 (threshold) or 1 (fee target).
+                        ProcessorKind.OnChain -> api.updateOnChainPayoutProcessor(
+                            storeId = store,
+                            paymentMethodId = editor.payoutMethodId,
+                            settings = UpdateOnChainPayoutProcessorSettings(
+                                feeTargetBlock = values.feeTarget,
+                                intervalSeconds = values.seconds,
+                                threshold = values.threshold,
+                                processNewPayoutsInstantly = values.instant,
+                            ),
+                        )
+                    }
                 }
             }
 
@@ -292,7 +401,10 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun load(refreshing: Boolean = false) {
-        val store = storeId ?: return
+        val store = bound.id ?: run {
+            _state.update { it.copy(error = ApiException.NoAccount()) }
+            return
+        }
         viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.available.isEmpty(), refreshing = refreshing, error = null)
@@ -309,15 +421,25 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
             val available = availableCall.await()
             val lightning = lightningCall.await()
             val onChain = onChainCall.await()
+            val error = listOf(available, lightning, onChain)
+                .firstNotNullOfOrNull { it.exceptionOrNull() }
+                ?.asApiException()
 
+            // Each list keeps what it last read when its own call fails. An
+            // empty list in its place said automatic sending was off while the
+            // server went on sending.
             _state.update {
                 it.copy(
                     loading = false,
                     refreshing = false,
-                    available = available.getOrNull() ?: emptyList(),
-                    lightning = lightning.getOrNull() ?: emptyList(),
-                    onChain = onChain.getOrNull() ?: emptyList(),
-                    error = available.exceptionOrNull()?.asApiException(),
+                    available = available.getOrNull() ?: it.available,
+                    lightning = lightning.getOrNull() ?: it.lightning,
+                    onChain = onChain.getOrNull() ?: it.onChain,
+                    failedKinds = setOfNotNull(
+                        ProcessorKind.Lightning.takeIf { lightning.isFailure },
+                        ProcessorKind.OnChain.takeIf { onChain.isFailure },
+                    ),
+                    error = error,
                 )
             }
         }
@@ -349,6 +471,10 @@ fun PayoutProcessorsScreen(onBack: () -> Unit) {
     val viewModel = appViewModel { PayoutProcessorsViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     LaunchedEffect(state.message) {
         val text = state.message ?: return@LaunchedEffect
@@ -371,8 +497,32 @@ fun PayoutProcessorsScreen(onBack: () -> Unit) {
         ProcessorSheet(editor = editor, viewModel = viewModel, onDismiss = viewModel::closeEditor)
     }
 
+    // A processor pays approved payouts with no one asking again, so turning
+    // one on, or changing one that runs, is confirmed with the settings it
+    // will run with and then passes the same prompt as a send.
+    val editing = state.editor
+    val values = editing?.confirming
+    if (editing != null && values != null) {
+        val source = if (editing.kind == ProcessorKind.OnChain) "the hot wallet" else "the Lightning node"
+        ConfirmDialog(
+            title = if (editing.existing) "Change automatic payouts?" else "Turn on automatic payouts?",
+            message = "The server will send approved payouts from $source of ${viewModel.storeName} without asking.\n\n" +
+                processorSummary(editing.kind, editing.payoutMethodId, values),
+            confirmLabel = if (editing.existing) "Save" else "Turn on",
+            onDismiss = viewModel::dismissConfirm,
+            onConfirm = {
+                viewModel.dismissConfirm()
+                val subtitle = "${viewModel.storeName} · ${editing.payoutMethodId}"
+                scope.afterSpendGate(gate, "Confirm automatic payouts", subtitle, viewModel::reportEditorError) {
+                    viewModel.save(values)
+                }
+            },
+        )
+    }
+
     // Payout methods a processor exists for but which are not yet configured.
-    val addable = remember(state.available, state.lightning, state.onChain) {
+    // A kind whose list did not load is left out: it may well be configured.
+    val addable = remember(state.available, state.lightning, state.onChain, state.failedKinds) {
         state.available.flatMap { processor ->
             val kind = if (processor.name.contains("Lightning", ignoreCase = true)) {
                 ProcessorKind.Lightning
@@ -381,7 +531,7 @@ fun PayoutProcessorsScreen(onBack: () -> Unit) {
             }
             processor.payoutMethods.map { kind to it }
         }.filterNot { (kind, methodId) ->
-            when (kind) {
+            kind in state.failedKinds || when (kind) {
                 ProcessorKind.Lightning -> state.lightning.any { it.payoutMethodId == methodId }
                 ProcessorKind.OnChain -> state.onChain.any { it.payoutMethodId == methodId }
             }
@@ -458,10 +608,6 @@ fun PayoutProcessorsScreen(onBack: () -> Unit) {
                                                 "Wait for the next run"
                                             },
                                         )
-                                        DetailRow(
-                                            "Cancel after failures",
-                                            settings.cancelPayoutAfterFailures?.toString() ?: "Never",
-                                        )
                                         ProcessorActions(
                                             onEdit = { viewModel.editLightning(settings) },
                                             onRemove = {
@@ -489,7 +635,13 @@ fun PayoutProcessorsScreen(onBack: () -> Unit) {
                                             },
                                         )
                                         DetailRow("Fee target", "${settings.feeTargetBlock} blocks")
-                                        DetailRow("Threshold", Amounts.trim(settings.threshold, 8))
+                                        DetailRow(
+                                            "Threshold",
+                                            maskedIfPrivate(
+                                                "${Amounts.trim(settings.threshold, 8)} " +
+                                                    cryptoCodeOf(settings.payoutMethodId),
+                                            ),
+                                        )
                                         ProcessorActions(
                                             onEdit = { viewModel.editOnChain(settings) },
                                             onRemove = {
@@ -591,7 +743,13 @@ private fun ProcessorSheet(
     viewModel: PayoutProcessorsViewModel,
     onDismiss: () -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // A save in flight holds the sheet up, so its answer is seen. Swipe and a
+    // tap outside are refused here, and Back also by closeEditor.
+    val saving by rememberUpdatedState(editor.saving)
+    val sheetState = rememberModalBottomSheetState(
+        skipPartiallyExpanded = true,
+        confirmValueChange = { it != SheetValue.Hidden || !saving },
+    )
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -630,36 +788,30 @@ private fun ProcessorSheet(
                 description = "Send the moment a payout is approved, rather than on the next run.",
             )
 
-            // Not swapped: which branch applies is fixed by the processor the
-            // sheet was opened for.
-            Column(Modifier.arrive(3)) {
-                when (editor.kind) {
-                    ProcessorKind.Lightning -> FormField(
-                        label = "Cancel after failures",
-                        value = editor.cancelAfterFailures,
-                        onValueChange = viewModel::setCancelAfterFailures,
-                        placeholder = "Leave blank to keep retrying",
-                        supportingText = "Give up on a payout after this many failed attempts.",
+            // Not swapped: which fields apply is fixed by the processor the
+            // sheet was opened for. BTCPay's Lightning processor has no
+            // settings beyond the two above.
+            if (editor.kind == ProcessorKind.OnChain) {
+                Column(Modifier.arrive(3)) {
+                    FormField(
+                        label = "Fee target (blocks)",
+                        value = editor.feeTargetBlock,
+                        onValueChange = viewModel::setFeeTargetBlock,
+                        error = editor.feeTargetError,
+                        supportingText = "Confirmation target used to pick a fee rate. Lower costs more.",
                         keyboardType = KeyboardType.Number,
                     )
-
-                    ProcessorKind.OnChain -> {
-                        FormField(
-                            label = "Fee target (blocks)",
-                            value = editor.feeTargetBlock,
-                            onValueChange = viewModel::setFeeTargetBlock,
-                            supportingText = "Confirmation target used to pick a fee rate. Lower costs more.",
-                            keyboardType = KeyboardType.Number,
-                        )
-                        FormField(
-                            label = "Threshold",
-                            value = editor.threshold,
-                            onValueChange = viewModel::setThreshold,
-                            supportingText = "Wait until the pending total reaches this amount before sending. " +
-                                "Zero sends every run.",
-                            keyboardType = KeyboardType.Decimal,
-                        )
-                    }
+                    // In the method's own coin, which is what the server
+                    // compares it with; a sat figure typed here was read as
+                    // that many BTC.
+                    FormField(
+                        label = "Threshold (${cryptoCodeOf(editor.payoutMethodId)})",
+                        value = editor.threshold,
+                        onValueChange = viewModel::setThreshold,
+                        error = editor.thresholdError,
+                        supportingText = "Payouts wait until they add up to this amount.",
+                        keyboardType = KeyboardType.Decimal,
+                    )
                 }
             }
 
@@ -692,7 +844,7 @@ private fun ProcessorSheet(
                         Spacer(Modifier.width(16.dp))
                     }
                 }
-                Button(onClick = viewModel::save, enabled = !editor.saving) {
+                Button(onClick = viewModel::review, enabled = !editor.saving) {
                     Text(if (editor.existing) "Save" else "Turn on")
                 }
             }
@@ -701,12 +853,13 @@ private fun ProcessorSheet(
     }
 }
 
-private fun formatMinutes(seconds: Int): String {
-    val minutes = seconds / 60
-    return when {
-        minutes < 1 -> "$seconds s"
-        minutes == 1 -> "1 min"
-        minutes % 60 == 0 && minutes >= 60 -> "${minutes / 60} h"
-        else -> "$minutes min"
-    }
+/**
+ * [seconds] exactly: in seconds unless it is whole minutes or hours. Rounded
+ * down to minutes, 90 s read "1 min" on the confirmation that is there to
+ * show what gets saved.
+ */
+private fun formatMinutes(seconds: Int): String = when {
+    seconds < 60 || seconds % 60 != 0 -> "$seconds s"
+    seconds % 3600 == 0 -> "${seconds / 3600} h"
+    else -> "${seconds / 60} min"
 }

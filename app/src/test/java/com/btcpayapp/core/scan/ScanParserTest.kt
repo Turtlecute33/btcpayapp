@@ -1,5 +1,6 @@
 package com.btcpayapp.core.scan
 
+import com.btcpayapp.core.lightning.Bolt11Fixture
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -48,6 +49,18 @@ class ScanParserTest {
         val result = ScanParser.parse("lightning:$bolt11")
         assertTrue(result is ScannedPayload.Bolt11)
         assertEquals(bolt11, (result as ScannedPayload.Bolt11).invoice)
+    }
+
+    @Test
+    fun `signet invoices are recognised like every other network`() {
+        // `lntbs` is signet. The scanner refused it while the decoder read it,
+        // so a signet store could not scan its own test invoices.
+        val signet = Bolt11Fixture.invoice(hrp = "lntbs10u")
+        val bare = ScanParser.parse(signet)
+        assertTrue(bare is ScannedPayload.Bolt11)
+        assertEquals(signet, (bare as ScannedPayload.Bolt11).invoice)
+        assertTrue(ScanParser.parse("lightning:$signet") is ScannedPayload.Bolt11)
+        assertTrue(ScanParser.parse(signet.uppercase()) is ScannedPayload.Bolt11)
     }
 
     @Test

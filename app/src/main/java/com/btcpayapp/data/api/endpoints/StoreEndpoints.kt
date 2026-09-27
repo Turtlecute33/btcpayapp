@@ -1,7 +1,9 @@
 package com.btcpayapp.data.api.endpoints
 
 import com.btcpayapp.data.api.BtcPayApi
+import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.AddStoreUserResult
+import com.btcpayapp.data.api.dto.CreateStoreRequest
 import com.btcpayapp.data.api.dto.EmailSettingsData
 import com.btcpayapp.data.api.dto.GenerateWalletRequest
 import com.btcpayapp.data.api.dto.GenerateWalletResponse
@@ -17,6 +19,8 @@ import com.btcpayapp.data.api.dto.StoreUserRequest
 import com.btcpayapp.data.api.dto.UpdateEmailSettingsRequest
 import com.btcpayapp.data.api.dto.UpdatePaymentMethodRequest
 import com.btcpayapp.data.api.dto.WalletPreviewResponse
+import com.btcpayapp.data.api.dto.forWrite
+import kotlinx.serialization.json.JsonObject
 
 // ---------------------------------------------------------------------------
 // Stores
@@ -26,8 +30,9 @@ internal suspend fun BtcPayApi.stores(): List<StoreData> = get("api/v1/stores")
 
 internal suspend fun BtcPayApi.store(storeId: String): StoreData = get("api/v1/stores/${storeId.pathSegment()}")
 
-internal suspend fun BtcPayApi.createStore(store: StoreData): StoreData =
-    post("api/v1/stores", body(store))
+/** Sends only name and currency, so the admin's default store template fills the rest. */
+internal suspend fun BtcPayApi.createStore(request: CreateStoreRequest): StoreData =
+    post("api/v1/stores", body(request))
 
 internal suspend fun BtcPayApi.updateStore(storeId: String, store: StoreData): StoreData =
     put("api/v1/stores/${storeId.pathSegment()}", body(store))
@@ -87,6 +92,7 @@ internal suspend fun BtcPayApi.generateWallet(
     body(request),
 )
 
+/** The first addresses of the **saved** wallet. */
 internal suspend fun BtcPayApi.previewWallet(
     storeId: String,
     paymentMethodId: String,
@@ -95,6 +101,22 @@ internal suspend fun BtcPayApi.previewWallet(
 ): WalletPreviewResponse = get(
     "api/v1/stores/${storeId.pathSegment()}/payment-methods/${paymentMethodId.pathSegment()}/wallet/preview",
     listOf("offset" to offset, "count" to count),
+)
+
+/**
+ * The first addresses of a wallet that is **not saved yet**. [config] is the
+ * write JSON the update would send, so the operator can compare these addresses
+ * with the signing device before receive payments are sent to a new wallet.
+ */
+internal suspend fun BtcPayApi.previewProposedWallet(
+    storeId: String,
+    paymentMethodId: String,
+    config: JsonObject,
+    count: Int = 5,
+): WalletPreviewResponse = post(
+    "api/v1/stores/${storeId.pathSegment()}/payment-methods/${paymentMethodId.pathSegment()}/wallet/preview",
+    body(UpdatePaymentMethodRequest(config = config)),
+    listOf("offset" to 0, "count" to count),
 )
 
 // ---------------------------------------------------------------------------
@@ -115,6 +137,7 @@ internal suspend fun BtcPayApi.removeStoreUser(storeId: String, idOrEmail: Strin
     call("DELETE", "api/v1/stores/${storeId.pathSegment()}/users/${idOrEmail.pathSegment()}")
 }
 
+/** From 2.4.4 only ([ServerVersion.STORE_INVITATIONS]); older servers answer 404. */
 internal suspend fun BtcPayApi.storeInvitations(storeId: String): List<StoreInvitationData> =
     get("api/v1/stores/${storeId.pathSegment()}/users/invitations")
 
@@ -129,24 +152,29 @@ internal suspend fun BtcPayApi.storeRoles(storeId: String): List<RoleData> =
 internal suspend fun BtcPayApi.rates(storeId: String, currencyPairs: List<String>): List<StoreRateResult> =
     get("api/v1/stores/${storeId.pathSegment()}/rates", listOf("currencyPair" to currencyPairs))
 
-/** [rateSource] is `primary` or `fallback`. */
+/**
+ * [rateSource] is `primary` or `fallback`. Both paths exist from 2.2.0
+ * ([ServerVersion.MINIMUM]); before that only the unsuffixed route did.
+ */
 internal suspend fun BtcPayApi.rateConfiguration(storeId: String, rateSource: String = "primary"): StoreRateConfiguration =
     get("api/v1/stores/${storeId.pathSegment()}/rates/configuration/$rateSource")
 
+/** Sends [StoreRateConfiguration.forWrite], never the loaded object as it is. */
 internal suspend fun BtcPayApi.updateRateConfiguration(
     storeId: String,
     configuration: StoreRateConfiguration,
     rateSource: String = "primary",
 ): StoreRateConfiguration =
-    put("api/v1/stores/${storeId.pathSegment()}/rates/configuration/$rateSource", body(configuration))
+    put("api/v1/stores/${storeId.pathSegment()}/rates/configuration/$rateSource", body(configuration.forWrite()))
 
+/** Validated like an update, so the body is [StoreRateConfiguration.forWrite] too. */
 internal suspend fun BtcPayApi.previewRateConfiguration(
     storeId: String,
     configuration: StoreRateConfiguration,
     currencyPairs: List<String>,
 ): List<StoreRateResult> = post(
     "api/v1/stores/${storeId.pathSegment()}/rates/configuration/preview",
-    body(configuration),
+    body(configuration.forWrite()),
     listOf("currencyPair" to currencyPairs),
 )
 

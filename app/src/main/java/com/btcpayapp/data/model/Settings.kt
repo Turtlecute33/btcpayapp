@@ -1,6 +1,12 @@
 package com.btcpayapp.data.model
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.descriptors.PrimitiveKind
+import kotlinx.serialization.descriptors.PrimitiveSerialDescriptor
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
 
 @Serializable
 data class AppSettings(
@@ -13,15 +19,23 @@ data class AppSettings(
     /** True black surfaces for OLED panels. */
     val pureBlackDark: Boolean = false,
     val bitcoinUnit: BitcoinUnit = BitcoinUnit.Sat,
-    /** Masks every amount until tapped — useful at a market stall. */
+    /** Hides amounts on screen — useful at a market stall. There is no tap-to-reveal. */
     val privacyMode: Boolean = false,
 
     // --- Security ----------------------------------------------------------
     val appLock: AppLockMode = AppLockMode.Off,
+    /**
+     * How long the app may be away before it locks. On the Terminal it is also
+     * the idle time without a touch, never less than 60 s.
+     */
     val lockAfterSeconds: Int = 60,
     /** FLAG_SECURE: blocks screenshots and blanks the app in the recents switcher. */
     val blockScreenCapture: Boolean = true,
-    /** Requires re-authentication before spending, regardless of the lock timer. */
+    /**
+     * Asks for biometrics or the device PIN, whatever the lock timer, before
+     * every action that sends funds, changes where the store receives funds,
+     * or gives someone control of the store.
+     */
     val confirmSpendsWithBiometrics: Boolean = true,
 
     // --- Background --------------------------------------------------------
@@ -47,9 +61,13 @@ data class AppSettings(
     val lightningNodeNicknames: Map<String, String> = emptyMap(),
 
     // --- Terminal ----------------------------------------------------------
-    val terminalCurrency: String? = null,
+    /**
+     * The Terminal's currency by `"$accountId|$storeId"`. No entry means the
+     * store's default currency. One global value would carry one store's
+     * choice into every other store and account.
+     */
+    val terminalCurrencies: Map<String, String> = emptyMap(),
     val terminalKeepScreenOn: Boolean = true,
-    val terminalSoundOnPaid: Boolean = true,
     val terminalVibrateOnPaid: Boolean = true,
     val terminalTipPercentages: List<Int> = listOf(10, 15, 20),
     val terminalAskForTip: Boolean = false,
@@ -67,10 +85,27 @@ enum class BitcoinUnit {
     Sat,
 }
 
-@Serializable
+/**
+ * Stored by name. A name this build does not know (a rename, a mode of a newer
+ * build) reads as [Biometric]. The plain enum serializer would read it as the
+ * property's default, [Off], because the app's Json coerces unknown enum values,
+ * and the lock would turn itself off without a word.
+ */
+@Serializable(with = AppLockModeSerializer::class)
 enum class AppLockMode {
     Off,
 
     /** Biometric, with the device PIN/pattern/password as fallback. */
     Biometric,
+}
+
+internal object AppLockModeSerializer : KSerializer<AppLockMode> {
+    override val descriptor: SerialDescriptor = PrimitiveSerialDescriptor("AppLockMode", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: AppLockMode) = encoder.encodeString(value.name)
+
+    override fun deserialize(decoder: Decoder): AppLockMode {
+        val name = decoder.decodeString()
+        return AppLockMode.entries.firstOrNull { it.name == name } ?: AppLockMode.Biometric
+    }
 }

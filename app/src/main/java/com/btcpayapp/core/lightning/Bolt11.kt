@@ -1,5 +1,7 @@
 package com.btcpayapp.core.lightning
 
+import com.btcpayapp.core.util.Bech32
+import com.btcpayapp.core.util.toHex
 import java.math.BigInteger
 import java.util.Locale
 
@@ -15,7 +17,7 @@ import java.util.Locale
  * payer actually recognises anyway.
  */
 data class Bolt11Invoice(
-    /** `bc`, `tb`, `bcrt` — the chain the invoice is for. */
+    /** `bc`, `tb`, `tbs`, `bcrt` — the chain the invoice is for. */
     val network: String,
     /** Null for a zero-amount ("any amount") invoice. */
     val amountMsat: BigInteger?,
@@ -26,7 +28,10 @@ data class Bolt11Invoice(
     /** Set instead of [description] when the writer used a description hash. */
     val descriptionHash: String?,
     val payeeNode: String?,
-    /** Seconds after [timestamp]. BOLT11 says 3600 when the field is absent. */
+    /**
+     * Seconds after [timestamp], as the invoice states it (capped at a
+     * century). BOLT11 says 3600 when the field is absent.
+     */
     val expirySeconds: Long,
 ) {
     val expiresAt: Long get() = timestamp + expirySeconds
@@ -53,8 +58,6 @@ data class Bolt11Invoice(
  */
 object Bolt11 {
 
-    private const val CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
-
     /** Base32 values of the tagged-field types that carry something to show. */
     private const val TAG_PAYMENT_HASH = 1 // 'p'
     private const val TAG_EXPIRY = 6 // 'x'
@@ -69,6 +72,15 @@ object Bolt11 {
     private const val TIMESTAMP_LENGTH = 7
 
     private const val DEFAULT_EXPIRY_SECONDS = 3600L
+
+    /**
+     * The only limit on a stated expiry. A long one is legitimate (a donation
+     * or subscription invoice), and replacing it with the one-hour default
+     * showed a valid invoice as expired and blocked Pay. The node refuses a
+     * truly expired invoice anyway. A century keeps [Bolt11Invoice.expiresAt]
+     * far from overflow and inside the years a date can be printed for.
+     */
+    private const val MAX_EXPIRY_SECONDS = 100L * 365 * 86_400
 
     /** No BOLT11 invoice is anywhere near this long; a QR payload might be. */
     private const val MAX_LENGTH = 7089
@@ -90,7 +102,7 @@ object Bolt11 {
 
         val hrp = value.substring(0, separator)
         val data = value.substring(separator + 1).map { character ->
-            CHARSET.indexOf(character).takeIf { it >= 0 } ?: return null
+            Bech32.CHARSET.indexOf(character).takeIf { it >= 0 } ?: return null
         }
 
         if (!checksumValid(hrp, data)) return null
@@ -124,20 +136,20 @@ object Bolt11 {
 
             when (type) {
                 TAG_PAYMENT_HASH -> if (length == 52 && paymentHash == null) {
-                    paymentHash = toHex(convertBits(field) ?: return null)
+                    paymentHash = (Bech32.convertBits(field) ?: return null).toHex()
                 }
 
                 TAG_DESCRIPTION -> if (description == null) {
-                    val bytes = convertBits(field) ?: return null
+                    val bytes = Bech32.convertBits(field) ?: return null
                     description = String(bytes, Charsets.UTF_8).takeIf { it.isNotBlank() }
                 }
 
                 TAG_DESCRIPTION_HASH -> if (length == 52 && descriptionHash == null) {
-                    descriptionHash = toHex(convertBits(field) ?: return null)
+                    descriptionHash = (Bech32.convertBits(field) ?: return null).toHex()
                 }
 
                 TAG_PAYEE -> if (length == 53 && payee == null) {
-                    payee = toHex(convertBits(field) ?: return null)
+                    payee = (Bech32.convertBits(field) ?: return null).toHex()
                 }
 
                 TAG_EXPIRY -> if (expiry == null) {
@@ -168,7 +180,7 @@ object Bolt11 {
             description = description,
             descriptionHash = descriptionHash,
             payeeNode = payee?.takeIf { NodeDirectory.isPubkey(it) },
-            expirySeconds = expiry?.takeIf { it in 1..(365L * 86_400) } ?: DEFAULT_EXPIRY_SECONDS,
+            expirySeconds = expiry?.coerceAtMost(MAX_EXPIRY_SECONDS) ?: DEFAULT_EXPIRY_SECONDS,
         )
     }
 
@@ -219,62 +231,12 @@ object Bolt11 {
         return result
     }
 
-    /**
-     * 5-bit groups to 8-bit bytes, discarding the trailing padding.
-     *
-     * Rejects a non-zero pad, which is how a truncated or hand-edited field
-     * shows up.
-     */
-    private fun convertBits(values: List<Int>): ByteArray? {
-        var accumulator = 0
-        var bits = 0
-        val out = ArrayList<Byte>(values.size * 5 / 8 + 1)
-        for (value in values) {
-            if (value < 0 || value > 31) return null
-            accumulator = (accumulator shl 5) or value
-            bits += 5
-            while (bits >= 8) {
-                bits -= 8
-                out.add(((accumulator shr bits) and 0xff).toByte())
-            }
-        }
-        if (bits >= 5) return null
-        if ((accumulator shl (8 - bits)) and 0xff != 0) return null
-        return out.toByteArray()
-    }
-
-    private fun toHex(bytes: ByteArray): String {
-        val builder = StringBuilder(bytes.size * 2)
-        for (byte in bytes) builder.append("%02x".format(byte))
-        return builder.toString()
-    }
-
     // --- bech32 ------------------------------------------------------------
 
     private fun checksumValid(hrp: String, data: List<Int>): Boolean {
         if (data.size < 6) return false
         // BOLT11 uses plain bech32, not bech32m, and explicitly lifts BIP173's
         // 90-character cap — so length is not checked here.
-        return polymod(expandHrp(hrp) + data) == 1
-    }
-
-    private fun expandHrp(hrp: String): List<Int> {
-        val high = hrp.map { it.code shr 5 }
-        val low = hrp.map { it.code and 31 }
-        return high + listOf(0) + low
-    }
-
-    private val GENERATOR = intArrayOf(0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3)
-
-    private fun polymod(values: List<Int>): Int {
-        var checksum = 1
-        for (value in values) {
-            val top = checksum shr 25
-            checksum = ((checksum and 0x1ffffff) shl 5) xor value
-            for (bit in 0..4) {
-                if ((top shr bit) and 1 == 1) checksum = checksum xor GENERATOR[bit]
-            }
-        }
-        return checksum
+        return Bech32.residue(hrp, data) == Bech32.BECH32
     }
 }

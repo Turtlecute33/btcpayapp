@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
@@ -41,6 +42,7 @@ import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
+import com.btcpayapp.data.api.attempt
 import com.btcpayapp.data.api.dto.RateSourceData
 import com.btcpayapp.data.api.dto.StoreRateConfiguration
 import com.btcpayapp.data.api.dto.StoreRateResult
@@ -49,10 +51,12 @@ import com.btcpayapp.data.api.endpoints.rateConfiguration
 import com.btcpayapp.data.api.endpoints.rateSources
 import com.btcpayapp.data.api.endpoints.rates
 import com.btcpayapp.data.api.endpoints.updateRateConfiguration
+import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedPage
 import com.btcpayapp.ui.components.AnimatedSwap
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.DetailRow
 import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
@@ -63,17 +67,18 @@ import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.ThinDivider
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.rememberSpendGate
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.math.BigDecimal
 
 /**
  * The store's exchange rate configuration.
@@ -81,9 +86,61 @@ import kotlinx.coroutines.launch
  * BTCPay keeps two independent configurations — `primary` and `fallback` — and
  * only consults the second when the first returns nothing. They are edited and
  * saved separately, hence the tabs.
+ *
+ * The spread is held as the text in the field. It is filled through
+ * [Amounts.toInput] and goes out as [Amounts.parse]'s plain decimal: the server
+ * may read "0,5" as 5, a tenfold spread, so the DTO refuses anything else.
+ *
+ * The rules set how much bitcoin every fiat invoice asks for, so a save is a
+ * change of when an invoice counts as paid: a review of the rates now and
+ * after, then the spend gate.
  */
 private const val PRIMARY = "primary"
 private const val FALLBACK = "fallback"
+
+private val HUNDRED = BigDecimal(100)
+
+/** The spread the field holds, from 0 to 100, or null. */
+private fun spreadOf(text: String): BigDecimal? =
+    Amounts.parse(text)?.takeIf { it >= BigDecimal.ZERO && it <= HUNDRED }
+
+/** The spread field's error, or null. */
+private fun spreadProblem(text: String): String? =
+    if (spreadOf(text) != null) null else Amounts.parseProblem(text) ?: "Enter a value from 0 to 100."
+
+/** As the server sent it, with the spread written the way the field reads it. */
+private fun StoreRateConfiguration.forEditing(): StoreRateConfiguration =
+    copy(spread = Amounts.toInput(Amounts.serverDecimal(spread) ?: BigDecimal.ZERO, 4))
+
+/** The body to send, or null while the spread is not a value from 0 to 100. */
+private fun StoreRateConfiguration.forWire(): StoreRateConfiguration? =
+    spreadOf(spread)?.let { copy(spread = it.toPlainString()) }
+
+/**
+ * One "pair: now → new" line for each of [pairs]: [now] is the rate the store
+ * uses today, [next] the rate of the edited rules. A pair with errors reads
+ * "no rate", because invoices in that currency then fail.
+ */
+internal fun rateChanges(pairs: List<String>, now: List<StoreRateResult>, next: List<StoreRateResult>): List<String> {
+    fun List<StoreRateResult>.rateOf(pair: String): String {
+        val result = firstOrNull { it.currencyPair.equals(pair, ignoreCase = true) } ?: return "not known"
+        return if (result.errors.isEmpty()) Amounts.trim(result.rate, 8) else "no rate"
+    }
+    return pairs.map { "$it: ${now.rateOf(it)} → ${next.rateOf(it)}" }
+}
+
+/**
+ * A save the user has not confirmed yet. [config] is the form as reviewed,
+ * [wire] the body that goes out, [lines] the [rateChanges].
+ */
+data class RatesReview(
+    val tab: Int,
+    val config: StoreRateConfiguration,
+    val wire: StoreRateConfiguration,
+    val lines: List<String>,
+) {
+    val rateSource: String get() = if (tab == 0) PRIMARY else FALLBACK
+}
 
 data class StoreRatesState(
     val tab: Int = 0,
@@ -97,41 +154,33 @@ data class StoreRatesState(
     val refreshing: Boolean = false,
     val saving: Boolean = false,
     val previewing: Boolean = false,
+    val reviewing: Boolean = false,
+    val review: RatesReview? = null,
     val error: ApiException? = null,
     val message: String? = null,
     val primaryDirty: Boolean = false,
     val fallbackDirty: Boolean = false,
 ) {
-    val rateSource: String get() = if (tab == 0) PRIMARY else FALLBACK
     val config: StoreRateConfiguration? get() = if (tab == 0) primary else fallback
 }
 
 class StoreRatesViewModel(private val graph: AppGraph) : ViewModel() {
 
+    private val bound = StoreBinding(graph.session)
     private val _state = MutableStateFlow(StoreRatesState())
     val state = _state.asStateFlow()
     private var loadJob: kotlinx.coroutines.Job? = null
 
-    private val storeId get() = graph.session.activeStore.value?.id
-
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest {
-                    loadJob?.cancel()
-                    _state.value = StoreRatesState()
-                    load()
-                }
-        }
+        load()
+        bound.retryWhenKnown(viewModelScope) { load() }
     }
 
     fun load(refreshing: Boolean = false) {
-        val store = storeId
-        val currency = graph.session.activeStore.value?.defaultCurrency
+        val store = bound.id
+        val currency = bound.store?.defaultCurrency
         if (store == null || currency == null) {
-            _state.update { it.copy(loading = false, error = ApiException.NotFound("No store is selected.")) }
+            _state.update { it.copy(loading = false, error = ApiException.NoAccount()) }
             return
         }
         val pairs = pairsFor(currency)
@@ -159,8 +208,8 @@ class StoreRatesViewModel(private val graph: AppGraph) : ViewModel() {
             val currentRates = ratesCall.await()
             _state.update {
                 it.copy(
-                    primary = if (it.primaryDirty) it.primary else primary.getOrNull() ?: it.primary,
-                    fallback = if (it.fallbackDirty) it.fallback else fallback.getOrNull() ?: it.fallback,
+                    primary = if (it.primaryDirty) it.primary else primary.getOrNull()?.forEditing() ?: it.primary,
+                    fallback = if (it.fallbackDirty) it.fallback else fallback.getOrNull()?.forEditing() ?: it.fallback,
                     sources = sources.getOrDefault(it.sources),
                     currentRates = currentRates.getOrDefault(emptyList()),
                     loading = false,
@@ -184,40 +233,95 @@ class StoreRatesViewModel(private val graph: AppGraph) : ViewModel() {
         if (current.tab == 0) current.copy(primary = updated, primaryDirty = true) else current.copy(fallback = updated, fallbackDirty = true)
     }
 
-    fun save() {
-        val store = storeId ?: return
+    /** For the review and the prompt: a change of rates must say which store it hits. */
+    val storeName: String get() = bound.name
+
+    /**
+     * Opens the review of a save: each pair's rate now and under the edited
+     * rules, from the server's preview. The rules price every fiat invoice and
+     * payout, so a script such as `BTC_USD = 100000000;` lets a few sats pay a
+     * large invoice. After the review comes the spend gate, then [save].
+     */
+    fun review() {
+        val store = bound.id ?: return
         val snapshot = _state.value
         val config = snapshot.config ?: return
-        if (snapshot.saving) return
+        if (snapshot.saving || snapshot.reviewing) return
+        val wire = config.forWire() ?: return spreadRefused(config)
+        viewModelScope.launch {
+            _state.update { it.copy(reviewing = true, error = null) }
+            runCatching {
+                val api = graph.session.requireApi()
+                coroutineScope {
+                    // Read now, not at load: an earlier save or the market has
+                    // moved the store's rate since. Best effort, as at load: with
+                    // no answer the review says "not known".
+                    val now = async { attempt { api.rates(store, snapshot.pairs) }.getOrNull() }
+                    api.previewRateConfiguration(store, wire, snapshot.pairs) to now.await()
+                }
+            }
+                .onSuccess { (next, now) ->
+                    _state.update {
+                        val read = it.copy(reviewing = false, currentRates = now ?: it.currentRates)
+                        // Only if the form still holds the rules that were previewed.
+                        if (it.tab == snapshot.tab && it.config == config) {
+                            val lines = rateChanges(snapshot.pairs, now.orEmpty(), next)
+                            read.copy(review = RatesReview(snapshot.tab, config, wire, lines))
+                        } else {
+                            read.copy(message = "The form changed before the check ended. Tap Save again.")
+                        }
+                    }
+                }
+                .onFailure { failure -> _state.update { it.copy(reviewing = false, error = failure.asReadFailure()) } }
+        }
+    }
+
+    fun dismissReview() = _state.update { it.copy(review = null) }
+
+    /** Call only after the review and the spend gate. Sends the reviewed rules, not the form as it is now. */
+    fun save(review: RatesReview) {
+        val store = bound.id ?: return
+        if (_state.value.saving) return
         loadJob?.cancel()
+        _state.update { it.copy(review = null) }
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
-            runCatching { graph.session.requireApi().updateRateConfiguration(store, config, snapshot.rateSource) }
-                .onSuccess { saved ->
+            runCatching { graph.session.requireApi().updateRateConfiguration(store, review.wire, review.rateSource) }
+                .onSuccess { answer ->
+                    val saved = answer.forEditing()
                     _state.update { current ->
-                        val next = if (snapshot.tab == 0) {
-                            if (current.primary == config) current.copy(primary = saved, primaryDirty = false) else current
+                        val next = if (review.tab == 0) {
+                            if (current.primary == review.config) current.copy(primary = saved, primaryDirty = false) else current
                         } else {
-                            if (current.fallback == config) current.copy(fallback = saved, fallbackDirty = false) else current
+                            if (current.fallback == review.config) current.copy(fallback = saved, fallbackDirty = false) else current
                         }
                         next.copy(saving = false, message = "Rate settings saved.")
                     }
+                    // The store prices at the saved rules now, so "Current rates" is read again.
+                    attempt { graph.session.requireApi().rates(store, _state.value.pairs) }
+                        .onSuccess { rates -> _state.update { it.copy(currentRates = rates) } }
                 }
                 .onFailure { failure -> _state.update { it.copy(saving = false, error = failure.asApiException()) } }
         }
     }
 
     fun preview() {
-        val store = storeId ?: return
+        val store = bound.id ?: return
         val snapshot = _state.value
         val config = snapshot.config ?: return
+        val wire = config.forWire() ?: return spreadRefused(config)
         viewModelScope.launch {
             _state.update { it.copy(previewing = true, error = null, previewRates = emptyList()) }
-            runCatching { graph.session.requireApi().previewRateConfiguration(store, config, snapshot.pairs) }
+            runCatching { graph.session.requireApi().previewRateConfiguration(store, wire, snapshot.pairs) }
                 .onSuccess { results -> _state.update { it.copy(previewing = false, previewRates = results) } }
-                .onFailure { failure -> _state.update { it.copy(previewing = false, error = failure.asApiException()) } }
+                // A POST that saves nothing: no answer is a plain timeout.
+                .onFailure { failure -> _state.update { it.copy(previewing = false, error = failure.asReadFailure()) } }
         }
     }
+
+    /** The field already shows the error; this says why the button did nothing. */
+    private fun spreadRefused(config: StoreRateConfiguration) =
+        _state.update { it.copy(message = spreadProblem(config.spread)) }
 
     /** A handful of pairs worth checking: the store's own currency first. */
     private fun pairsFor(currency: String): List<String> =
@@ -241,6 +345,8 @@ fun StoreRatesScreen(onBack: () -> Unit) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val guardedBack = com.btcpayapp.ui.components.confirmDiscardChanges(state.primaryDirty || state.fallbackDirty, onBack)
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -255,7 +361,7 @@ fun StoreRatesScreen(onBack: () -> Unit) {
         snackbarHostState = snackbarHostState,
         actions = {
             val action = when {
-                state.saving -> RatesSaveAction.Busy
+                state.saving || state.reviewing -> RatesSaveAction.Busy
                 state.config != null -> RatesSaveAction.Ready
                 else -> RatesSaveAction.None
             }
@@ -263,7 +369,7 @@ fun StoreRatesScreen(onBack: () -> Unit) {
                 when (shown) {
                     RatesSaveAction.Busy ->
                         CircularProgressIndicator(Modifier.padding(end = 16.dp).size(20.dp), strokeWidth = 2.dp)
-                    RatesSaveAction.Ready -> TextButton(onClick = viewModel::save) { Text("Save") }
+                    RatesSaveAction.Ready -> TextButton(onClick = viewModel::review) { Text("Save") }
                     RatesSaveAction.None -> Unit
                 }
             }
@@ -354,6 +460,28 @@ fun StoreRatesScreen(onBack: () -> Unit) {
             }
         }
     }
+
+    state.review?.let { review ->
+        val name = viewModel.storeName
+        val effect = if (review.tab == 0) {
+            "Invoices and payouts of “$name” are then priced at the new rates."
+        } else {
+            "Invoices and payouts of “$name” use these rates when the primary rules give no rate."
+        }
+        ConfirmDialog(
+            title = "Change the rate rules?",
+            message = "Store rate now → with these rules:\n" + review.lines.joinToString("\n") + "\n\n" + effect,
+            confirmLabel = "Save",
+            destructive = true,
+            onConfirm = {
+                viewModel.dismissReview()
+                scope.afterSpendGate(gate, "Confirm rate rules", name, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.save(review)
+                }
+            },
+            onDismiss = viewModel::dismissReview,
+        )
+    }
 }
 
 @Composable
@@ -369,6 +497,7 @@ private fun RateConfigSection(
             value = config.spread,
             onValueChange = { value -> viewModel.edit { it.copy(spread = value) } },
             keyboardType = KeyboardType.Decimal,
+            error = spreadProblem(config.spread),
             supportingText = "Applied on top of the fetched rate. 2 means a buyer pays 2% more " +
                 "than the market rate.",
         )

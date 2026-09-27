@@ -40,10 +40,13 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
+import com.btcpayapp.core.util.Amounts
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
 import com.btcpayapp.data.api.dto.LightningAddressData
@@ -64,12 +67,12 @@ import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.copyToClipboard
-import kotlinx.coroutines.delay
+import com.btcpayapp.ui.components.NoStoreSelectedState
+import com.btcpayapp.data.session.StoreBinding
+import java.math.BigDecimal
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -89,6 +92,8 @@ data class LightningAddressesState(
     val currencyCode: String = "",
     val min: String = "",
     val max: String = "",
+    val minError: String? = null,
+    val maxError: String? = null,
     val saving: Boolean = false,
     val formError: String? = null,
 
@@ -101,22 +106,18 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
     private val _state = MutableStateFlow(LightningAddressesState(loading = true))
     val state = _state.asStateFlow()
 
-    private val storeId get() = graph.session.activeStore.value?.id
+    /**
+     * The store this screen was opened for, fixed once known; see
+     * [StoreBinding]. The shell drops store screens on a switch, and one that
+     * read the active store at save time could write an address for store A
+     * into store B.
+     */
+    private val bound = StoreBinding(graph.session)
+    private val storeId: String? get() = bound.id
 
     init {
-        viewModelScope.launch {
-            graph.session.activeStore
-                .map { it?.id }
-                .distinctUntilChanged()
-                .collectLatest { storeId ->
-                    if (storeId != null) {
-                        load()
-                    } else {
-                        delay(NO_STORE_GRACE_MS)
-                        _state.update { it.copy(loading = false, noStore = true) }
-                    }
-                }
-        }
+        load()
+        bound.retryWhenKnown(viewModelScope) { load() }
         viewModelScope.launch {
             graph.session.activeAccount.collectLatest { account ->
                 _state.update { it.copy(host = account?.host) }
@@ -125,6 +126,16 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun refresh() = load(refreshing = true)
+
+    /**
+     * Reloads quietly when the screen comes back. Skipped while a load runs,
+     * which also covers the first resume, straight after [init].
+     */
+    fun onResume() {
+        val current = _state.value
+        if (current.loading || current.refreshing) return
+        load()
+    }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
@@ -138,6 +149,8 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
             currencyCode = "",
             min = "",
             max = "",
+            minError = null,
+            maxError = null,
             formError = null,
         )
     }
@@ -148,8 +161,12 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
             original = address,
             username = address.username,
             currencyCode = address.currencyCode.orEmpty(),
-            min = address.min.orEmpty(),
-            max = address.max.orEmpty(),
+            // Through `toInput`, so a loaded "1.125" becomes "1.1250" and
+            // saving the form unchanged does not trip the ambiguity check.
+            min = limitInput(address.min),
+            max = limitInput(address.max),
+            minError = null,
+            maxError = null,
             formError = null,
         )
     }
@@ -160,9 +177,9 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun setCurrency(value: String) = _state.update { it.copy(currencyCode = value, formError = null) }
 
-    fun setMin(value: String) = _state.update { it.copy(min = value, formError = null) }
+    fun setMin(value: String) = _state.update { it.copy(min = value, minError = null, formError = null) }
 
-    fun setMax(value: String) = _state.update { it.copy(max = value, formError = null) }
+    fun setMax(value: String) = _state.update { it.copy(max = value, maxError = null, formError = null) }
 
     fun requestDelete(username: String) = _state.update { it.copy(pendingDelete = username) }
 
@@ -170,9 +187,20 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun save() {
         val snapshot = _state.value
+        // `enabled` is one recomposition behind the click.
+        if (snapshot.saving) return
         val username = snapshot.username.trim()
         if (username.isEmpty()) {
             _state.update { it.copy(formError = "Choose a username.") }
+            return
+        }
+        val min = limitOf(snapshot.min)
+        val max = limitOf(snapshot.max)
+        val minError = limitProblem(snapshot.min)
+        val maxError = limitProblem(snapshot.max)
+            ?: if (min != null && max != null && min > max) "Must be at least the minimum." else null
+        if (minError != null || maxError != null) {
+            _state.update { it.copy(minError = minError, maxError = maxError) }
             return
         }
         val store = storeId ?: run {
@@ -181,16 +209,18 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
         }
 
         // Keep whatever invoice metadata was configured elsewhere; this screen
-        // does not edit it and must not silently drop it.
+        // does not edit it and must not silently drop it. The limits go out as
+        // plain '.' decimals: the serializer refuses anything else, so "0,5"
+        // can never reach the server as 5.
         val payload = (snapshot.original ?: LightningAddressData()).copy(
             username = username,
             currencyCode = snapshot.currencyCode.trim().uppercase().ifBlank { null },
-            min = snapshot.min.trim().ifBlank { null },
-            max = snapshot.max.trim().ifBlank { null },
+            min = min?.toPlainString(),
+            max = max?.toPlainString(),
         )
 
+        _state.update { it.copy(saving = true, formError = null) }
         viewModelScope.launch {
-            _state.update { it.copy(saving = true, formError = null) }
             runCatching { graph.session.requireApi().upsertLightningAddress(store, payload) }
                 .onSuccess {
                     _state.update { current ->
@@ -259,6 +289,18 @@ class LightningAddressesViewModel(private val graph: AppGraph) : ViewModel() {
     }
 }
 
+/** A limit as the server sent it, as field text that [limitOf] reads back unchanged. */
+private fun limitInput(text: String?): String =
+    Amounts.serverDecimal(text)?.let { Amounts.toInput(it, 3) }.orEmpty()
+
+/** A limit field: blank is no limit. Null also when [limitProblem] has something to say. */
+private fun limitOf(input: String): BigDecimal? =
+    input.takeIf { it.isNotBlank() }?.let(Amounts::parse)?.takeIf { it.signum() >= 0 }
+
+/** The field error for a limit, or null when it is blank or fine. */
+private fun limitProblem(input: String): String? =
+    Amounts.parseProblem(input) ?: Amounts.parse(input)?.takeIf { it.signum() < 0 }?.let { "Enter 0 or more." }
+
 /**
  * What the body of the addresses screen is showing.
  *
@@ -275,6 +317,8 @@ fun LightningAddressesScreen(onBack: () -> Unit) {
     val snackbarHostState = remember { SnackbarHostState() }
     val sheetState = rememberModalBottomSheetState()
     val context = LocalContext.current
+
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.onResume() }
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -495,6 +539,7 @@ private fun AddressSheet(
             label = "Minimum (sat)",
             value = state.min,
             onValueChange = onMin,
+            error = state.minError,
             enabled = !state.saving,
             keyboardType = KeyboardType.Number,
         )
@@ -503,6 +548,7 @@ private fun AddressSheet(
             label = "Maximum (sat)",
             value = state.max,
             onValueChange = onMax,
+            error = state.maxError,
             enabled = !state.saving,
             keyboardType = KeyboardType.Number,
             imeAction = ImeAction.Done,

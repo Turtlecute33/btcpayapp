@@ -115,6 +115,29 @@ class Bolt11Test {
     }
 
     @Test
+    fun `a long expiry is kept as the invoice states it`() {
+        // Replaced by the one-hour default, a valid two-year invoice read as
+        // expired two hours after it was made and Pay was disabled.
+        val twoYears = 2 * 365 * 86_400L
+        val invoice = Bolt11.decode(
+            Bolt11Fixture.invoice(timestamp = 1_700_000_000L, expirySeconds = twoYears),
+        )
+        assertEquals(twoYears, invoice?.expirySeconds)
+        assertFalse(invoice!!.isExpired(nowSeconds = 1_700_000_000L + 7_200))
+    }
+
+    @Test
+    fun `an absurd expiry is capped at a century`() {
+        val invoice = Bolt11.decode(Bolt11Fixture.invoice(expirySeconds = 1L shl 59))
+        assertEquals(100L * 365 * 86_400, invoice?.expirySeconds)
+    }
+
+    @Test
+    fun `signet invoices decode`() {
+        assertEquals("tbs", Bolt11.decode(Bolt11Fixture.invoice(hrp = "lntbs10u"))?.network)
+    }
+
+    @Test
     fun `description hash invoices report the hash and no description`() {
         val hash = "3925b6f67e2c340036ed12093dd44e0368df1b6ea26c53dbe4811f58fd5db8c1"
         // A real one carries `h` *instead of* `d`; the spec forbids both.

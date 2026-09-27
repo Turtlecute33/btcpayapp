@@ -10,7 +10,9 @@ import android.content.pm.PackageManager
 import android.util.Size
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.CameraState
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -40,6 +42,7 @@ import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -59,6 +62,9 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -80,8 +86,10 @@ import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Which of the three ways in is on screen.
@@ -118,8 +126,15 @@ fun ScanScreen(
         )
     }
     var torch by remember { mutableStateOf(false) }
+    var hasFlash by remember { mutableStateOf(false) }
     var manualEntry by remember { mutableStateOf(false) }
     var manualValue by remember { mutableStateOf("") }
+
+    // The camera cannot be used: none at the back, CameraX failing to start,
+    // or a camera that a device policy disables or that fails once open. The
+    // screen then offers typing, rather than an overlay over a black preview
+    // that never changes.
+    var cameraFailed by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -133,15 +148,38 @@ fun ScanScreen(
         if (!granted) permissionLauncher.launch(Manifest.permission.CAMERA)
     }
 
+    val mode = when {
+        manualEntry -> ScanMode.Typed
+        granted -> ScanMode.Camera
+        else -> ScanMode.Blocked
+    }
+
     AppScreen(
         title = purpose.title(),
         onBack = onBack,
         actions = {
-            IconButton(onClick = { manualEntry = !manualEntry }) {
-                Icon(Icons.Rounded.ContentPaste, contentDescription = "Type it instead")
+            // Labelled for where it leads, so the same button does not say
+            // "type it instead" to someone who is already typing.
+            IconButton(
+                onClick = {
+                    // Back to the camera is also a retry after a failure.
+                    if (manualEntry) cameraFailed = false
+                    manualEntry = !manualEntry
+                },
+            ) {
+                Icon(
+                    imageVector = if (manualEntry) Icons.Rounded.PhotoCamera else Icons.Rounded.ContentPaste,
+                    contentDescription = if (manualEntry) "Use the camera" else "Type it instead",
+                )
             }
-            if (granted) {
-                IconButton(onClick = { torch = !torch }) {
+            // Only for a camera that has a flash, and as a switch a screen
+            // reader can read the state of.
+            if (mode == ScanMode.Camera && hasFlash) {
+                IconToggleButton(
+                    checked = torch,
+                    onCheckedChange = { torch = it },
+                    modifier = Modifier.semantics { stateDescription = if (torch) "On" else "Off" },
+                ) {
                     Icon(
                         imageVector = if (torch) Icons.Rounded.FlashlightOn else Icons.Rounded.FlashlightOff,
                         contentDescription = "Torch",
@@ -151,17 +189,12 @@ fun ScanScreen(
         },
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
-            val mode = when {
-                manualEntry -> ScanMode.Typed
-                granted -> ScanMode.Camera
-                else -> ScanMode.Blocked
-            }
-
             AnimatedSwap(mode, label = "scan") { current ->
                 when (current) {
                     ScanMode.Typed -> ManualEntry(
                         value = manualValue,
                         purpose = purpose,
+                        notice = if (cameraFailed) "No usable camera. Type or paste the code instead." else null,
                         onValueChange = { manualValue = it },
                         onSubmit = {
                             if (accepts(purpose, manualValue)) onResult(manualValue.trim())
@@ -172,6 +205,11 @@ fun ScanScreen(
                         torch = torch,
                         purpose = purpose,
                         onDecoded = onResult,
+                        onReady = { flash -> hasFlash = flash },
+                        onUnavailable = {
+                            cameraFailed = true
+                            manualEntry = true
+                        },
                     )
 
                     ScanMode.Blocked -> EmptyState(
@@ -197,26 +235,42 @@ fun ScanScreen(
     }
 }
 
+/**
+ * The live preview and the analyser. [onReady] reports whether the bound
+ * camera has a flash; [onUnavailable] reports that no camera could be used.
+ */
 @Composable
 private fun CameraPreview(
     torch: Boolean,
     purpose: String,
     onDecoded: (String) -> Unit,
+    onReady: (hasFlash: Boolean) -> Unit,
+    onUnavailable: () -> Unit,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val executor: ExecutorService = remember { Executors.newSingleThreadExecutor() }
     val currentOnDecoded by rememberUpdatedState(onDecoded)
+    val currentOnReady by rememberUpdatedState(onReady)
+    val currentOnUnavailable by rememberUpdatedState(onUnavailable)
 
     // One result only. Without this a fast scanner fires the callback several
     // times before navigation completes, and the caller sees duplicates.
-    val consumed = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
-    val camera = remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
+    val consumed = remember { AtomicBoolean(false) }
+    // False once the preview has left. CameraX answers asynchronously, and a
+    // camera bound after that would stream with nothing left to release it.
+    val active = remember { AtomicBoolean(true) }
+    val camera = remember { mutableStateOf<Camera?>(null) }
     val boundProvider = remember { mutableStateOf<ProcessCameraProvider?>(null) }
     val boundAnalysis = remember { mutableStateOf<ImageAnalysis?>(null) }
+    // Another app holds the camera, or it is recovering from an error.
+    // CameraX opens it again by itself, so the preview waits and says why.
+    var busy by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         onDispose {
+            active.set(false)
+            runCatching { camera.value?.cameraInfo?.cameraState?.removeObservers(lifecycleOwner) }
             // `bindToLifecycle` only releases on the *lifecycle owner's*
             // destruction, and the owner here is the nav back-stack entry — not
             // this composable. Without this, leaving the preview while the entry
@@ -233,7 +287,9 @@ private fun CameraPreview(
         }
     }
 
-    LaunchedEffect(torch) {
+    // Also keyed on the camera, so a torch switched on before the camera
+    // was bound (or on a previous visit) is lit once it is.
+    LaunchedEffect(torch, camera.value) {
         camera.value?.cameraControl?.enableTorch(torch)
     }
 
@@ -248,54 +304,39 @@ private fun CameraPreview(
 
                 val providerFuture = ProcessCameraProvider.getInstance(viewContext)
                 providerFuture.addListener({
-                    val provider = providerFuture.get()
-
-                    val preview = Preview.Builder().build().also {
-                        it.surfaceProvider = previewView.surfaceProvider
-                    }
-
-                    val analysis = ImageAnalysis.Builder()
-                        .setResolutionSelector(
-                            ResolutionSelector.Builder()
-                                .setResolutionStrategy(
-                                    ResolutionStrategy(
-                                        Size(1280, 720),
-                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
-                                    ),
-                                )
-                                .build(),
-                        )
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .build()
-
-                    val reader = MultiFormatReader().apply {
-                        setHints(
-                            mapOf(
-                                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-                                DecodeHintType.TRY_HARDER to true,
-                            ),
-                        )
-                    }
-
-                    analysis.setAnalyzer(executor) { image ->
-                        val text = image.use { decodeQr(reader, it) }
-                        if (text != null && accepts(purpose, text) && consumed.compareAndSet(false, true)) {
-                            previewView.post { currentOnDecoded(text) }
-                        }
-                    }
-
+                    if (!active.get()) return@addListener
+                    // `get()` throws when CameraX itself failed to start, and
+                    // the bind throws when there is no back camera or it cannot
+                    // run these use cases. Either way, on the main thread:
+                    // caught, so it becomes the typed fallback and not a crash.
                     runCatching {
-                        provider.unbindAll()
-                        camera.value = provider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            analysis,
+                        bindCamera(
+                            provider = providerFuture.get(),
+                            previewView = previewView,
+                            lifecycleOwner = lifecycleOwner,
+                            executor = executor,
+                            purpose = purpose,
+                            onAccepted = { text -> previewView.post { currentOnDecoded(text) } },
+                            consumed = consumed,
                         )
+                    }.onSuccess { (provider, analysis, bound) ->
                         // Kept so `onDispose` can release them.
+                        camera.value = bound
                         boundProvider.value = provider
                         boundAnalysis.value = analysis
-                    }.onFailure { Log.e("ScanScreen", it) { "could not bind the camera" } }
+                        currentOnReady(bound.cameraInfo.hasFlashUnit())
+                        // A camera in use or disabled by a device policy still
+                        // binds: the error arrives later, on its state.
+                        bound.cameraInfo.cameraState.observe(lifecycleOwner) { state ->
+                            if (!active.get()) return@observe
+                            val error = state.error
+                            busy = error?.type == CameraState.ErrorType.RECOVERABLE
+                            if (error?.type == CameraState.ErrorType.CRITICAL) currentOnUnavailable()
+                        }
+                    }.onFailure {
+                        Log.e("ScanScreen", it) { "could not start the camera" }
+                        currentOnUnavailable()
+                    }
                 }, ContextCompat.getMainExecutor(viewContext))
 
                 previewView
@@ -305,7 +346,7 @@ private fun CameraPreview(
         ViewfinderOverlay()
 
         Text(
-            text = purpose.hint(),
+            text = if (busy) "The camera is busy. It starts once it is free." else purpose.hint(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(32.dp),
@@ -314,6 +355,65 @@ private fun CameraPreview(
             textAlign = TextAlign.Center,
         )
     }
+}
+
+/**
+ * Builds the preview and the analyser and binds both to the back camera.
+ * Throws when that camera cannot be used; the caller turns that into the
+ * typed fallback. [onAccepted] runs on the analyser thread, once.
+ */
+private fun bindCamera(
+    provider: ProcessCameraProvider,
+    previewView: PreviewView,
+    lifecycleOwner: LifecycleOwner,
+    executor: ExecutorService,
+    purpose: String,
+    consumed: AtomicBoolean,
+    onAccepted: (String) -> Unit,
+): Triple<ProcessCameraProvider, ImageAnalysis, Camera> {
+    val preview = Preview.Builder().build().also {
+        it.surfaceProvider = previewView.surfaceProvider
+    }
+
+    val analysis = ImageAnalysis.Builder()
+        .setResolutionSelector(
+            ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        Size(1280, 720),
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                    ),
+                )
+                .build(),
+        )
+        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        .build()
+
+    val reader = MultiFormatReader().apply {
+        setHints(
+            mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                DecodeHintType.TRY_HARDER to true,
+            ),
+        )
+    }
+
+    // One buffer for the life of this analyser. A new one per frame is about
+    // 0.9 MB, ten to twenty times a second, all of it garbage a moment later.
+    val luma = LumaBuffer()
+    analysis.setAnalyzer(executor) { image ->
+        val text = image.use { decodeQr(reader, it, luma) }
+        if (text != null && accepts(purpose, text) && consumed.compareAndSet(false, true)) {
+            // Nothing after the first result is wanted, so the decoding stops
+            // here rather than when navigation gets round to disposing it.
+            analysis.clearAnalyzer()
+            onAccepted(text)
+        }
+    }
+
+    provider.unbindAll()
+    val camera = provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+    return Triple(provider, analysis, camera)
 }
 
 /** How bright the frame gets, and how far it fades between breaths. */
@@ -375,10 +475,12 @@ private fun ViewfinderOverlay() {
     }
 }
 
+/** [notice] says why the camera is not offered, when that is the reason for typing. */
 @Composable
 private fun ManualEntry(
     value: String,
     purpose: String,
+    notice: String?,
     onValueChange: (String) -> Unit,
     onSubmit: () -> Unit,
 ) {
@@ -387,6 +489,14 @@ private fun ManualEntry(
         verticalArrangement = Arrangement.Top,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        if (notice != null) {
+            Text(
+                text = notice,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         FormField(
             label = purpose.title(),
             value = value,
@@ -406,16 +516,30 @@ private fun ManualEntry(
 }
 
 /**
+ * The luma plane's bytes, in one array reused from frame to frame and
+ * replaced only when the plane's size changes. Used from the analyser's
+ * single thread only, and ZXing reads it only during the decode.
+ */
+private class LumaBuffer {
+    private var bytes = ByteArray(0)
+
+    fun read(buffer: ByteBuffer): ByteArray {
+        val size = buffer.remaining()
+        if (bytes.size != size) bytes = ByteArray(size)
+        buffer.get(bytes)
+        return bytes
+    }
+}
+
+/**
  * ZXing wants a luminance plane. `YUV_420_888` puts luma first and already
  * matches, so this is a straight copy of plane 0 with no colour conversion —
  * the cheapest path, and the one that keeps the analyser off the main thread's
  * budget.
  */
-private fun decodeQr(reader: MultiFormatReader, image: ImageProxy): String? {
+private fun decodeQr(reader: MultiFormatReader, image: ImageProxy, luma: LumaBuffer): String? {
     val plane = image.planes.firstOrNull() ?: return null
-    val buffer = plane.buffer
-    val bytes = ByteArray(buffer.remaining())
-    buffer.get(bytes)
+    val bytes = luma.read(plane.buffer)
 
     val source = PlanarYUVLuminanceSource(
         bytes,

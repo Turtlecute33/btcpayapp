@@ -16,11 +16,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Storefront
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -30,14 +32,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.theme.Motion
+import kotlinx.coroutines.launch
 
 /**
  * A spinner, for waits with no predictable shape.
@@ -78,18 +85,22 @@ fun LoadingState(modifier: Modifier = Modifier, label: String? = null) {
  *
  * [rows] should be roughly what fits on screen. Fewer looks like a short list
  * that then grows; many more is wasted composition below the fold.
+ *
+ * One sweep drives every bar. The bars move in step anyway, and six rows of
+ * four bars would otherwise be twenty-four infinite animations.
  */
 @Composable
 fun SkeletonList(
     modifier: Modifier = Modifier,
     rows: Int = 6,
 ) {
+    val phase = rememberSkeletonPhase()
     Column(
         modifier = modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         repeat(rows) { index ->
-            SkeletonRow(Modifier.arrive(index))
+            SkeletonRow(Modifier.arrive(index), phase = phase)
         }
     }
 }
@@ -171,6 +182,9 @@ fun ErrorState(
 
     val icon = when (shown) {
         is ApiException.Transport, is ApiException.Timeout -> Icons.Rounded.CloudOff
+        // Not the offline cloud: the request may well have arrived, and the
+        // icon must not suggest that it did not.
+        is ApiException.OutcomeUnknown -> Icons.AutoMirrored.Rounded.HelpOutline
         is ApiException.Tls -> Icons.Rounded.Shield
         is ApiException.Unauthorized, is ApiException.Forbidden -> Icons.Rounded.Lock
         else -> Icons.Rounded.ErrorOutline
@@ -282,10 +296,24 @@ fun ErrorBanner(
     }
 }
 
+/**
+ * The title over [ApiException.userMessage].
+ *
+ * No `else`, so a new failure class cannot ship with a generic title. A
+ * certificate failure is titled by its cause: "not trusted" over a wrong name
+ * or an expired certificate sends the operator to fix the wrong thing.
+ */
 private fun ApiException.headline(): String = when (this) {
     is ApiException.Transport -> "Cannot reach the server"
     is ApiException.Timeout -> "The server is slow to answer"
-    is ApiException.Tls -> "Certificate not trusted"
+    is ApiException.OutcomeUnknown -> "Result unknown"
+    is ApiException.Tls -> when (problem) {
+        TlsProblem.UntrustedIssuer -> "Certificate not trusted"
+        TlsProblem.HostnameMismatch -> "Wrong certificate name"
+        TlsProblem.Expired -> "Certificate expired"
+        TlsProblem.KeyChanged -> "Certificate changed"
+        TlsProblem.Other -> "Secure connection failed"
+    }
     is ApiException.Unauthorized -> "Authorisation expired"
     is ApiException.Forbidden -> "Not permitted"
     is ApiException.NotFound -> "Not found"
@@ -324,6 +352,42 @@ fun FormProblem(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = verticalPadding),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.error,
+        )
+    }
+}
+
+/**
+ * The body of a store screen with no store yet: the Lightning screens, Send
+ * and New invoice. After a cold start the back stack comes back before the
+ * store list, so this is loading at first, an error with a retry if the list
+ * fails, and "No store" only when the key sees none. The retry loads the store
+ * list itself, because a screen's own refresh cannot bring it back.
+ */
+@Composable
+fun NoStoreSelectedState(modifier: Modifier = Modifier) {
+    val graph = LocalAppGraph.current
+    val store by graph.session.activeStore.collectAsStateWithLifecycle()
+    val storesLoaded by graph.session.storesLoaded.collectAsStateWithLifecycle()
+    val refreshing by graph.session.refreshing.collectAsStateWithLifecycle()
+    val error by graph.session.lastError.collectAsStateWithLifecycle()
+    when {
+        // A store that is here is about to be bound by the screen, so no
+        // "No store" flashes first. A retry shows as loading, so "Try again"
+        // visibly does something.
+        store != null || refreshing -> LoadingState(modifier)
+        // The app scope, as for the session's own load: this body goes away
+        // when the store arrives, and that must not cancel the rest of the load.
+        error != null -> ErrorState(
+            error = error,
+            modifier = modifier,
+            onRetry = { graph.scope.launch { graph.session.refresh() } },
+        )
+        !storesLoaded -> LoadingState(modifier)
+        else -> EmptyState(
+            title = "No store",
+            modifier = modifier,
+            description = "This key cannot see a store. Create one on the server, or pair again.",
+            icon = Icons.Rounded.Storefront,
         )
     }
 }

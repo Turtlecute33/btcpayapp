@@ -15,6 +15,17 @@ class AccountRepository internal constructor(private val file: EncryptedJsonFile
     val vault: StateFlow<Vault> = file.state
     val loaded: StateFlow<Boolean> = file.loaded
 
+    /** True while the stored vault exists but cannot be read yet. See [EncryptedJsonFile.unreadable]. */
+    val unreadable: StateFlow<Boolean> = file.unreadable
+
+    /**
+     * True when the stored accounts could not be opened and the app started
+     * with none, until the next save. Their API keys still work on
+     * the servers, so the user must be told to revoke them there.
+     * See [EncryptedJsonFile.lost].
+     */
+    val lost: StateFlow<Boolean> = file.lost
+
     suspend fun add(account: Account, makeActive: Boolean = true): Account {
         val stored = account.copy(
             id = account.id.ifBlank { UUID.randomUUID().toString() },
@@ -35,6 +46,11 @@ class AccountRepository internal constructor(private val file: EncryptedJsonFile
         }
     }
 
+    /**
+     * Removes the vault entry only. Screens call
+     * [com.btcpayapp.AppGraph.removeAccount], which also forgets the account's
+     * sync state and notifications.
+     */
     suspend fun remove(id: String) {
         file.update { vault ->
             val remaining = vault.accounts.filterNot { it.id == id }
