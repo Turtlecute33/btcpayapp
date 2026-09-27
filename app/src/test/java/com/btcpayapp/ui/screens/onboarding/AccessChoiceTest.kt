@@ -3,11 +3,12 @@ package com.btcpayapp.ui.screens.onboarding
 import com.btcpayapp.core.pairing.Pairing
 import com.btcpayapp.data.session.Permissions
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The access choice decides what a new key can do, and the paste screen
+ * The access choice decides what a new key can do, and the key screen
  * compares what a key got with what was chosen. The default must never be
  * able to move funds, and the compare must follow the server's
  * policy tree, or it warns about a 2.3 key that is fine and misses one that
@@ -20,8 +21,7 @@ class AccessChoiceTest {
     @Test
     fun `take payments is first, the default, and asks for the point of sale set`() {
         assertEquals(PermissionSet.TakePayments, PermissionSet.entries.first())
-        assertEquals(PermissionSet.TakePayments, PairState().permissionSet)
-        assertEquals(PermissionSet.TakePayments, ManualKeyState().access)
+        assertEquals(PermissionSet.TakePayments, ApiKeyState().access)
         assertEquals(Pairing.POINT_OF_SALE_PERMISSIONS, permissionsFor(PermissionSet.TakePayments, serverAdmin = false))
     }
 
@@ -70,15 +70,6 @@ class AccessChoiceTest {
             "${STORE}webhooks.canmodifywebhooks",
         )
         assertEquals(emptyList<String>(), forbidden.filter { Permissions.covers(pos, it) })
-    }
-
-    @Test
-    fun `an unknown access name falls back to the least access`() {
-        assertEquals(PermissionSet.Full, permissionSetNamed("Full"))
-        assertEquals(PermissionSet.ReadOnly, permissionSetNamed("ReadOnly"))
-        assertEquals(PermissionSet.TakePayments, permissionSetNamed("TakePayments"))
-        assertEquals(PermissionSet.TakePayments, permissionSetNamed("Unrestricted"))
-        assertEquals(PermissionSet.TakePayments, permissionSetNamed(""))
     }
 
     // --- permissionDiff ----------------------------------------------------
@@ -140,6 +131,24 @@ class AccessChoiceTest {
     @Test
     fun `a key that did not report its permissions shows no difference`() {
         assertEquals(NOTHING, permissionDiff(permissionsFor(PermissionSet.Full, serverAdmin = false), emptyList()))
+    }
+
+    // --- keyMatches --------------------------------------------------------
+
+    @Test
+    fun `a key that does what was chosen saves without a question`() {
+        val requested = permissionsFor(PermissionSet.TakePayments, serverAdmin = false)
+        assertTrue(keyMatches(requested, requested.map { "$it:store-a" }))
+    }
+
+    @Test
+    fun `a key with more, less or unknown permissions asks first`() {
+        val requested = permissionsFor(PermissionSet.TakePayments, serverAdmin = false)
+        assertFalse(keyMatches(requested, Pairing.DEFAULT_PERMISSIONS))
+        assertFalse(keyMatches(requested, listOf("unrestricted")))
+        assertFalse(keyMatches(requested, requested - "btcpay.user.canviewprofile"))
+        // Nothing then says what the key can do.
+        assertFalse(keyMatches(requested, emptyList()))
     }
 
     private companion object {

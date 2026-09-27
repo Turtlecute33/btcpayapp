@@ -18,7 +18,6 @@ class PairingTest {
     fun `permissions are repeated, not comma-joined`() {
         val url = Pairing.authorizeUrl(
             baseUrl = BASE,
-            redirectUri = "http://127.0.0.1:41234/abc",
             permissions = listOf("btcpay.store.canviewinvoices", "btcpay.store.cancreateinvoice"),
         )
 
@@ -28,28 +27,21 @@ class PairingTest {
     }
 
     @Test
-    fun `redirect is percent-encoded so the colon and slashes survive`() {
-        val url = Pairing.authorizeUrl(
-            baseUrl = BASE,
-            redirectUri = "http://127.0.0.1:41234/abc",
-            permissions = emptyList(),
-        )
-
-        assertTrue(url.contains("redirect=http%3A%2F%2F127.0.0.1%3A41234%2Fabc"))
+    fun `there is no redirect, so the server shows the key to copy`() {
+        val url = Pairing.authorizeUrl(BASE, Pairing.DEFAULT_PERMISSIONS)
+        assertFalse(url.contains("redirect="))
     }
 
     @Test
     fun `the consent page lets the user untick and pick stores`() {
-        val url = Pairing.authorizeUrl(BASE, "http://127.0.0.1:1/x", emptyList())
-        val manual = Pairing.manualAuthorizeUrl(BASE, Pairing.DEFAULT_PERMISSIONS)
+        val url = Pairing.authorizeUrl(BASE, Pairing.DEFAULT_PERMISSIONS)
 
         // strict=true draws every requested box disabled, so the user could
         // only take the whole list; selectiveStores=true lets the
         // user scope the key to one store.
         assertTrue(url.contains("strict=false"))
+        assertFalse(url.contains("strict=true"))
         assertTrue(url.contains("selectiveStores=true"))
-        assertTrue(manual.contains("strict=false"))
-        assertFalse(manual.contains("strict=true"))
     }
 
     @Test
@@ -86,7 +78,7 @@ class PairingTest {
 
     @Test
     fun `a trailing slash on the base url does not produce a double slash`() {
-        val url = Pairing.authorizeUrl("$BASE/", "http://127.0.0.1:1/x", emptyList())
+        val url = Pairing.authorizeUrl("$BASE/", emptyList())
         assertTrue(url.startsWith("$BASE/api-keys/authorize?"))
     }
 
@@ -108,17 +100,6 @@ class PairingTest {
                 permission.contains("canbroadcast")
         }
         assertEquals(emptyList<String>(), mutating)
-    }
-
-    @Test
-    fun `login hand-off keeps the authorize page as the return target`() {
-        val authorize = Pairing.authorizeUrl(BASE, "http://127.0.0.1:1/x", listOf("btcpay.user.canviewprofile"))
-        val url = Pairing.loginThenAuthorizeUrl(BASE, "deadbeef", authorize)
-
-        assertTrue(url.startsWith("$BASE/login?LoginCode=deadbeef&returnUrl="))
-        // The return target must be a path, not an absolute URL, or the server
-        // treats it as an open redirect and drops it.
-        assertTrue(url.contains("returnUrl=%2Fapi-keys%2Fauthorize"))
     }
 
     @Test

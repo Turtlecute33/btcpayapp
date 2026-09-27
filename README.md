@@ -77,7 +77,8 @@ of the public graph, made with `scripts/build-node-directory.rb`;
 
    The signing certificate SHA-256 must be
    `67ac728e39bb4866e613c8f676ab4cbd2baaa6a0d2728c53dcf9913f993727ba`.
-3. Install the APK, open the app and pair it with your server.
+3. Install the APK, open the app and connect it with an API key from your
+   server.
 
 Requires Android 8.0 or later and BTCPay Server 2.2 or later. Some features
 need a newer server: on-chain sending needs 2.3.3, editing crowdfunds 2.3.7,
@@ -100,7 +101,7 @@ echo "sdk.dir=/path/to/Android/sdk" > local.properties
 ```
 
 The tests run on the JVM only. Before a release, try the signed release APK on
-a phone: pairing, the app lock and one send.
+a phone: connecting a server, the app lock and one send.
 
 Gradle checks every dependency against `gradle/verification-metadata.xml`.
 After you change a dependency, update it with

@@ -28,19 +28,10 @@ data object WelcomeRoute
 data object ConnectRoute
 
 @Serializable
-data class PairRoute(
+data class ApiKeyRoute(
     val baseUrl: String,
     /** Comma-separated SPKI pins accepted during the probe, if any. */
     val pins: String = "",
-)
-
-@Serializable
-data class ManualKeyRoute(
-    val baseUrl: String,
-    val pins: String = "",
-    /** The access chosen on the pairing screen: a `PermissionSet` name such as `TakePayments`. */
-    val access: String = "TakePayments",
-    val serverAdmin: Boolean = false,
 )
 
 // --- Top-level tabs --------------------------------------------------------

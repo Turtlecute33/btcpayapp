@@ -43,9 +43,8 @@ import com.btcpayapp.ui.screens.lightning.LightningPaymentsScreen
 import com.btcpayapp.ui.screens.lightning.LightningReceiveScreen
 import com.btcpayapp.ui.screens.lightning.LightningScreen
 import com.btcpayapp.ui.screens.notifications.NotificationsScreen
+import com.btcpayapp.ui.screens.onboarding.ApiKeyScreen
 import com.btcpayapp.ui.screens.onboarding.ConnectScreen
-import com.btcpayapp.ui.screens.onboarding.ManualKeyScreen
-import com.btcpayapp.ui.screens.onboarding.PairScreen
 import com.btcpayapp.ui.screens.onboarding.WelcomeScreen
 import com.btcpayapp.ui.screens.payout.PayoutCreateScreen
 import com.btcpayapp.ui.screens.payout.PayoutListScreen
@@ -306,33 +305,18 @@ fun AppNavHost(
                     ConnectScreen(
                         onBack = back,
                         onConnected = { baseUrl, pins ->
-                            navController.navigate(PairRoute(baseUrl, pins.joinToString(",")))
+                            navController.navigate(ApiKeyRoute(baseUrl, pins.joinToString(",")))
                         },
                     )
                 }
 
-                screen<PairRoute> { entry ->
-                    val route = entry.toRoute<PairRoute>()
-                    PairScreen(
-                        baseUrl = route.baseUrl,
-                        pins = route.pins.splitPins(),
-                        onBack = back,
-                        onManualKey = { access, serverAdmin ->
-                            navController.navigate(ManualKeyRoute(route.baseUrl, route.pins, access, serverAdmin))
-                        },
-                        onPaired = { navController.toHomeClearingOnboarding() },
-                    )
-                }
-
-                screen<ManualKeyRoute> { entry ->
-                    val route = entry.toRoute<ManualKeyRoute>()
-                    ManualKeyScreen(
+                screen<ApiKeyRoute> { entry ->
+                    val route = entry.toRoute<ApiKeyRoute>()
+                    ApiKeyScreen(
                         baseUrl = route.baseUrl,
                         pins = route.pins.splitPins(),
                         onBack = back,
                         onPaired = { navController.toHomeClearingOnboarding() },
-                        access = route.access,
-                        serverAdmin = route.serverAdmin,
                     )
                 }
 

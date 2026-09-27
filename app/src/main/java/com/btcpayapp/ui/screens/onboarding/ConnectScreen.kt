@@ -214,8 +214,7 @@ fun ConnectScreen(
                 placeholder = "btcpay.example.com",
                 supportingText = normalised
                     ?.takeIf { it != state.address }
-                    ?.let { "Will connect to $it" }
-                    ?: "https:// is assumed unless the address ends in .onion.",
+                    ?.let { "Will connect to $it" },
                 keyboardType = KeyboardType.Uri,
                 imeAction = ImeAction.Go,
                 onImeAction = viewModel::connect,
@@ -224,8 +223,8 @@ fun ConnectScreen(
                 modifier = Modifier.arrive(0),
             )
 
-            // Both hints appear in response to something the user just did —
-            // typing an .onion address, accepting a certificate — so they push
+            // Both hints appear in response to something the user just did
+            // (typing an .onion address, accepting a certificate), so they push
             // the button below them down rather than materialising above it.
             AnimatedVisibility(
                 visible = onion,
@@ -234,11 +233,10 @@ fun ConnectScreen(
             ) {
                 Hint(
                     icon = Icons.Rounded.Shield,
-                    text = "Onion addresses are routed through Orbot on 127.0.0.1:9050. " +
-                        "Start Orbot and let it finish bootstrapping before you connect. " +
-                        "The first request over a fresh circuit can take half a minute. " +
-                        (if (cleartext) "While Orbot is off, another app can take that port and read the API key. " else "") +
-                        "Background checks use Orbot too. Keep it running, or turn them off in Settings.",
+                    text = "Onion addresses go through Orbot on port 9050. Start Orbot first. " +
+                        "The first connection can take 30 seconds. " +
+                        (if (cleartext) "While Orbot is off, another app can use that port and read the API key. " else "") +
+                        "Background checks also use Orbot. Keep it on, or turn off background checks in Settings.",
                 )
             }
 
@@ -249,8 +247,7 @@ fun ConnectScreen(
             ) {
                 Hint(
                     icon = Icons.Rounded.Shield,
-                    text = "A certificate has been accepted for this connection. It applies to " +
-                        "this account alone.",
+                    text = "Certificate accepted for this account only.",
                 )
             }
 
@@ -285,14 +282,6 @@ fun ConnectScreen(
                 }
             }
 
-            Spacer(Modifier.height(24.dp))
-            Text(
-                text = "Only an unauthenticated health check is sent at this point. Nothing is " +
-                    "saved until you authorise the app on the next screen.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 16.dp).arrive(2),
-            )
             Spacer(Modifier.height(24.dp))
         }
     }

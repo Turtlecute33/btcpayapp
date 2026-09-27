@@ -3,7 +3,7 @@ package com.btcpayapp.core.pairing
 import java.net.URLEncoder
 
 /**
- * Builds the URL that asks a BTCPay instance to mint an API key for this app.
+ * Builds the URL where a BTCPay instance makes an API key for this app.
  */
 object Pairing {
 
@@ -73,7 +73,7 @@ object Pairing {
         "btcpay.user.canmanagenotificationsforuser",
     )
 
-    /** Added only when the user ticks "manage this server" during pairing. */
+    /** Added only when the user ticks "manage this server". */
     val SERVER_ADMIN_PERMISSIONS: List<String> = listOf(
         "btcpay.server.canmodifyserversettings",
         "btcpay.server.canviewusers",
@@ -97,58 +97,20 @@ object Pairing {
     )
 
     /**
-     * `/api-keys/authorize` lives at the site root, not under `/api/v1`.
+     * The server's consent page, with [permissions] already ticked.
      *
-     * [selectiveStores] adds a store picker to the consent screen, which is what
-     * lets someone grant access to one store out of several. The returned
-     * permissions then carry a `:storeId` suffix.
+     * `/api-keys/authorize` lives at the site root, not under `/api/v1`. The
+     * link has no `redirect`, so the server has nowhere to send the new key
+     * and shows it on its API keys page for the user to copy. Nothing on the
+     * phone listens for a reply.
      *
-     * [strict] = false (the default) lets the user untick permissions on the
-     * consent page. BTCPay draws every requested box disabled under
-     * `strict=true`, so the user could only take the whole list or nothing.
+     * `selectiveStores=true` adds a store picker, which lets someone grant
+     * access to one store out of several; the key's permissions then carry a
+     * `:storeId` suffix. `strict=false` lets the user untick permissions:
+     * under `strict=true` BTCPay draws every requested box disabled, so the
+     * user could only take the whole list or nothing.
      */
-    fun authorizeUrl(
-        baseUrl: String,
-        redirectUri: String,
-        permissions: List<String>,
-        selectiveStores: Boolean = true,
-        strict: Boolean = false,
-    ): String {
-        val query = buildList {
-            permissions.forEach { add("permissions" to it) }
-            add("applicationName" to APPLICATION_NAME)
-            add("applicationIdentifier" to APPLICATION_IDENTIFIER)
-            add("strict" to strict.toString())
-            add("selectiveStores" to selectiveStores.toString())
-            add("redirect" to redirectUri)
-        }.joinToString("&") { (key, value) -> "$key=${value.encode()}" }
-
-        return "${baseUrl.trimEnd('/')}/api-keys/authorize?$query"
-    }
-
-    /**
-     * Wraps [authorizeUrl] in a one-time login so the user does not have to type
-     * their password in the browser.
-     *
-     * A login-code QR from BTCPay is valid for 60 seconds and bypasses 2FA by
-     * design, so it is treated as a short-lived bearer token: used immediately,
-     * never stored, never logged.
-     */
-    fun loginThenAuthorizeUrl(baseUrl: String, loginCode: String, authorizeUrl: String): String {
-        val returnUrl = authorizeUrl.removePrefix(baseUrl.trimEnd('/'))
-        return "${baseUrl.trimEnd('/')}/login?LoginCode=${loginCode.encode()}&returnUrl=${returnUrl.encode()}"
-    }
-
-    /**
-     * The same consent page as [authorizeUrl], with no redirect.
-     *
-     * This is the paste-a-key fallback. Without a `redirect` the server has
-     * nowhere to POST the grant, so it shows the new key on the page for the
-     * user to copy — which is the whole point: the permissions arrive already
-     * ticked, so nobody has to reproduce a 23-box list by hand on a phone.
-     * Sent with `strict=false`, like [authorizeUrl], so the user can untick.
-     */
-    fun manualAuthorizeUrl(baseUrl: String, permissions: List<String>): String {
+    fun authorizeUrl(baseUrl: String, permissions: List<String>): String {
         val query = buildList {
             permissions.forEach { add("permissions" to it) }
             add("applicationName" to APPLICATION_NAME)
@@ -159,9 +121,6 @@ object Pairing {
 
         return "${baseUrl.trimEnd('/')}/api-keys/authorize?$query"
     }
-
-    /** The plain key list, for someone who would rather create one by hand. */
-    fun manualApiKeyUrl(baseUrl: String): String = "${baseUrl.trimEnd('/')}/account/apikeys"
 
     /** The checkout page for an invoice, for "open in browser" and sharing. */
     fun checkoutUrl(baseUrl: String, invoiceId: String): String =

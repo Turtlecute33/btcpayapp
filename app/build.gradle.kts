@@ -58,7 +58,7 @@ android {
         applicationId = "com.btcpayapp"
         minSdk = 26
         targetSdk = 37
-        versionName = "0.2.0"
+        versionName = "0.3.0"
         // Derived, so a release can never ship a versionName bump with a stale
         // versionCode: Android installs an update only when the code grows.
         // major.minor.patch -> major * 10000 + minor * 100 + patch.

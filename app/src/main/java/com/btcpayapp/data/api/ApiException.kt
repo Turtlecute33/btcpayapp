@@ -56,7 +56,7 @@ sealed class ApiException(
 
     /** 401. The key was revoked, or the instance was re-provisioned. */
     class Unauthorized :
-        ApiException("This connection is no longer authorised. Re-pair the account.")
+        ApiException("The server does not accept this API key. Create a new key and connect again.")
 
     /** 403. [missingPermission] names the scope the key lacks, when the server says. */
     class Forbidden(val missingPermission: String?) : ApiException(

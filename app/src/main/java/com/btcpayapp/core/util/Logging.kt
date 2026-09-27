@@ -16,8 +16,8 @@ internal object Log {
 
     // `inline` is what makes the claim above true. As ordinary functions these
     // would allocate a capturing lambda at every call site and make a real call
-    // that checks `BuildConfig.DEBUG` at runtime — including inside the accept
-    // loop in `PairingReceiver` and the read path of `EncryptedJsonFile`.
+    // that checks `BuildConfig.DEBUG` at runtime — including inside the read
+    // path of `EncryptedJsonFile`.
     // Inlined, the constant folds at the call site and both the lambda and the
     // argument expression disappear from release builds entirely.
     inline fun d(tag: String, message: () -> String) {
