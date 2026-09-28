@@ -157,7 +157,7 @@ internal suspend fun BtcPayApi.rates(storeId: String, currencyPairs: List<String
  * ([ServerVersion.MINIMUM]); before that only the unsuffixed route did.
  */
 internal suspend fun BtcPayApi.rateConfiguration(storeId: String, rateSource: String = "primary"): StoreRateConfiguration =
-    get("api/v1/stores/${storeId.pathSegment()}/rates/configuration/$rateSource")
+    get("api/v1/stores/${storeId.pathSegment()}/rates/configuration/${rateSource.pathSegment()}")
 
 /** Sends [StoreRateConfiguration.forWrite], never the loaded object as it is. */
 internal suspend fun BtcPayApi.updateRateConfiguration(
@@ -165,7 +165,7 @@ internal suspend fun BtcPayApi.updateRateConfiguration(
     configuration: StoreRateConfiguration,
     rateSource: String = "primary",
 ): StoreRateConfiguration =
-    put("api/v1/stores/${storeId.pathSegment()}/rates/configuration/$rateSource", body(configuration.forWrite()))
+    put("api/v1/stores/${storeId.pathSegment()}/rates/configuration/${rateSource.pathSegment()}", body(configuration.forWrite()))
 
 /** Validated like an update, so the body is [StoreRateConfiguration.forWrite] too. */
 internal suspend fun BtcPayApi.previewRateConfiguration(

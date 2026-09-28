@@ -175,9 +175,15 @@ object Amounts {
     fun formatMsat(msat: String?, unit: BitcoinUnit, locale: Locale = Locale.getDefault()): String =
         formatBitcoin(msatToBtc(msat), unit, locale)
 
-    /** Drops trailing zeros without switching to scientific notation. */
+    /**
+     * Drops trailing zeros without switching to scientific notation.
+     *
+     * [maxScale] is held to 0..32, the bounds of [serverDecimal]: the refund
+     * screen passes the server's divisibility, and a scale of millions makes
+     * this build a number of millions of digits inside composition.
+     */
     fun trim(value: BigDecimal, maxScale: Int): String {
-        val scaled = value.setScale(maxScale, RoundingMode.HALF_UP)
+        val scaled = value.setScale(maxScale.coerceIn(0, 32), RoundingMode.HALF_UP)
         val stripped = scaled.stripTrailingZeros()
         return if (stripped.scale() < 0) stripped.setScale(0).toPlainString() else stripped.toPlainString()
     }

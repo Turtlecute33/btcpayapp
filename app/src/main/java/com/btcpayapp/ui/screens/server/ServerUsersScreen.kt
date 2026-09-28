@@ -230,7 +230,7 @@ class ServerUsersViewModel(private val graph: AppGraph) : ViewModel() {
                 .onSuccess { list ->
                     _state.update {
                         it.copy(
-                            users = list.sortedBy { user -> user.email.lowercase() },
+                            users = list.distinctBy(ApplicationUserData::id).sortedBy { user -> user.email.lowercase() },
                             loading = false,
                             refreshing = false,
                             error = null,

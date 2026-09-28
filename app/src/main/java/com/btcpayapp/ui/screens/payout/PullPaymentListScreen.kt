@@ -107,7 +107,7 @@ class PullPaymentListViewModel(private val graph: AppGraph) : ViewModel() {
             runCatching { graph.session.requireApi().pullPayments(store, includeArchived) }
                 .onSuccess { list ->
                     _state.update {
-                        it.copy(pullPayments = list, loading = false, refreshing = false, error = null)
+                        it.copy(pullPayments = list.distinctBy(PullPaymentData::id), loading = false, refreshing = false, error = null)
                     }
                 }
                 .onFailure { failure ->

@@ -272,7 +272,7 @@ class AppsViewModel(private val graph: AppGraph) : ViewModel() {
             runCatching { graph.session.requireApi().storeApps(store) }
                 .onSuccess { list ->
                     _state.update {
-                        if (it.storeId != store) it else it.copy(apps = list, loading = false, refreshing = false, error = null)
+                        if (it.storeId != store) it else it.copy(apps = list.distinctBy(AppData::id), loading = false, refreshing = false, error = null)
                     }
                 }
                 .onFailure { failure ->

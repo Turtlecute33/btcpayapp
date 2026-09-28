@@ -6,9 +6,12 @@ import org.junit.Test
 
 class FeedPollingTest {
     private fun item(id: String, created: Long) = NotificationData(id = id, createdTime = created)
-    private fun event(identifier: String, link: String? = null) = NotificationData(id = "n", identifier = identifier, link = link)
+    private fun event(identifier: String, link: String? = null, storeId: String? = STORE) =
+        NotificationData(id = "n", identifier = identifier, link = link, storeId = storeId)
     private fun covered(identifier: String, payments: Boolean, payouts: Boolean, link: String? = null, announced: Set<String> = emptySet()) =
-        coveredByOwnAlerts(event(identifier, link), payments, payouts, announced)
+        coveredByOwnAlerts(event(identifier, link), polled(payments), polled(payouts), announced)
+    private fun polled(on: Boolean) = if (on) setOf(STORE) else emptySet()
+    private fun evaluateFeed(previous: FeedPollState?, items: List<NotificationData>) = evaluateFeed(previous, items, NOW)
 
     @Test fun `the first run adopts the backlog without announcing it`() {
         val first = evaluateFeed(null, listOf(item("a", 100), item("b", 90)))
@@ -54,7 +57,6 @@ class FeedPollingTest {
             assertFalse(it, covered(it, payments = true, payouts = true, link = link, announced = setOf("Other9")))
             assertFalse(it, covered(it, payments = true, payouts = true, link = null, announced = setOf("Inv123")))
             assertTrue(it, covered(it, payments = true, payouts = true, link = link, announced = setOf("Inv123")))
-            assertFalse(it, covered(it, payments = false, payouts = true, link = link, announced = setOf("Inv123")))
         }
     }
 
@@ -72,5 +74,38 @@ class FeedPollingTest {
             "newversion", "newuserrequiresapproval", "storeinvitation", "external-payout-transaction").forEach {
             assertFalse(it, covered(it, payments = true, payouts = true, link = "https://x/invoices/a", announced = setOf("a")))
         }
+    }
+
+    @Test fun `an event in a store the poll does not read comes from the feed`() {
+        listOf("invoice_confirmed" to setOf("other"), "payout_awaitingapproval" to setOf("other")).forEach { (identifier, stores) ->
+            assertFalse(identifier, coveredByOwnAlerts(event(identifier), stores, stores, emptySet()))
+            assertTrue(identifier, coveredByOwnAlerts(event(identifier), stores + STORE, stores + STORE, emptySet()))
+        }
+    }
+
+    @Test fun `an event that names no store is left to a poll that reads any store`() {
+        assertTrue(coveredByOwnAlerts(event("invoice_confirmed", storeId = null), setOf("other"), emptySet(), emptySet()))
+        assertFalse(coveredByOwnAlerts(event("invoice_confirmed", storeId = null), emptySet(), emptySet(), emptySet()))
+    }
+
+    @Test fun `an entry far in the future does not stop later ones`() {
+        val poisoned = evaluateFeed(FeedPollState(NOW - 60), listOf(item("future", 9_999_999_999)))
+        assertTrue(poisoned.fresh.isEmpty())
+        assertEquals(NOW - 60, poisoned.state.since)
+        val next = evaluateFeed(poisoned.state, listOf(item("real", NOW), item("future", 9_999_999_999)))
+        assertEquals(listOf("real"), next.fresh.map { it.id })
+    }
+
+    @Test fun `a watermark saved far in the future is moved back`() {
+        val next = evaluateFeed(FeedPollState(9_999_999_999, listOf("future")), emptyList())
+        assertEquals(NOW + DAY, next.state.since)
+        val dayLater = NOW + DAY + 5
+        assertEquals(listOf("real"), evaluateFeed(next.state, listOf(item("real", dayLater)), dayLater).fresh.map { it.id })
+    }
+
+    private companion object {
+        const val STORE = "s1"
+        const val NOW = 1_800_000_000L
+        const val DAY = 24 * 60 * 60L
     }
 }

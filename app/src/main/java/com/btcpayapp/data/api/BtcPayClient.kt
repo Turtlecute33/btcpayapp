@@ -146,6 +146,7 @@ class BtcPayClient(
     suspend fun <T> decode(response: HttpResponse, deserializer: DeserializationStrategy<T>): T =
         withContext(Dispatchers.Default) {
             val text = response.bodyAsText()
+            if (nestsDeeperThan(text, MAX_NESTING)) throw ApiException.Decoding()
             try {
                 json.decodeFromString(deserializer, text)
             } catch (e: SerializationException) {
@@ -156,6 +157,33 @@ class BtcPayClient(
             }
         }
 }
+
+/**
+ * Whether [text] nests arrays and objects deeper than [limit].
+ *
+ * The JSON parser reads a nested array by recursion. A free-form field that
+ * the server or an invoice's creator writes, such as invoice metadata, nested
+ * some thousand levels deep overflows the stack. That is an Error, which no
+ * screen or sync job catches, so the app stops, and again on each start.
+ */
+internal fun nestsDeeperThan(text: String, limit: Int): Boolean {
+    var depth = 0
+    var inString = false
+    var escaped = false
+    for (c in text) {
+        when {
+            escaped -> escaped = false
+            inString -> if (c == '\\') escaped = true else if (c == '"') inString = false
+            c == '"' -> inString = true
+            c == '[' || c == '{' -> if (++depth > limit) return true
+            c == ']' || c == '}' -> depth--
+        }
+    }
+    return false
+}
+
+/** Far deeper than any BTCPay response, and far below what overflows the stack. */
+private const val MAX_NESTING = 128
 
 /**
  * [unsafeToRepeat]: a POST that failed after the connection opened may have

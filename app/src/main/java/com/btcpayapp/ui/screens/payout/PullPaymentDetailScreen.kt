@@ -181,7 +181,7 @@ class PullPaymentDetailViewModel(
             // A failure keeps the claims already on screen and says so.
             runCatching { api.pullPaymentPayouts(pullPaymentId, includeCancelled = true) }
                 .onSuccess { list ->
-                    _state.update { it.copy(payouts = list.sortedByDescending(PayoutData::date), claimsError = null) }
+                    _state.update { it.copy(payouts = list.distinctBy(PayoutData::id).sortedByDescending(PayoutData::date), claimsError = null) }
                 }
                 .onFailure { failure -> _state.update { it.copy(claimsError = failure.asApiException()) } }
 

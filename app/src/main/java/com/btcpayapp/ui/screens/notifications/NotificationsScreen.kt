@@ -324,7 +324,7 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
             }
                 .onSuccess { list ->
                     _state.update {
-                        it.copy(items = list, loading = false, refreshing = false, error = null)
+                        it.copy(items = list.distinctBy(NotificationData::id), loading = false, refreshing = false, error = null)
                     }
                 }
                 .onFailure { failure ->

@@ -203,7 +203,7 @@ class WebhooksViewModel(private val graph: AppGraph) : ViewModel() {
             runCatching { graph.session.requireApi().webhooks(store) }
                 .onSuccess { list ->
                     _state.update {
-                        it.copy(webhooks = list, loading = false, refreshing = false, error = null)
+                        it.copy(webhooks = list.distinctBy(WebhookData::id), loading = false, refreshing = false, error = null)
                     }
                 }
                 .onFailure { failure ->

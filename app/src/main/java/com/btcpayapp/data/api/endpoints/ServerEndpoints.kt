@@ -96,10 +96,6 @@ internal suspend fun BtcPayApi.revokeCurrentApiKey() {
     call("DELETE", "api/v1/api-keys/current")
 }
 
-internal suspend fun BtcPayApi.revokeApiKey(apiKeyId: String) {
-    call("DELETE", "api/v1/api-keys/$apiKeyId")
-}
-
 // ---------------------------------------------------------------------------
 // Users (server admin)
 // ---------------------------------------------------------------------------

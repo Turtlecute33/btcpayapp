@@ -111,6 +111,12 @@ class AmountsTest {
     }
 
     @Test
+    fun `trim holds a server's divisibility to a sane scale`() {
+        assertEquals("0.001", Amounts.trim(BigDecimal("0.001"), Int.MAX_VALUE))
+        assertEquals("1", Amounts.trim(BigDecimal("1.4"), Int.MIN_VALUE))
+    }
+
+    @Test
     fun `the mask has one width whatever it hides`() {
         // A mask as long as the amount told a shoulder-surfer its magnitude.
         assertEquals(6, Amounts.MASK.length)

@@ -554,7 +554,7 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                 _state.update { current ->
                     current.copy(
                         overview = onChainResult?.getOrNull()?.first ?: current.overview,
-                        transactions = page ?: current.transactions,
+                        transactions = page?.distinctBy { it.transactionHash ?: it } ?: current.transactions,
                         onChainError = onChainError,
                         transactionsComplete = page?.let { it.size < depth } ?: current.transactionsComplete,
                         // No offchain block on an answer means no channels,

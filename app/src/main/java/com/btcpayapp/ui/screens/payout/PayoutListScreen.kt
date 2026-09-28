@@ -276,7 +276,7 @@ class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
                 .onSuccess { list ->
                     _state.update {
                         it.copy(
-                            payouts = list.sortedByDescending(PayoutData::date),
+                            payouts = list.distinctBy(PayoutData::id).sortedByDescending(PayoutData::date),
                             loading = false,
                             refreshing = false,
                             error = null,

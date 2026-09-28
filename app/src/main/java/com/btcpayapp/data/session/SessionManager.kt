@@ -289,7 +289,7 @@ class SessionManager(
 
             stores
                 .onSuccess { list ->
-                    _stores.value = list.sortedBy { it.name.lowercase() }
+                    _stores.value = list.distinctBy { it.id }.sortedBy { it.name.lowercase() }
                     storesOwner.value = owner
                     _storesLoaded.value = true
                     _lastError.value = null

@@ -231,7 +231,7 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
                             it
                         } else {
                             it.copy(
-                                requests = list.sortedByDescending(PaymentRequestData::createdTime),
+                                requests = list.distinctBy(PaymentRequestData::id).sortedByDescending(PaymentRequestData::createdTime),
                                 loading = false,
                                 refreshing = false,
                                 error = null,

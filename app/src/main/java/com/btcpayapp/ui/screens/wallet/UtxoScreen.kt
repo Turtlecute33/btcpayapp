@@ -112,7 +112,7 @@ class UtxoViewModel(
             runCatching {
                 graph.session.requireApi().walletUtxos(storeId, paymentMethodId)
             }.onSuccess { utxos ->
-                _state.update { it.copy(utxos = utxos, loading = false, refreshing = false, error = null) }
+                _state.update { it.copy(utxos = utxos.distinctBy(WalletUtxoData::outpoint), loading = false, refreshing = false, error = null) }
             }.onFailure { failure ->
                 _state.update {
                     it.copy(

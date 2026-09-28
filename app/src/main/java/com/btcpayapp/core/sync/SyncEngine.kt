@@ -187,15 +187,22 @@ class SyncEngine internal constructor(
             }
         }
 
+        val invoiceStores = storeIds.filter {
+            config.notifyPayments && Permissions.covers(account.permissions, CAN_VIEW_INVOICES, it)
+        }.toSet()
+        val payoutStores = storeIds.filter {
+            config.notifyPayouts && Permissions.covers(account.permissions, CAN_VIEW_PAYOUTS, it)
+        }.toSet()
+
         storeIds.forEach { storeId ->
-            if (config.notifyPayments && Permissions.covers(account.permissions, CAN_VIEW_INVOICES, storeId)) {
+            if (storeId in invoiceStores) {
                 attempt("invoice poll") { notifyNewSettlements(api, account, storeId, announcedInvoices) }
             }
             // Never counted against the account: stores() has just shown the
             // server answers, and the payout list has no server paging, so a
             // store with a long history can pass the 8 MB response cap, which
             // fails as a Transport error.
-            if (config.notifyPayouts && Permissions.covers(account.permissions, CAN_VIEW_PAYOUTS, storeId)) {
+            if (storeId in payoutStores) {
                 attempt("payout check", countsAgainstAccount = false) {
                     notifyPendingPayouts(api, account, storeId)
                 }
@@ -204,7 +211,7 @@ class SyncEngine internal constructor(
         // After the invoice polls, so that a late payment or a failure to
         // confirm that they announced is not announced again by the feed.
         if (config.notifyServerNotifications && Permissions.covers(account.permissions, CAN_VIEW_NOTIFICATIONS)) {
-            attempt("feed read") { notifyServerFeed(api, account, config, announcedInvoices) }
+            attempt("feed read") { notifyServerFeed(api, account, invoiceStores, payoutStores, announcedInvoices) }
         }
         return AccountOutcome(found, problem = if (reached) null else UNREACHABLE_BODY)
     }
@@ -249,13 +256,14 @@ class SyncEngine internal constructor(
     private suspend fun notifyServerFeed(
         api: BtcPayApi,
         account: Account,
-        config: AppSettings,
+        invoiceStores: Set<String>,
+        payoutStores: Set<String>,
         announcedInvoices: Set<String>,
     ): Int {
         val previous = stateFile.state.value.feedPoll(account.id)
-        val result = evaluateFeed(previous, api.notifications(seen = false, take = FEED_TAKE))
+        val result = evaluateFeed(previous, api.notifications(seen = false, take = FEED_TAKE), nowSeconds())
         val shown = result.fresh.filterNot {
-            coveredByOwnAlerts(it, config.notifyPayments, config.notifyPayouts, announcedInvoices)
+            coveredByOwnAlerts(it, invoiceStores, payoutStores, announcedInvoices)
         }
 
         shown.forEach { item ->
