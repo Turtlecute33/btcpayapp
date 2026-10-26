@@ -20,4 +20,11 @@
         <exclude domain="sharedpref" />
         <exclude domain="external" />
     </device-transfer>
+    <cross-platform-transfer platform="ios">
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cross-platform-transfer>
 </data-extraction-rules>
