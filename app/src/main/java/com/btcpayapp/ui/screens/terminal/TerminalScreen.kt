@@ -27,11 +27,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Backspace
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.Percent
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
@@ -119,6 +123,11 @@ data class TerminalState(
     val askingForTip: Boolean = false,
     val creating: Boolean = false,
     val error: ApiException? = null,
+    /**
+     * The currency chips: the store default, the remembered code, SATS and
+     * BTC, and each code picked from More. The other codes stay behind More,
+     * so that a wrong tap next to the keypad does not change the currency.
+     */
     val availableCurrencies: List<String> = emptyList(),
     /**
      * The store this terminal charges into, null until the session reports
@@ -160,6 +169,9 @@ data class TerminalState(
 
     val canCharge: Boolean get() = total.signum() > 0 && !creating
 
+    /** The codes behind the More chip: [OTHER_CURRENCIES] that have no chip yet. */
+    val moreCurrencies: List<String> get() = OTHER_CURRENCIES.filterNot { it in availableCurrencies }
+
     /**
      * [digit] appended to the entry. The entry stops at [MAX_DIGITS], so a
      * stuck key cannot produce an absurd invoice, and leading zeros are
@@ -174,12 +186,14 @@ data class TerminalState(
      * The digit string is interpreted against the currency's scale, so
      * carrying it across a scale change silently reinterprets the amount:
      * "1234" means 12.34 in USD but 0.00001234 in BTC. It is cleared rather
-     * than charge a number the operator never typed.
+     * than charge a number the operator never typed. A code picked from More
+     * gets a chip, so that the selection stays visible.
      */
     internal fun withCurrency(code: String): TerminalState {
         val rescale = Amounts.scaleFor(code) != Amounts.scaleFor(currency)
         return copy(
             currency = code,
+            availableCurrencies = if (code in availableCurrencies) availableCurrencies else availableCurrencies + code,
             digits = if (rescale) "" else digits,
             tipPercent = if (rescale) null else tipPercent,
             askingForTip = if (rescale) false else askingForTip,
@@ -192,6 +206,9 @@ data class TerminalState(
 
     companion object {
         internal const val MAX_DIGITS = 12
+
+        /** The common fiat codes that the More chip offers. */
+        internal val OTHER_CURRENCIES = listOf("USD", "EUR", "GBP", "CHF", "CZK")
     }
 }
 
@@ -222,11 +239,7 @@ class TerminalViewModel(private val graph: AppGraph) : ViewModel() {
                     storeId = bound.id,
                     currencyKey = key,
                     currency = remembered ?: bound.defaultCurrency,
-                    availableCurrencies = listOfNotNull(
-                        bound.defaultCurrency,
-                        remembered,
-                        "USD", "EUR", "GBP", "CHF", "CZK", "SATS", "BTC",
-                    ).distinct(),
+                    availableCurrencies = listOfNotNull(bound.defaultCurrency, remembered, "SATS", "BTC").distinct(),
                     canCreateInvoice = graph.session.canCreateInvoice(bound.id),
                 )
             }
@@ -470,7 +483,8 @@ private fun ColumnScope.AmountEntry(
     AmountDisplay(state = state)
     Spacer(Modifier.weight(1f))
 
-    CurrencyRow(selected = state.currency, options = state.availableCurrencies, onSelect = onCurrency)
+    val more = remember(state.availableCurrencies) { state.moreCurrencies }
+    CurrencyRow(selected = state.currency, options = state.availableCurrencies, more = more, onSelect = onCurrency)
 
     AnimatedVisibility(
         visible = state.askingForTip,
@@ -613,18 +627,48 @@ private fun AmountDisplay(state: TerminalState) {
 }
 
 @Composable
-private fun CurrencyRow(selected: String, options: List<String>, onSelect: (String) -> Unit) {
+private fun CurrencyRow(selected: String, options: List<String>, more: List<String>, onSelect: (String) -> Unit) {
+    var moreOpen by remember { mutableStateOf(false) }
     LazyRow(
         modifier = Modifier.fillMaxWidth(),
         contentPadding = PaddingValues(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(options) { code ->
+        items(options, key = { it }) { code ->
             FilterChip(
                 selected = code == selected,
                 onClick = { onSelect(code) },
                 label = { Text(code) },
             )
+        }
+        if (more.isNotEmpty()) {
+            item(key = "more") {
+                Box {
+                    FilterChip(
+                        selected = false,
+                        onClick = { moreOpen = true },
+                        label = { Text("More") },
+                        trailingIcon = {
+                            Icon(
+                                Icons.Rounded.ArrowDropDown,
+                                contentDescription = null,
+                                modifier = Modifier.size(FilterChipDefaults.IconSize),
+                            )
+                        },
+                    )
+                    DropdownMenu(expanded = moreOpen, onDismissRequest = { moreOpen = false }) {
+                        more.forEach { code ->
+                            DropdownMenuItem(
+                                text = { Text(code) },
+                                onClick = {
+                                    moreOpen = false
+                                    onSelect(code)
+                                },
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

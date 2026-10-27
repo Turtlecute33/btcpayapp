@@ -110,6 +110,21 @@ class TerminalStateTest {
     }
 
     @Test
+    fun `more offers the common codes that have no chip`() {
+        val state = TerminalState(currency = "EUR", availableCurrencies = listOf("EUR", "SATS", "BTC"))
+        assertEquals(listOf("USD", "GBP", "CHF", "CZK"), state.moreCurrencies)
+    }
+
+    @Test
+    fun `a code picked from more gets a chip`() {
+        val state = TerminalState(currency = "USD", availableCurrencies = listOf("USD", "SATS", "BTC"))
+        val picked = state.withCurrency("GBP")
+        assertEquals(listOf("USD", "SATS", "BTC", "GBP"), picked.availableCurrencies)
+        assertEquals(listOf("EUR", "CHF", "CZK"), picked.moreCurrencies)
+        assertEquals(listOf("USD", "SATS", "BTC", "GBP"), picked.withCurrency("SATS").availableCurrencies)
+    }
+
+    @Test
     fun `cannot charge while an invoice is being created`() {
         val state = typed("USD", "100")
         assertTrue(state.canCharge)
