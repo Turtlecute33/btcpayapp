@@ -14,9 +14,16 @@ import kotlinx.serialization.Serializable
  * unpaid is dropped; a late payment after that comes from the server's
  * notification feed.
  *
+ * [since] is the creation time from which the next run reads (`startDate`).
+ * It is [SKEW_OVERLAP_S] before this run, but not before the start of the
+ * window that this run read (a first run: the time of the run). The window
+ * uses the phone clock, but the server filters on its own clock, so without
+ * the overlap a phone clock that is ahead would hide the invoices created just
+ * after a run.
+ *
  * [announced] holds the payments already announced (or adopted by a first
- * run) that a run can read again: the open ones and those of the boundary
- * second. One that is in both lists was Processing, because a New invoice is
+ * run) that a run can read again: the open ones and those created since
+ * [since]. One that is in both lists was Processing, because a New invoice is
  * never a payment.
  */
 @Serializable
@@ -51,14 +58,21 @@ internal fun evaluateInvoices(previous: InvoicePollState?, invoices: List<Invoic
     }
     val payments = if (previous == null) emptyList() else paid.filterNot { it.id in notified } + outcomes
     val pending = unique.filter { it.isOpen }.map { it.id }
-    // Include the boundary second again on the next poll, and remember which
-    // payments from that second were announced. No fixed-size tail can do this.
-    val retained = pending.toSet() + unique.filter { it.createdTime >= now }.map { it.id }
+    // Never back before the last start: a first run listed only the open
+    // invoices there, so an older payment would be announced as new. A phone
+    // clock that was set back gives now.
+    val since = previous?.since?.coerceIn(now - SKEW_OVERLAP_S, now) ?: now
+    // The next poll reads the overlap again: remember which payments in it
+    // were announced. No fixed-size tail can do this.
+    val retained = pending.toSet() + unique.filter { it.createdTime >= since }.map { it.id }
     return InvoicePollResult(
-        InvoicePollState(now, pending, (notified + paid.map { it.id }).filter { it in retained }),
+        InvoicePollState(since, pending, (notified + paid.map { it.id }).filter { it in retained }),
         payments,
     )
 }
+
+/** How far back each run reads again, for a phone clock that is ahead of the server's. */
+internal const val SKEW_OVERLAP_S = 10 * 60L
 
 /**
  * The notification title for a payment from [evaluateInvoices]. It must name

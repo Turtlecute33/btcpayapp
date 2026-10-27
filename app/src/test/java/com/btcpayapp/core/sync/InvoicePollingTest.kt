@@ -30,7 +30,8 @@ class InvoicePollingTest {
         assertEquals(listOf("one"), detected.state.pending)
         val waiting = evaluateInvoices(detected.state, listOf(invoice("one", 100, InvoiceStatus.Processing)), 300)
         assertTrue(waiting.payments.isEmpty())
-        val settled = evaluateInvoices(waiting.state, listOf(invoice("one", 100, InvoiceStatus.Settled)), 400)
+        // After the overlap, so the next poll does not read it again.
+        val settled = evaluateInvoices(waiting.state, listOf(invoice("one", 100, InvoiceStatus.Settled)), 400 + SKEW_OVERLAP_S)
         assertEquals(listOf("Payment received"), settled.payments.map(::paymentTitle))
         assertTrue(settled.state.pending.isEmpty())
         assertTrue(settled.state.announced.isEmpty())
@@ -76,7 +77,7 @@ class InvoicePollingTest {
 
     @Test fun `a late payment on a pending invoice is announced once, then dropped`() {
         val late = invoice("late", 1, InvoiceStatus.Expired).copy(additionalStatus = InvoiceAdditionalStatus.PaidLate)
-        val next = evaluateInvoices(InvoicePollState(1, pending = listOf("late")), listOf(late), 300)
+        val next = evaluateInvoices(InvoicePollState(1, pending = listOf("late")), listOf(late), 300 + SKEW_OVERLAP_S)
         assertEquals(listOf("late"), next.payments.map { it.id })
         assertEquals("Late payment detected", paymentTitle(next.payments.single()))
         // Neither pending nor created since the watermark: the next poll does not read it again.
@@ -123,5 +124,47 @@ class InvoicePollingTest {
     @Test fun `duplicate pages do not duplicate alerts`() {
         val paid = invoice("one", 100, InvoiceStatus.Settled)
         assertEquals(1, evaluateInvoices(InvoicePollState(1), listOf(paid, paid), 200).payments.size)
+    }
+
+    /** What the server lists: by its own creation time, from `startDate` to `endDate`. */
+    private fun listed(all: List<InvoiceData>, state: InvoicePollState, now: Long) =
+        all.filter { it.createdTime in state.since..now }
+
+    @Test fun `an invoice created just after a run is announced when the server clock is behind`() {
+        // The phone clock is 120 s ahead: the run at NOW is at NOW - 120 on the server.
+        val first = evaluateInvoices(InvoicePollState(NOW - 900), emptyList(), NOW)
+        val paid = invoice("new", NOW - 60, InvoiceStatus.Settled)
+        val next = evaluateInvoices(first.state, listed(listOf(paid), first.state, NOW + 900), NOW + 900)
+        assertEquals(listOf("new"), next.payments.map { it.id })
+    }
+
+    @Test fun `a payment read again in the overlap is not announced again`() {
+        val paid = invoice("one", NOW - 30, InvoiceStatus.Settled)
+        val first = evaluateInvoices(InvoicePollState(NOW - 900), listOf(paid), NOW)
+        assertEquals(listOf("one"), first.payments.map { it.id })
+        var state = first.state
+        listOf(NOW + 300, NOW + 600).forEach { now ->
+            val run = evaluateInvoices(state, listed(listOf(paid), state, now), now)
+            assertTrue(run.payments.isEmpty())
+            state = run.state
+        }
+        // Out of the overlap: forgotten, and the next run does not read it.
+        assertTrue(state.announced.isEmpty())
+        assertTrue(listed(listOf(paid), state, NOW + 900).isEmpty())
+    }
+
+    @Test fun `the runs after a first run do not read back before it`() {
+        val first = evaluateInvoices(null, emptyList(), NOW)
+        assertEquals(NOW, first.state.since)
+        assertEquals(NOW, evaluateInvoices(first.state, emptyList(), NOW + 60).state.since)
+        assertEquals(NOW + 60, evaluateInvoices(first.state, emptyList(), NOW + SKEW_OVERLAP_S + 60).state.since)
+    }
+
+    @Test fun `a phone clock set back moves the window back`() {
+        assertEquals(NOW - 3_600, evaluateInvoices(InvoicePollState(NOW), emptyList(), NOW - 3_600).state.since)
+    }
+
+    private companion object {
+        const val NOW = 1_800_000_000L
     }
 }

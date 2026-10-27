@@ -301,6 +301,7 @@ class SyncEngine internal constructor(
                 // The initial run adopts outstanding invoices without announcing
                 // history. Later runs discover all newly created invoices.
                 statuses = if (previous == null) listOf(InvoiceStatus.New, InvoiceStatus.Processing) else null,
+                // Includes an overlap with the last run (see InvoicePollState.since).
                 startDate = previous?.since,
                 endDate = pollStarted,
                 skip = offset,
