@@ -36,6 +36,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -586,7 +588,8 @@ private fun InvoiceRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onToggle)
+                .clickable(onClickLabel = if (expanded) "Hide details" else "Show details", onClick = onToggle)
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -682,7 +685,8 @@ private fun PaymentRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(onClick = onToggle)
+                .clickable(onClickLabel = if (expanded) "Hide details" else "Show details", onClick = onToggle)
+                .semantics { stateDescription = if (expanded) "Expanded" else "Collapsed" }
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

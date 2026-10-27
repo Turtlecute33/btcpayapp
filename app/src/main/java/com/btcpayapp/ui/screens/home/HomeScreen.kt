@@ -474,7 +474,10 @@ fun HomeScreen(
                             Modifier
                                 .fillMaxWidth()
                                 .arrive(0)
-                                .clickable { storePickerOpen = !storePickerOpen }
+                                .clickable(onClickLabel = if (storePickerOpen) "Hide stores" else "Show stores") {
+                                    storePickerOpen = !storePickerOpen
+                                }
+                                .semantics { stateDescription = if (storePickerOpen) "Expanded" else "Collapsed" }
                                 .padding(horizontal = 16.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
