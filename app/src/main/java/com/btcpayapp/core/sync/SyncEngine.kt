@@ -70,13 +70,14 @@ class SyncEngine internal constructor(
         // finally arrives. Every invoice watermark and announced-payout id
         // would be lost, so pending payouts would be re-announced and settled
         // invoices silently skipped. Bounded: a Keystore that stays unavailable
-        // fails the run, and JobScheduler retries it with backoff, instead of
-        // holding the job to its 8-minute limit.
+        // ends the run as NotReady, and JobScheduler retries it with backoff,
+        // instead of holding the job to its 8-minute limit. Only NotReady uses
+        // backoff: a server or Orbot outage waits for the user's interval.
         withTimeoutOrNull(DOCUMENTS_TIMEOUT_MS) {
             settings.loaded.first { it }
             accounts.loaded.first { it }
             stateFile.loaded.first { it }
-        } ?: return Result.Failed
+        } ?: return Result.NotReady
 
         val config = settings.settings.value
         if (!config.backgroundSync) return Result.Skipped
@@ -414,6 +415,8 @@ class SyncEngine internal constructor(
         data object NoChange : Result
         data class FoundUpdates(val count: Int) : Result
         data object Failed : Result
+        /** The documents did not load in time; JobScheduler retries with backoff. */
+        data object NotReady : Result
     }
 
     private companion object {

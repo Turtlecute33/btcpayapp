@@ -22,8 +22,8 @@ data class SyncState(
     val invoicePolls: Map<String, InvoicePollState> = emptyMap(),
     /**
      * `accountId` → when (epoch ms) its server stopped answering. A time, not a
-     * count: JobScheduler's backoff retries a failed run within seconds, so four
-     * failures can be four minutes of a routine server restart.
+     * count: the run interval is a user setting and the system can move a run,
+     * so a count of failed runs is not a fixed time.
      */
     val accountFailureSince: Map<String, Long> = emptyMap(),
     /** Accounts whose server-issue alert was posted for the current outage, so it is posted once. */

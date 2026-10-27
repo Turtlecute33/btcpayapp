@@ -119,7 +119,7 @@ class SyncJobService : JobService() {
                 SyncEngine.Result.Failed
             }
 
-            jobFinished(params, result is SyncEngine.Result.Failed)
+            jobFinished(params, result is SyncEngine.Result.NotReady)
         }
         return true
     }
