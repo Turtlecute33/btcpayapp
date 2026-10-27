@@ -134,6 +134,8 @@ data class LightningChannelsState(
     val feeRate: String = "",
     /** True while [feeRate] still holds the estimate rather than a typed value. */
     val feeRateIsEstimate: Boolean = false,
+    /** The store's fee estimate in sat/vB; null for the server node or when it did not load. */
+    val feeEstimate: BigDecimal? = null,
     /** One flag per button, so the spinner is on the button that was pressed. */
     val connecting: Boolean = false,
     val opening: Boolean = false,
@@ -159,7 +161,13 @@ data class LightningChannelsState(
  * request is built from it and nothing else, so what the operator confirmed
  * is what goes to the node, even if a field changes while the prompt is up.
  */
-data class ChannelReview(val nodeUri: String, val sats: BigDecimal, val feeRate: BigDecimal)
+data class ChannelReview(
+    val nodeUri: String,
+    val sats: BigDecimal,
+    val feeRate: BigDecimal,
+    /** The fee estimate when the review was made; see [channelFeeWarning]. */
+    val estimate: BigDecimal? = null,
+)
 
 class LightningChannelsViewModel(
     private val graph: AppGraph,
@@ -326,7 +334,7 @@ class LightningChannelsViewModel(
             _state.update { it.copy(formError = problem) }
             return
         }
-        _state.update { it.copy(review = ChannelReview(uri, sats, feeRate), formError = null) }
+        _state.update { it.copy(review = ChannelReview(uri, sats, feeRate, snapshot.feeEstimate), formError = null) }
     }
 
     fun dismissReview() = _state.update { it.copy(review = null) }
@@ -427,14 +435,16 @@ class LightningChannelsViewModel(
             val rate = runCatching {
                 api.walletFeeRate(storeId, "$cryptoCode-CHAIN", CHANNEL_FEE_BLOCK_TARGET)
             }.getOrNull()?.feeRate?.takeIf { it > 0 && it.isFinite() } ?: return@launch
+            val estimate = BigDecimal.valueOf(rate)
 
             _state.update { current ->
                 // Never overwrite a number the operator typed while this was in
-                // flight.
-                if (current.feeRate.isNotBlank() && !current.feeRateIsEstimate) current
+                // flight. The review compares with the estimate in both cases.
+                if (current.feeRate.isNotBlank() && !current.feeRateIsEstimate) current.copy(feeEstimate = estimate)
                 else current.copy(
-                    feeRate = Amounts.toInput(BigDecimal.valueOf(rate), 2),
+                    feeRate = Amounts.toInput(estimate, 2),
                     feeRateIsEstimate = true,
+                    feeEstimate = estimate,
                 )
             }
         }
@@ -524,6 +534,21 @@ private fun reviewText(review: ChannelReview, owner: String, unit: BitcoinUnit, 
         "Fee rate: ${Amounts.trim(review.feeRate, 8)} sat/vB\n\n" +
         "The funding transaction spends on-chain funds of the node."
 }
+
+/** With no estimate (the server node has no store), a rate above this warns. */
+private val CHANNEL_FEE_CEILING = BigDecimal(500)
+
+/**
+ * The warning for a fee rate that looks like a typing error (2000 for 20), or
+ * null: above twice the [estimate], or above [CHANNEL_FEE_CEILING] when there
+ * is no estimate. It warns only; a high rate can be what the operator wants.
+ */
+internal fun channelFeeWarning(feeRate: BigDecimal, estimate: BigDecimal?): String? =
+    if (estimate != null && estimate.signum() > 0) {
+        "This fee rate is more than twice the estimate.".takeIf { feeRate > estimate * BigDecimal(2) }
+    } else {
+        "This fee rate is more than $CHANNEL_FEE_CEILING sat/vB.".takeIf { feeRate > CHANNEL_FEE_CEILING }
+    }
 
 /**
  * The documented failures of `POST /channels` and `/connect`. The server's own
@@ -694,6 +719,7 @@ fun LightningChannelsScreen(
         ConfirmDialog(
             title = "Open a channel?",
             message = reviewText(review, viewModel.owner, unit, nicknames),
+            warning = channelFeeWarning(review.feeRate, review.estimate),
             confirmLabel = "Open channel",
             onConfirm = {
                 viewModel.takeReview()?.let { approved ->

@@ -277,13 +277,20 @@ fun ConfirmDialog(
     onConfirm: () -> Unit,
     onDismiss: () -> Unit,
     destructive: Boolean = false,
+    /** A line under [message] in the error colour, for example a fee rate far above the estimate. */
+    warning: String? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         // Scrolls, so the end of a long message (a whole web address, say) can
         // be read rather than cut off below the buttons.
-        text = { Text(message, Modifier.verticalScroll(rememberScrollState())) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(message)
+                warning?.let { Text(it, Modifier.padding(top = 12.dp), color = MaterialTheme.colorScheme.error) }
+            }
+        },
         confirmButton = {
             TextButton(onClick = onConfirm) {
                 Text(
