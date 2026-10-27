@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
+import com.btcpayapp.core.net.ORBOT_PORT_RISK
 import com.btcpayapp.core.security.AuthOutcome
 import com.btcpayapp.core.security.BiometricAvailability
 import com.btcpayapp.core.security.Biometrics
@@ -316,8 +317,9 @@ fun AppSettingsScreen(
                     description = "The app polls your server directly. No push service is involved, " +
                         "so no third party learns when you are paid." +
                         if (cleartextOnion && settings.backgroundSync) {
-                            " While Orbot is off, another app can take its port and read your .onion " +
-                                "account's API key. Keep Orbot always on, or turn this off."
+                            " An http:// .onion account sends its API key to Orbot's port in clear text, " +
+                                "also from background checks. $ORBOT_PORT_RISK This risk stays when Orbot " +
+                                "is always on. Turn this off, or connect the server with https://."
                         } else {
                             ""
                         },

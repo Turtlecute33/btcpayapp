@@ -49,6 +49,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.net.CertificateProbe
+import com.btcpayapp.core.net.ORBOT_PORT_RISK
+import com.btcpayapp.core.net.ProxySpec
 import com.btcpayapp.core.net.Tls
 import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.core.util.Dates
@@ -282,7 +284,8 @@ class AccountDetailViewModel(
         if (!account.canProbe || _state.value.probing) return
         viewModelScope.launch {
             _state.update { it.copy(probing = true, error = null) }
-            val probe = withContext(Dispatchers.IO) { Tls.probeCertificate(account.host, account.httpsPort) }
+            val proxy = ProxySpec.ORBOT.toJavaProxy().takeIf { account.isOnion }
+            val probe = withContext(Dispatchers.IO) { Tls.probeCertificate(account.host, account.httpsPort, proxy) }
             _state.update {
                 it.copy(
                     probing = false,
@@ -318,8 +321,8 @@ class AccountDetailViewModel(
 /** Plain HTTP: only a proxy on this phone may carry it. See [AccountDetailViewModel.save]. */
 private val Account.cleartext: Boolean get() = baseUrl.startsWith("http://", ignoreCase = true)
 
-/** Whether [AccountDetailViewModel.reviewCertificate] may connect: a direct HTTPS connection. */
-private val Account.canProbe: Boolean get() = proxy == null && !isOnion && !cleartext
+/** Whether [AccountDetailViewModel.reviewCertificate] may connect: HTTPS, direct or (for .onion) through Orbot. */
+private val Account.canProbe: Boolean get() = proxy == null && !cleartext
 
 private val Account.httpsPort: Int get() = runCatching { URI(baseUrl).port }.getOrNull()?.takeIf { it > 0 } ?: 443
 
@@ -410,6 +413,15 @@ fun AccountDetailScreen(
 
                 SectionHeader("Connection")
                 DetailRow(label = "Address", value = account.baseUrl, monospace = true)
+                if (account.isOnion && account.cleartext) {
+                    Text(
+                        text = "This account sends its API key to Orbot's port in clear text. $ORBOT_PORT_RISK " +
+                            "To use https://, remove this account and connect the server again.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    )
+                }
                 DetailRow(
                     label = "Signed in as",
                     value = account.userName?.takeIf { it.isNotBlank() }
@@ -665,7 +677,7 @@ private fun KeyChangedNotice(canReview: Boolean, probing: Boolean, enabled: Bool
                     "${TlsProblem.KeyChanged.userMessage} If you did not change the server's certificate, " +
                         "someone may be intercepting the connection."
                 } else {
-                    "${TlsProblem.KeyChanged.userMessage} This account uses a proxy or Tor, so the app " +
+                    "${TlsProblem.KeyChanged.userMessage} This account uses a proxy, so the app " +
                         "cannot check the new key. Revoke the key on the server's website, then remove " +
                         "this account without revoking and connect again."
                 },

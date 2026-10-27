@@ -2,6 +2,8 @@ package com.btcpayapp.core.net
 
 import com.btcpayapp.core.util.toHex
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.net.Socket
 import java.security.MessageDigest
 import java.security.cert.CertificateException
@@ -194,8 +196,17 @@ object Tls {
      * request is ever written to it, and nothing it returns is trusted until
      * the user's fingerprint matches. The resulting pin is then enforced on
      * every later connection by [PinnedTrustManager].
+     *
+     * With [proxy] (Orbot for an .onion host), the proxy resolves [host], so
+     * the name never goes to the local resolver. A failure gives null, as
+     * without a proxy.
      */
-    fun probeCertificate(host: String, port: Int, timeoutMs: Int = 15_000): CertificateProbe? {
+    fun probeCertificate(
+        host: String,
+        port: Int,
+        proxy: Proxy? = null,
+        timeoutMs: Int = if (proxy == null) 15_000 else 45_000,
+    ): CertificateProbe? {
         val context = SSLContext.getInstance("TLS")
         val captured = arrayOfNulls<Array<out X509Certificate>>(1)
 
@@ -215,9 +226,18 @@ object Tls {
         )
 
         return runCatching {
-            val socket = context.socketFactory.createSocket() as SSLSocket
+            val socket = if (proxy == null) {
+                context.socketFactory.createSocket() as SSLSocket
+            } else {
+                // TLS on top of the proxy's tunnel to the server.
+                val raw = Socket(proxy)
+                runCatching {
+                    raw.connect(InetSocketAddress.createUnresolved(host, port), timeoutMs)
+                    context.socketFactory.createSocket(raw, host, port, true) as SSLSocket
+                }.onFailure { raw.close() }.getOrThrow()
+            }
             socket.use {
-                it.connect(java.net.InetSocketAddress(host, port), timeoutMs)
+                if (proxy == null) it.connect(InetSocketAddress(host, port), timeoutMs)
                 it.soTimeout = timeoutMs
                 it.startHandshake()
             }

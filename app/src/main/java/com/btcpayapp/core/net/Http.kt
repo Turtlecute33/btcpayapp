@@ -360,6 +360,11 @@ internal const val NEEDS_HTTPS = "This address needs https://. Only .onion addre
 internal const val PROXY_FAILED =
     "Could not reach the server through the proxy. Check that Orbot (or your proxy) is running, then try again."
 
+/** The risk of an http:// onion account, in the same words on each screen that tells it. */
+internal const val ORBOT_PORT_RISK =
+    "Another app can listen on Orbot's port and read the key. An app that holds the port " +
+        "before Orbot starts can keep it, also while Orbot shows as on."
+
 /**
  * Why a handshake failed, read from the exception and its causes. The platform
  * wraps the trust manager's exception (often twice), so the whole chain is

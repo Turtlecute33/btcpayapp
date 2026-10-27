@@ -1,5 +1,10 @@
 package com.btcpayapp.core.net
 
+import java.io.DataInputStream
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.net.ServerSocket
 import java.security.cert.CertPathValidatorException
 import java.security.cert.CertificateException
 import java.security.cert.CertificateExpiredException
@@ -11,9 +16,11 @@ import javax.net.ssl.SSLHandshakeException
 import javax.net.ssl.SSLPeerUnverifiedException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.concurrent.thread
 
 /**
  * The TLS policy: the pin check, the reason a handshake failed, and the
@@ -195,6 +202,37 @@ class TlsTest {
         assertFalse(failure.message.orEmpty().contains("ssl="))
     }
 
+    // --- Probe through a proxy ---------------------------------------------
+
+    @Test
+    fun `a probe through SOCKS gives the proxy the name, and a failed handshake gives null`() {
+        val loopback = InetAddress.getLoopbackAddress()
+        ServerSocket(0, 1, loopback).use { server ->
+            var asked: String? = null
+            // A fake SOCKS5 proxy: no authentication, records the CONNECT
+            // target, says yes and closes, so the TLS handshake fails.
+            val proxySide = thread {
+                server.accept().use { client ->
+                    val input = DataInputStream(client.getInputStream())
+                    val output = client.getOutputStream()
+                    input.readUnsignedByte()
+                    input.skipNBytes(input.readUnsignedByte().toLong())
+                    output.write(byteArrayOf(5, 0))
+                    input.skipNBytes(3)
+                    if (input.readUnsignedByte() != DOMAIN_NAME) return@thread
+                    val name = ByteArray(input.readUnsignedByte()).also(input::readFully)
+                    asked = "${String(name)}:${input.readUnsignedShort()}"
+                    output.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+                }
+            }
+
+            val proxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress(loopback, server.localPort))
+            assertNull(Tls.probeCertificate(ONION_HOST, 443, proxy, timeoutMs = 5_000))
+            proxySide.join(5_000)
+            assertEquals("the name, not a local lookup", "$ONION_HOST:443", asked)
+        }
+    }
+
     // --- Helpers -----------------------------------------------------------
 
     private fun handshake(cause: Throwable): SSLHandshakeException =
@@ -271,5 +309,11 @@ class TlsTest {
 
         /** `openssl x509 -outform DER | openssl dgst -sha256` */
         const val PINNED_CERT_SHA256 = "f8d967ee1bc1153632b852aca36407b391f8f42a8c0dda8c55969901cb4d0d10"
+
+        /** A made-up name; the fake proxy never resolves it. */
+        const val ONION_HOST = "probetestprobetestprobetest.onion"
+
+        /** SOCKS5 address type 3: a domain name, sent to the proxy as text. */
+        const val DOMAIN_NAME = 3
     }
 }

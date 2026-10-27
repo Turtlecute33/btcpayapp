@@ -15,9 +15,13 @@
     * .onion - Tor already provides authentication and encryption end to end,
                and no CA can issue for .onion. Matching is by hostname suffix.
                The hop from the app to Tor's SOCKS port on this phone (Orbot,
-               127.0.0.1:9050 by default) is still clear text: while Orbot is
-               stopped, any app can listen on that port and read the API key.
-               No public Orbot API lets the app prove who holds the port.
+               127.0.0.1:9050 by default) is still clear text. Any app can
+               listen on that port while Orbot is stopped. An app that holds
+               the port before Orbot starts can keep it, also while Orbot
+               shows as on. For an http:// onion account, that app reads the
+               API key. No public Orbot API lets the app prove who holds the
+               port. An https:// onion server can be pinned: the certificate
+               probe also goes through Orbot.
 
   Loopback is deliberately NOT an exception. A listener on 127.0.0.1 can be any
   app on the phone, so an API key sent to it in clear text is a key handed to

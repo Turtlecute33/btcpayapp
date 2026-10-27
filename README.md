@@ -42,11 +42,16 @@
 
 - Start Orbot before you use a `.onion` account.
 - Keep Orbot's SOCKS port at 9050.
-- While Orbot is off, another app on the phone could listen on that port and
-  read the traffic, including the API key.
-- Background checks use that port too, also after the phone restarts. Keep
-  Orbot always on, or turn off Settings > Background > "Check for activity in
-  the background".
+- With an `http://` address, the API key goes to that port in clear text.
+  Another app on the phone can listen on the port and read the traffic,
+  including the API key. An app that holds the port before Orbot starts can
+  keep it, also while Orbot shows as on.
+- Use `https://` if the onion server has it. The app can pin a self-signed
+  certificate through Orbot. Then an app on the port sees only the server's
+  name and encrypted data.
+- Background checks use that port too, also after the phone restarts. For an
+  `http://` account, this risk stays when Orbot is always on. Use `https://`,
+  or turn off Settings > Background > "Check for activity in the background".
 
 ## Lightning node names
 

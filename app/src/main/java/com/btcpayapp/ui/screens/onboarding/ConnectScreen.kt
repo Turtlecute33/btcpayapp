@@ -37,6 +37,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.net.CertificateProbe
+import com.btcpayapp.core.net.ORBOT_PORT_RISK
 import com.btcpayapp.core.net.ProxySpec
 import com.btcpayapp.core.net.Tls
 import com.btcpayapp.core.net.TlsProblem
@@ -131,14 +132,16 @@ class ConnectViewModel(private val graph: AppGraph) : ViewModel() {
                     // handshake, and only when the issuer is the one fault. A
                     // wrong name or an expired certificate is what an
                     // interception looks like, and pinning repairs neither; once
-                    // a pin is held, a rejection means the key changed.
+                    // a pin is held, a rejection means the key changed. An
+                    // https:// onion server is read through Orbot, as the
+                    // request was.
                     val offerTrust = error is ApiException.Tls &&
                         error.problem == TlsProblem.UntrustedIssuer &&
-                        pins.isEmpty() &&
-                        !normalised.isOnion()
+                        pins.isEmpty()
                     val probe = if (offerTrust) {
+                        val proxy = ProxySpec.ORBOT.toJavaProxy().takeIf { normalised.isOnion() }
                         withContext(Dispatchers.IO) {
-                            Tls.probeCertificate(normalised.hostOrBlank(), normalised.effectivePort())
+                            Tls.probeCertificate(normalised.hostOrBlank(), normalised.effectivePort(), proxy)
                         }
                     } else {
                         null
@@ -235,7 +238,14 @@ fun ConnectScreen(
                     icon = Icons.Rounded.Shield,
                     text = "Onion addresses go through Orbot on port 9050. Start Orbot first. " +
                         "The first connection can take 30 seconds. " +
-                        (if (cleartext) "While Orbot is off, another app can use that port and read the API key. " else "") +
+                        (
+                            if (cleartext) {
+                                "With http://, the API key goes to that port in clear text. $ORBOT_PORT_RISK " +
+                                    "Use https:// if the server has it. "
+                            } else {
+                                ""
+                            }
+                        ) +
                         "Background checks also use Orbot. Keep it on, or turn off background checks in Settings.",
                 )
             }

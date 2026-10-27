@@ -76,11 +76,13 @@ class BtcPayClient(
         //
         // What stays: an .onion request reaches the proxy on this phone in
         // clear text too (Orbot's 127.0.0.1:9050 by default), and Tor encrypts
-        // it only from there. While Orbot is stopped, any app can listen on
-        // that port and read the key; for an https server it cannot read the
-        // key, but it learns the server's name and can connect from this
-        // phone's address. No public Orbot API lets this app prove who holds
-        // the port, so nothing here can check it.
+        // it only from there. Any app can listen on that port while Orbot is
+        // stopped, and an app that holds it before Orbot starts can keep it,
+        // also while Orbot shows as on. That app reads the key of an http
+        // server. For an https server it cannot read the key, but it learns
+        // the server's name and can connect from this phone's address. No
+        // public Orbot API lets this app prove who holds the port, so nothing
+        // here can check it.
         val proxy = endpoint.transport.proxy
         if (cleartext && proxy != null && !isOnThisPhone(proxy.host)) {
             throw ApiException.Transport(
