@@ -16,6 +16,7 @@ kotlin = "2.4.21"
 coreKtx = "1.19.1"
 splashscreen = "1.2.0"
 activityCompose = "1.13.0"
+profileinstaller = "1.4.0"
 composeBom = "2026.09.00"
 lifecycle = "2.11.0"
 navigation = "2.10.2"
@@ -34,6 +35,10 @@ junit = "4.13.2"
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "splashscreen" }
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
+# Installs the baseline profile of a sideloaded APK on its first start, so the
+# app code is compiled before the background dexopt runs. Declared, not only
+# transitive, because app/src/main/baseline-prof.txt depends on it.
+androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
 
 # --- Lifecycle -------------------------------------------------------------
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }

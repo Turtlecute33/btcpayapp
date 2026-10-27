@@ -1,0 +1,14 @@
+# Baseline profile of the app code (BTCPAY-PERF-001). The libraries bring
+# their own. Without these rules, the app code of a sideloaded install or
+# update runs in the interpreter until the background dexopt compiles it.
+# Hand-written with wildcards: AGP expands them and rewrites them through the
+# R8 mapping. Start, app shell, screens, API layer and local documents.
+HSPLcom/btcpayapp/MainActivity;->**(**)**
+HSPLcom/btcpayapp/BtcPayApplication;->**(**)**
+HSPLcom/btcpayapp/AppGraph;->**(**)**
+HSPLcom/btcpayapp/ui/**;->**(**)**
+HSPLcom/btcpayapp/data/**;->**(**)**
+HSPLcom/btcpayapp/core/crypto/**;->**(**)**
+HSPLcom/btcpayapp/core/net/**;->**(**)**
+HSPLcom/btcpayapp/core/security/**;->**(**)**
+HSPLcom/btcpayapp/core/store/**;->**(**)**
