@@ -2,37 +2,26 @@ package com.btcpayapp.ui.screens.server
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -57,6 +46,7 @@ import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SecretField
+import com.btcpayapp.ui.components.SmtpCertificateCheckSwitch
 import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.components.confirmDiscardChanges
@@ -369,48 +359,15 @@ fun ServerEmailScreen(onBack: () -> Unit) {
                             description = "Each store may then send its email through this server " +
                                 "instead of configuring its own.",
                         )
-                        FormSwitch(
-                            title = "Skip certificate checks",
+                        SmtpCertificateCheckSwitch(
                             checked = state.disableCertificateCheck,
                             onCheckedChange = viewModel::setDisableCertificateCheck,
-                            description = "Accepts any TLS certificate the mail server offers.",
                         )
-                        // The warning is the consequence of the switch above it, so
-                        // it has to be seen arriving rather than simply be there.
-                        AnimatedVisibility(
-                            visible = state.disableCertificateCheck,
-                            enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
-                            exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
-                        ) {
-                            CertificateWarning()
-                        }
                     }
 
                     Spacer(Modifier.height(32.dp))
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun CertificateWarning() {
-    Surface(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.errorContainer,
-        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-    ) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
-            Icon(Icons.Rounded.Warning, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = "With this on, the connection to the mail server is encrypted but not " +
-                    "authenticated: anyone able to intercept it can present their own certificate " +
-                    "and read the SMTP password and every message. Use it only against a host on " +
-                    "your own network with a self-signed certificate.",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }

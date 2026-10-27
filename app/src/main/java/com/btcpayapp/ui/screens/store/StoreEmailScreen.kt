@@ -2,11 +2,9 @@ package com.btcpayapp.ui.screens.store
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,11 +16,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHostState
@@ -55,16 +50,15 @@ import com.btcpayapp.data.api.endpoints.updateStoreEmailSettings
 import com.btcpayapp.data.session.StoreBinding
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AnimatedSwap
-import com.btcpayapp.ui.components.AppCard
 import com.btcpayapp.ui.components.AppScreen
 import com.btcpayapp.ui.components.ConfirmDialog
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.FormSection
-import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SecretField
+import com.btcpayapp.ui.components.SmtpCertificateCheckSwitch
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
@@ -339,7 +333,7 @@ fun StoreEmailScreen(onBack: () -> Unit) {
 
                         FormSection("Sender", Modifier.arrive(0)) {
                             FormField(
-                                label = "From",
+                                label = "From address",
                                 value = current.from,
                                 onValueChange = { value -> viewModel.edit { it.copy(from = value) } },
                                 placeholder = "Your shop <shop@example.com>",
@@ -353,7 +347,7 @@ fun StoreEmailScreen(onBack: () -> Unit) {
 
                         FormSection("SMTP server", Modifier.arrive(1)) {
                             FormField(
-                                label = "Server",
+                                label = "Host",
                                 value = current.server,
                                 onValueChange = { value -> viewModel.edit { it.copy(server = value) } },
                                 placeholder = "smtp.example.com",
@@ -369,7 +363,7 @@ fun StoreEmailScreen(onBack: () -> Unit) {
                                 supportingText = "587 for STARTTLS, 465 for implicit TLS.",
                             )
                             FormField(
-                                label = "Login",
+                                label = "Username",
                                 value = current.login,
                                 onValueChange = { value -> viewModel.edit { it.copy(login = value) } },
                                 keyboardType = KeyboardType.Email,
@@ -390,25 +384,12 @@ fun StoreEmailScreen(onBack: () -> Unit) {
                         ThinDivider()
 
                         FormSection("Security", Modifier.arrive(2)) {
-                            FormSwitch(
-                                title = "Skip the certificate check",
-                                description = "Accepts any certificate the SMTP server presents.",
+                            SmtpCertificateCheckSwitch(
                                 checked = current.disableCertificateCheck,
                                 onCheckedChange = { value ->
                                     viewModel.edit { it.copy(disableCertificateCheck = value) }
                                 },
                             )
-                            // The warning is the consequence of the switch above, so it
-                            // has to be seen arriving. Appearing fully formed on the
-                            // next frame reads as part of the page the reader already
-                            // scrolled past.
-                            AnimatedVisibility(
-                                visible = current.disableCertificateCheck,
-                                enter = expandVertically(Motion.spatialSize) + fadeIn(Motion.effects),
-                                exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
-                            ) {
-                                CertificateWarning()
-                            }
                         }
 
                         ThinDivider()
@@ -459,28 +440,6 @@ fun StoreEmailScreen(onBack: () -> Unit) {
             onSend = viewModel::sendTest,
             onDismiss = { viewModel.showTest(false) },
         )
-    }
-}
-
-@Composable
-private fun CertificateWarning() {
-    AppCard {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.Top) {
-            Icon(
-                imageVector = Icons.Rounded.Warning,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(20.dp),
-            )
-            Spacer(Modifier.width(12.dp))
-            Text(
-                text = "With the check off, nothing proves the server you connect to is the one " +
-                    "you named. Anyone able to redirect the connection can read every message — " +
-                    "including the password used to log in — and no warning is shown. Use it only " +
-                    "against a mail server on your own machine with a self-signed certificate.",
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
     }
 }
 
