@@ -367,6 +367,11 @@ private fun CreateForm(
     onToggleOptions: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // The same echo as on-chain Receive: a slip of three zeros shows before
+    // the invoice exists, because its amount cannot change after.
+    val echo = remember(state.amount, unit) {
+        parseAmountToBtc(state.amount, unit)?.takeIf { it.signum() > 0 }?.let { "= ${Amounts.inOtherUnit(it, unit)}" }
+    }
     Column(
         modifier
             .fillMaxSize()
@@ -376,6 +381,7 @@ private fun CreateForm(
             label = if (unit == BitcoinUnit.Btc) "Amount (BTC)" else "Amount (sat)",
             value = state.amount,
             onValueChange = onAmount,
+            supportingText = echo,
             enabled = !state.creating,
             keyboardType = KeyboardType.Decimal,
         )
