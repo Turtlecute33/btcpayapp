@@ -80,12 +80,11 @@ import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.nav.ScanPurpose
 import com.btcpayapp.ui.theme.LocalReducedMotion
 import com.btcpayapp.ui.theme.Motion
-import com.google.zxing.BarcodeFormat
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
-import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
+import com.google.zxing.qrcode.QRCodeReader
 import java.nio.ByteBuffer
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -389,20 +388,16 @@ private fun bindCamera(
         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
         .build()
 
-    val reader = MultiFormatReader().apply {
-        setHints(
-            mapOf(
-                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
-                DecodeHintType.TRY_HARDER to true,
-            ),
-        )
-    }
+    // QRCodeReader, not MultiFormatReader: the app reads only QR codes, and
+    // MultiFormatReader keeps all the other barcode decoders in the APK.
+    val reader = QRCodeReader()
+    val hints = mapOf(DecodeHintType.TRY_HARDER to true)
 
     // One buffer for the life of this analyser. A new one per frame is about
     // 0.9 MB, ten to twenty times a second, all of it garbage a moment later.
     val luma = LumaBuffer()
     analysis.setAnalyzer(executor) { image ->
-        val text = image.use { decodeQr(reader, it, luma) }
+        val text = image.use { decodeQr(reader, hints, it, luma) }
         if (text != null && accepts(purpose, text) && consumed.compareAndSet(false, true)) {
             // Nothing after the first result is wanted, so the decoding stops
             // here rather than when navigation gets round to disposing it.
@@ -537,7 +532,12 @@ private class LumaBuffer {
  * the cheapest path, and the one that keeps the analyser off the main thread's
  * budget.
  */
-private fun decodeQr(reader: MultiFormatReader, image: ImageProxy, luma: LumaBuffer): String? {
+private fun decodeQr(
+    reader: QRCodeReader,
+    hints: Map<DecodeHintType, *>,
+    image: ImageProxy,
+    luma: LumaBuffer,
+): String? {
     val plane = image.planes.firstOrNull() ?: return null
     val bytes = luma.read(plane.buffer)
 
@@ -553,7 +553,7 @@ private fun decodeQr(reader: MultiFormatReader, image: ImageProxy, luma: LumaBuf
     )
 
     return try {
-        reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text
+        reader.decode(BinaryBitmap(HybridBinarizer(source)), hints).text
     } catch (_: Exception) {
         // A frame without a code throws NotFoundException. That is the common
         // case, not an error worth logging thirty times a second.
