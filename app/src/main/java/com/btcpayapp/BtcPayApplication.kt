@@ -1,6 +1,7 @@
 package com.btcpayapp
 
 import android.app.Application
+import android.os.StrictMode
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -25,6 +26,7 @@ class BtcPayApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        if (BuildConfig.DEBUG) enableStrictMode()
         Dates.init(this)
         graph = AppGraph(this)
         observeProcessLifecycle()
@@ -33,6 +35,15 @@ class BtcPayApplication : Application() {
         // resource lookups. Off the cold-start critical path — this also runs
         // in processes spawned only for SyncJobService or BootReceiver.
         graph.scope.launch { graph.notifier.ensureChannels() }
+    }
+
+    /**
+     * Debug builds log disk and network work on the main thread, leaks and unsafe
+     * intents. Set before the graph, so that its start is checked too.
+     */
+    private fun enableStrictMode() {
+        StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder().detectAll().penaltyLog().build())
+        StrictMode.setVmPolicy(StrictMode.VmPolicy.Builder().detectAll().penaltyLog().build())
     }
 
     /**

@@ -112,10 +112,11 @@ class AppGraph(context: Context) {
     val appLock = AppLock(settings, scope)
 
     init {
-        // Maps `assets/lnnodes.bin`; the pages are only touched when a screen
-        // actually asks for a peer's name, so this costs a file descriptor and
-        // nothing else. A failure leaves the curated list in charge.
-        NodeDirectory.install(openBundledNodeIndex(appContext))
+        // Maps `assets/lnnodes.bin` off the main thread, because opening the
+        // asset is disk I/O on the cold start path. The pages are only touched
+        // when a screen asks for a peer's name. Until the install is done, and
+        // after a failure, the curated list is in charge.
+        scope.launch(Dispatchers.IO) { NodeDirectory.install(openBundledNodeIndex(appContext)) }
     }
 
     val syncEngine = SyncEngine(
