@@ -121,8 +121,8 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
     }
 
     androidResources {
@@ -159,8 +159,9 @@ android {
 }
 
 kotlin {
+    // Compile with JDK 21, whatever JDK runs Gradle. The JVM target follows it.
+    jvmToolchain(21)
     compilerOptions {
-        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
         freeCompilerArgs.addAll(
             "-Xconsistent-data-class-copy-visibility",
             // Material 3 Expressive and the adaptive navigation suite are still

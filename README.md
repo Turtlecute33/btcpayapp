@@ -91,7 +91,7 @@ what your node returns; some nodes return only their oldest invoices.
 
 ## Build
 
-Requires JDK 17 and the Android SDK with platform 37.
+Requires JDK 21 and the Android SDK with platform 37.
 
 ```sh
 echo "sdk.dir=/path/to/Android/sdk" > local.properties
