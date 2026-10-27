@@ -584,7 +584,7 @@ private fun StatsPanel(stats: AppStats?) {
 
                 AppStatsPhase.Content -> Column(Modifier.fillMaxWidth()) {
                     Text(
-                        text = "${current.sales?.salesCount ?: 0} sales in the last $SALES_DAYS days",
+                        text = "${TextUtil.plural(current.sales?.salesCount ?: 0, "sale", "sales")} in the last $SALES_DAYS days",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     if (series.isNotEmpty()) {

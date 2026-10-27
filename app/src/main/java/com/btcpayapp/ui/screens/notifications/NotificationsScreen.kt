@@ -236,7 +236,10 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
                     attempt { api.markNotification(item.id, true) }
                 } }.awaitAll().count { it.isFailure }
             }
-            if (failures > 0) _state.update { it.copy(message = "$failures notifications could not be marked as seen. Try again.") }
+            if (failures > 0) {
+                val what = TextUtil.plural(failures, "notification", "notifications")
+                _state.update { it.copy(message = "$what could not be marked as seen. Try again.") }
+            }
             load(refreshing = true)
         }
     }

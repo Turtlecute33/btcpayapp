@@ -276,6 +276,13 @@ class TextTest {
     }
 
     @Test
+    fun `a count of one takes the singular`() {
+        assertEquals("1 block", Text.plural(1, "block", "blocks"))
+        assertEquals("0 blocks", Text.plural(0, "block", "blocks"))
+        assertEquals("6 blocks", Text.plural(6, "block", "blocks"))
+    }
+
+    @Test
     fun `hex is lowercase with two digits per byte`() {
         assertEquals("00010f10ff", byteArrayOf(0, 1, 15, 16, -1).toHex())
         assertEquals("", ByteArray(0).toHex())

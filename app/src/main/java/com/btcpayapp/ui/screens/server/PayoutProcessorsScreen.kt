@@ -54,6 +54,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Amounts
+import com.btcpayapp.core.util.Text as TextUtil
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
 import com.btcpayapp.data.api.dto.LightningPayoutProcessorSettings
@@ -150,7 +151,7 @@ internal fun processorSummary(kind: ProcessorKind, payoutMethodId: String, value
         add("Runs every ${formatMinutes(values.seconds)}.")
         add(if (values.instant) "New payouts are sent at once." else "New payouts wait for the next run.")
         if (kind == ProcessorKind.OnChain) {
-            add("Fee target: ${values.feeTarget} blocks.")
+            add("Fee target: ${TextUtil.plural(values.feeTarget, "block", "blocks")}.")
             add("Threshold: ${Amounts.trim(values.threshold, 8)} ${cryptoCodeOf(payoutMethodId)}.")
         }
     }.joinToString("\n")
@@ -634,7 +635,7 @@ fun PayoutProcessorsScreen(onBack: () -> Unit) {
                                                 "Wait for the next run"
                                             },
                                         )
-                                        DetailRow("Fee target", "${settings.feeTargetBlock} blocks")
+                                        DetailRow("Fee target", TextUtil.plural(settings.feeTargetBlock, "block", "blocks"))
                                         DetailRow(
                                             "Threshold",
                                             maskedIfPrivate(

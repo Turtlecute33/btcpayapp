@@ -479,7 +479,7 @@ private fun PullPaymentHeader(pullPayment: PullPaymentData) {
         )
         DetailRow(
             label = "Invoice validity",
-            value = "${pullPayment.BOLT11Expiration} days",
+            value = TextUtil.plural(pullPayment.BOLT11Expiration, "day", "days"),
         )
         ThinDivider()
     }

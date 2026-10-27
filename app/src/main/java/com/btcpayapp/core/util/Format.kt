@@ -510,6 +510,9 @@ object Text {
             }
         }
         .joinToString(" ")
+
+    /** "1 block", "2 blocks". The UI is English only, so these are the only two forms. */
+    fun plural(count: Int, one: String, many: String): String = if (count == 1) "1 $one" else "$count $many"
 }
 
 private const val HEX_DIGITS = "0123456789abcdef"
