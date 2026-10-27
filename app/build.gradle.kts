@@ -167,14 +167,11 @@ kotlin {
     compilerOptions {
         freeCompilerArgs.addAll(
             "-Xconsistent-data-class-copy-visibility",
-            // Material 3 Expressive and the adaptive navigation suite are still
-            // annotated experimental in 1.4.0 even though they ship in the
-            // stable artifact. Opting in here keeps the annotation noise out of
-            // every file that draws a button.
+            // Material 3 Expressive is still annotated experimental even though
+            // it ships in the stable artifact. Opting in here keeps the
+            // annotation noise out of every file that draws a button.
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3Api",
             "-opt-in=androidx.compose.material3.ExperimentalMaterial3ExpressiveApi",
-            "-opt-in=androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi",
-            "-opt-in=androidx.compose.material3.adaptive.navigationsuite.ExperimentalMaterial3AdaptiveNavigationSuiteApi",
             "-opt-in=androidx.compose.foundation.ExperimentalFoundationApi",
             "-opt-in=androidx.compose.animation.ExperimentalSharedTransitionApi",
         )
@@ -198,14 +195,7 @@ dependencies {
     implementation(libs.compose.foundation)
     implementation(libs.compose.animation)
     implementation(libs.compose.material3)
-    implementation(libs.compose.material3.window.size)
-    implementation(libs.compose.material3.adaptive.nav.suite)
     implementation(libs.compose.material.icons.extended)
-    implementation(libs.androidx.adaptive)
-    implementation(libs.androidx.adaptive.layout)
-    implementation(libs.androidx.adaptive.navigation)
-    implementation(libs.compose.ui.tooling.preview)
-    debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.androidx.navigation.compose)
 
