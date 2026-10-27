@@ -392,8 +392,7 @@ fun LightningScreen(
                         // they are read as.
                         SectionHeader("Node address", Modifier.arrive(5))
                         Column(Modifier.padding(horizontal = 16.dp).arrive(5)) {
-                            // No snackbar on copy: `copyToClipboard` says "Copied"
-                            // below Android 13 and the system does from 13.
+                            // No snackbar on copy: the system says "Copied".
                             uris.forEach { uri ->
                                 CopyableField(label = "Node URI", value = uri, truncate = true)
                                 Spacer(Modifier.height(8.dp))

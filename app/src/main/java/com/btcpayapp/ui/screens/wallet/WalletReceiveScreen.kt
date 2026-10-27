@@ -245,8 +245,7 @@ fun WalletReceiveScreen(paymentMethodId: String, onBack: () -> Unit) {
                         )
                     }
 
-                    // No snackbar on copy: the copy itself says so, with a
-                    // toast below Android 13 and the system's own line above.
+                    // No snackbar on copy: the system says "Copied".
                     state.address?.let { address ->
                         CopyableField(
                             label = "Address",

@@ -4,7 +4,6 @@ import com.btcpayapp.core.util.safeStartActivity
 import android.content.Intent
 import android.net.Uri
 import android.os.VibrationEffect
-import android.os.Vibrator
 import android.os.VibratorManager
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -802,12 +801,7 @@ private fun String.friendlyName(): String = when {
 }
 
 private fun android.content.Context.celebrate() {
-    val vibrator = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-        getSystemService(VibratorManager::class.java)?.defaultVibrator
-    } else {
-        @Suppress("DEPRECATION")
-        getSystemService(Vibrator::class.java)
-    }
+    val vibrator = getSystemService(VibratorManager::class.java)?.defaultVibrator
     runCatching {
         vibrator?.vibrate(
             VibrationEffect.createWaveform(longArrayOf(0, 60, 80, 120), -1),

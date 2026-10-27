@@ -1,16 +1,13 @@
 package com.btcpayapp.ui.components
 
-import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
-import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PersistableBundle
 import android.os.SystemClock
-import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -428,28 +425,21 @@ private val CLIP_CHECK = Any()
 private val mainHandler by lazy { Handler(Looper.getMainLooper()) }
 
 /**
- * Copies [value] and says so.
- *
- * Below Android 13 the system shows nothing when an app copies, so a "Copied"
- * toast is shown here; from 13 the system shows its own confirmation.
+ * Copies [value]. The system shows its own confirmation.
  *
  * A [sensitive] clip is flagged, so previews and keyboard histories leave it
  * out, and it is removed after [SENSITIVE_CLIP_MS] if it is still on the
  * clipboard. That limits how long a secret waits there for any app that can
- * read the clipboard (every app, below Android 10). From Android 10 the check
- * works only while the app is in front, so a clip whose time is up while the
- * app is in the background or closed goes when the app is next opened. If it
- * is not opened again, the clip stays; Android 13 and later clear old clips by
- * themselves. See [clearExpiredSensitiveClip] for how "still" is told.
+ * read the clipboard. The check works only while the app is in front, so a
+ * clip whose time is up while the app is in the background or closed goes
+ * when the app is next opened. If it is not opened again, the clip stays;
+ * Android clears old clips by itself. See [clearExpiredSensitiveClip] for how
+ * "still" is told.
  */
-@SuppressLint("InlinedApi")
 fun copyToClipboard(context: Context, label: String, value: String, sensitive: Boolean = false) {
     val manager = context.getSystemService(ClipboardManager::class.java) ?: return
     val clip = ClipData.newPlainText(label, value)
     if (sensitive) {
-        // EXTRA_IS_SENSITIVE is a compile-time constant, inlined into this app,
-        // so it is safe below Android 13, where keyboards that keep a clipboard
-        // history read the same key.
         clip.description.extras = PersistableBundle().apply { putBoolean(ClipDescription.EXTRA_IS_SENSITIVE, true) }
     }
     manager.setPrimaryClip(clip)
@@ -464,9 +454,6 @@ fun copyToClipboard(context: Context, label: String, value: String, sensitive: B
             clipPrefs(app).edit { putString(CLIP_LABEL, label).putLong(CLIP_STAMP, stamp) }
             checkClipAfter(app, SENSITIVE_CLIP_MS)
         }
-    }
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -534,13 +521,7 @@ fun clearClipboardIfHolds(context: Context, value: String) {
 }
 
 private fun clearPrimaryClip(manager: ClipboardManager) {
-    runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            manager.clearPrimaryClip()
-        } else {
-            manager.setPrimaryClip(ClipData.newPlainText("", ""))
-        }
-    }
+    runCatching { manager.clearPrimaryClip() }
 }
 
 // ---------------------------------------------------------------------------

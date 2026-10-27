@@ -2,7 +2,6 @@ package com.btcpayapp.core.security
 
 import android.app.KeyguardManager
 import android.content.Context
-import android.os.Build
 import android.os.SystemClock
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import androidx.biometric.BiometricManager
@@ -37,10 +36,10 @@ import kotlin.coroutines.resume
  * while the phone sits locked in a pocket. On a rooted or instrumented device
  * the data can therefore be read without this prompt.
  *
- * On API 30+ the prompt is handed a [javax.crypto.Cipher] from a Keystore key
- * that needs user authentication, and unlocking needs that cipher to work. That
- * proves a Keystore operation ran after the user authenticated, rather than
- * trusting a callback that said true. Below API 30 it is a plain prompt.
+ * The prompt is handed a [javax.crypto.Cipher] from a Keystore key that needs
+ * user authentication, and unlocking needs that cipher to work. That proves a
+ * Keystore operation ran after the user authenticated, rather than trusting a
+ * callback that said true.
  */
 class AppLock(
     private val settings: SettingsRepository,
@@ -120,9 +119,9 @@ class AppLock(
         updateIdleWatch()
         if (!enabled || _locked.value || backgroundedAt == 0L) return
         val away = (clock() - backgroundedAt) / 1000
-        // Below API 30 the PIN fallback of an in-app prompt is a system
-        // activity, so confirming a payment "leaves" the app. Locking on that
-        // return would remove the screen and cancel the action being confirmed.
+        // If the PIN screen of an in-app prompt sends the app to the background,
+        // confirming a payment "leaves" the app. Locking on that return would
+        // remove the screen and cancel the action being confirmed.
         // Only a short trip is excused: a prompt left open while the user walks
         // away must not switch the lock off.
         val promptTrip = leftDuringPrompt && away < PROMPT_TRIP_SECONDS
@@ -243,9 +242,8 @@ object Biometrics {
     /**
      * True while [prompt] is running, from any caller.
      *
-     * Read by [AppLock]: below API 30 the PIN fallback is a separate system
-     * activity, so the app goes to the background in the middle of a prompt,
-     * and the idle lock must not fire under one either.
+     * Read by [AppLock]: a short trip to the background during a prompt does
+     * not lock, and the idle lock must not fire under a prompt.
      */
     @Volatile
     internal var promptShowing: Boolean = false
@@ -254,11 +252,8 @@ object Biometrics {
     fun hasScreenLock(context: Context): Boolean =
         context.getSystemService(KeyguardManager::class.java)?.isDeviceSecure == true
 
-    fun availability(context: Context): BiometricAvailability {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return if (hasScreenLock(context)) BiometricAvailability.Available else BiometricAvailability.NotEnrolled
-        }
-        return when (BiometricManager.from(context).canAuthenticate(AUTHENTICATORS)) {
+    fun availability(context: Context): BiometricAvailability =
+        when (BiometricManager.from(context).canAuthenticate(AUTHENTICATORS)) {
             BiometricManager.BIOMETRIC_SUCCESS -> BiometricAvailability.Available
             BiometricManager.BIOMETRIC_ERROR_NO_HARDWARE -> BiometricAvailability.NoHardware
             BiometricManager.BIOMETRIC_ERROR_HW_UNAVAILABLE -> BiometricAvailability.HardwareUnavailable
@@ -267,17 +262,13 @@ object Biometrics {
             BiometricManager.BIOMETRIC_ERROR_UNSUPPORTED -> BiometricAvailability.Unsupported
             else -> BiometricAvailability.Unknown
         }
-    }
 
     /**
      * Shows the system prompt and returns true only if a Keystore operation
      * actually unlocked.
      *
-     * On API 30+ the prompt is asked for `BIOMETRIC_STRONG or DEVICE_CREDENTIAL`
-     * so a device without a fingerprint sensor still gets a PIN fallback. Below
-     * that, `setDeviceCredentialAllowed` is the only route and it cannot be
-     * combined with a crypto object, so the call degrades to a plain prompt —
-     * documented here rather than silently.
+     * The prompt is asked for `BIOMETRIC_STRONG or DEVICE_CREDENTIAL` so a
+     * device without a fingerprint sensor still gets a PIN fallback.
      */
     suspend fun authenticate(
         activity: FragmentActivity,
@@ -318,18 +309,8 @@ object Biometrics {
         // over a second. On the caller's dispatcher — for the lock screen, the
         // main thread — that is a guaranteed stall on every cold start, and an
         // ANR on slower secure elements.
-        val cipher = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            withContext(Dispatchers.IO) { lockCipher() }
-        } else {
-            // Below R a crypto object cannot be combined with a device
-            // credential fallback, so there is nothing to acquire. The lock key
-            // is left alone: deleting it here would regenerate and destroy the
-            // expensive key on every unlock.
-            null
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && cipher == null) {
-            return AuthOutcome.Failed(-1, "Could not prepare secure authentication. Try again.")
-        }
+        val cipher = withContext(Dispatchers.IO) { lockCipher() }
+            ?: return AuthOutcome.Failed(-1, "Could not prepare secure authentication. Try again.")
 
         return suspendCancellableCoroutine { continuation ->
             val executor = ContextCompat.getMainExecutor(activity)
@@ -344,7 +325,7 @@ object Biometrics {
 
             val callback = object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    val verified = cipher == null || runCatching {
+                    val verified = runCatching {
                         val authenticatedCipher = result.cryptoObject?.cipher
                             ?: error("Missing authenticated cipher")
                         authenticatedCipher.doFinal(byteArrayOf(1))
@@ -369,14 +350,7 @@ object Biometrics {
             val info = BiometricPrompt.PromptInfo.Builder()
                 .setTitle(title)
                 .apply { subtitle?.let { setSubtitle(it) } }
-                .apply {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        setAllowedAuthenticators(AUTHENTICATORS)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        setDeviceCredentialAllowed(true)
-                    }
-                }
+                .setAllowedAuthenticators(AUTHENTICATORS)
                 .build()
 
             // Without this, rotating or backgrounding while the dialog is up
@@ -388,11 +362,7 @@ object Biometrics {
                 executor.execute { runCatching { prompt.cancelAuthentication() } }
             }
 
-            if (cipher != null) {
-                prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
-            } else {
-                prompt.authenticate(info)
-            }
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
         }
     }
 

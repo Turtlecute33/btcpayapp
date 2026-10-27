@@ -323,8 +323,7 @@ fun LightningReceiveScreen(
                         invoice = unpaid,
                         unit = settings.bitcoinUnit,
                         reconnecting = state.pollFailures >= FAILURES_BEFORE_NOTICE,
-                        // No snackbar: `copyToClipboard` says "Copied" below
-                        // Android 13 and the system does from 13.
+                        // No snackbar: the system says "Copied".
                         onCopy = { copyToClipboard(context, "Lightning invoice", unpaid.BOLT11) },
                         onShare = {
                             val send = Intent(Intent.ACTION_SEND).apply {

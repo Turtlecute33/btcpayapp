@@ -1,7 +1,6 @@
 package com.btcpayapp
 
 import android.content.Intent
-import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.SystemBarStyle
@@ -136,10 +135,7 @@ class MainActivity : FragmentActivity() {
      * With app lock on, the recents thumbnail is withheld as well, even when
      * screenshots are allowed. The lock engages only on the way back in, so
      * the thumbnail taken on the way out would show the last screen to anyone
-     * holding the phone. From API 33 the system is told to take none. Below
-     * that there is no such call, and the recents animation can take the
-     * thumbnail while the app is still in front, before a flag set on the way
-     * out applies. So there the window stays secure while the lock is on.
+     * holding the phone. So the system is told to take none.
      */
     private fun applyScreenCapturePolicy(graph: AppGraph) {
         lifecycleScope.launch {
@@ -153,9 +149,8 @@ class MainActivity : FragmentActivity() {
                     .map { it.blockScreenCapture to (it.appLock != AppLockMode.Off) }
                     .distinctUntilChanged()
                     .collect { (block, lock) ->
-                        val recentsCall = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
-                        if (recentsCall) setRecentsScreenshotEnabled(!lock)
-                        setSecure(block || (lock && !recentsCall))
+                        setRecentsScreenshotEnabled(!lock)
+                        setSecure(block)
                     }
             }
         }

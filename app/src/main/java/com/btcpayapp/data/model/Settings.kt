@@ -14,7 +14,7 @@ data class AppSettings(
 
     // --- Appearance --------------------------------------------------------
     val themeMode: ThemeMode = ThemeMode.System,
-    /** Material You. On by default; falls back to the built-in palette below API 31. */
+    /** Material You. On by default. */
     val dynamicColor: Boolean = true,
     /** True black surfaces for OLED panels. */
     val pureBlackDark: Boolean = false,

@@ -3,7 +3,6 @@ package com.btcpayapp.ui
 import android.Manifest
 import android.content.Context
 import android.widget.Toast
-import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
@@ -136,8 +135,8 @@ fun BtcPayApp(
             // Nothing is drawn until the vault has been read, so a returning
             // user never sees a flash of the welcome screen.
             if (settingsLoaded && accountsLoaded) {
-                // On API 33+ the permission is denied until something asks for
-                // it, so `canPost()` alone is not enough. Asked once, and only
+                // The permission is denied until something asks for it, so
+                // `canPost()` alone is not enough. Asked once, and only
                 // when the user actually has an account and has left payment
                 // alerts switched on.
                 NotificationPermissionRequest(
@@ -262,8 +261,6 @@ private fun LostSettingsNotice(graph: AppGraph, locked: Boolean, lockOn: Boolean
  */
 @Composable
 private fun NotificationPermissionRequest(enabled: Boolean, notifier: Notifier) {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-
     var asked by rememberSaveable { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),

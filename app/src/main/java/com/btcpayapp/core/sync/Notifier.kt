@@ -10,7 +10,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.btcpayapp.MainActivity
@@ -77,24 +76,16 @@ open class Notifier(private val context: Context) {
         channels.forEach(system::createNotificationChannel)
     }
 
-    /**
-     * `POST_NOTIFICATIONS` only exists from API 33. Below that,
-     * `checkSelfPermission` returns `PERMISSION_DENIED` for it, so the check is
-     * gated on the API level. Unconditional, it would return false on 8
-     * through 12, and the whole polling subsystem would run, advance its
-     * watermarks and spend battery without ever showing the merchant anything.
-     */
+    /** The user granted `POST_NOTIFICATIONS` and did not turn off the app's notifications. */
     open fun canPost(): Boolean {
-        val permitted = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
+        val permitted = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) ==
             PackageManager.PERMISSION_GRANTED
         return permitted && manager.areNotificationsEnabled()
     }
 
     /** True when the runtime prompt is the thing standing in the way. */
     fun needsPermission(): Boolean =
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
 
     /**

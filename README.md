@@ -80,7 +80,7 @@ of the public graph, made with `scripts/build-node-directory.rb`;
 3. Install the APK, open the app and connect it with an API key from your
    server.
 
-Requires Android 8.0 or later and BTCPay Server 2.2 or later. Some features
+Requires Android 15 or later and BTCPay Server 2.2 or later. Some features
 need a newer server: on-chain sending needs 2.3.3, editing crowdfunds 2.3.7,
 store invitations 2.4.4.
 

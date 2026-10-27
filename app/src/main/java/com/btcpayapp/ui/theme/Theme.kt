@@ -1,6 +1,5 @@
 package com.btcpayapp.ui.theme
 
-import android.os.Build
 import androidx.activity.compose.LocalActivity
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
@@ -59,7 +58,7 @@ fun BtcPayTheme(
             // Material You: the palette is derived from the user's wallpaper by
             // the system, so honouring it is both the platform convention and
             // one less thing for this app to get wrong on an unusual display.
-            dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            dynamicColor ->
                 if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
 
             dark -> DarkScheme

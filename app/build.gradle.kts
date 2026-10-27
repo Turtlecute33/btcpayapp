@@ -56,7 +56,7 @@ android {
 
     defaultConfig {
         applicationId = "com.btcpayapp"
-        minSdk = 26
+        minSdk = 35
         targetSdk = 37
         versionName = "0.2.3"
         // Derived, so a release can never ship a versionName bump with a stale
@@ -93,7 +93,7 @@ android {
                 storePassword = releaseKeystorePassword
                 keyAlias = "btcpayapp"
                 keyPassword = releaseKeystorePassword
-                // v1 adds nothing on minSdk 26 and leaves the signature readable
+                // v1 adds nothing on minSdk 35 and leaves the signature readable
                 // inside the zip directory; v2/v3 cover the whole APK.
                 enableV1Signing = false
                 enableV2Signing = true

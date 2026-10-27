@@ -1,7 +1,6 @@
 package com.btcpayapp.ui.screens.settings
 
 import android.content.Context
-import android.os.Build
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -171,15 +170,9 @@ fun AppSettingsScreen(
 
                 FormSwitch(
                     title = "Use the wallpaper palette",
-                    checked = settings.dynamicColor && DYNAMIC_COLOUR_SUPPORTED,
+                    checked = settings.dynamicColor,
                     onCheckedChange = { value -> viewModel.update { it.copy(dynamicColor = value) } },
-                    enabled = DYNAMIC_COLOUR_SUPPORTED,
-                    description = if (DYNAMIC_COLOUR_SUPPORTED) {
-                        "Material You derives the colours from your wallpaper."
-                    } else {
-                        "Android 12 introduced wallpaper-derived colours; this device runs " +
-                            "Android ${Build.VERSION.RELEASE}, so the built-in palette is used."
-                    },
+                    description = "Material You derives the colours from your wallpaper.",
                 )
 
                 FormSwitch(
@@ -258,8 +251,7 @@ fun AppSettingsScreen(
                     enabled = !authenticating,
                     description = "Stops screen recording and blanks the app in the recents switcher. " +
                         "The recents thumbnail is the easiest place to read a takings list over your " +
-                        "shoulder. On Android 12 and older, the app lock also blocks screenshots and " +
-                        "recording.",
+                        "shoulder.",
                 )
 
                 FormSwitch(
@@ -519,8 +511,6 @@ private fun LinkRow(title: String, description: String?, onClick: () -> Unit) {
         )
     }
 }
-
-private val DYNAMIC_COLOUR_SUPPORTED = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
 private val LOCK_DELAYS = listOf(0, 30, 60, 300, 900)
 

@@ -1,11 +1,9 @@
 package com.btcpayapp.core.crypto
 
-import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyStore
-import java.security.ProviderException
 import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -104,25 +102,16 @@ object Keystore {
             .apply {
                 if (requireUserAuthentication) {
                     setUserAuthenticationRequired(true)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        setUserAuthenticationParameters(
-                            0, // every use needs a fresh authentication
-                            KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
-                        )
-                    } else {
-                        @Suppress("DEPRECATION")
-                        setUserAuthenticationValidityDurationSeconds(-1)
-                    }
+                    setUserAuthenticationParameters(
+                        0, // every use needs a fresh authentication
+                        KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL,
+                    )
                     // A new biometric enrolment invalidates the key. AppLock then
                     // deletes it and makes a new one, and the key guards no data,
                     // so this is not a defence against a coerced enrolment.
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        setInvalidatedByBiometricEnrollment(true)
-                    }
+                    setInvalidatedByBiometricEnrollment(true)
                 }
-                if (strongBox && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                    setIsStrongBoxBacked(true)
-                }
+                if (strongBox) setIsStrongBoxBacked(true)
             }
             .build()
 
@@ -130,21 +119,10 @@ object Keystore {
             KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
                 .apply { init(spec) }
                 .generateKey()
-        } catch (e: ProviderException) {
-            // `StrongBoxUnavailableException` is API 28 and minSdk is 26, so it
-            // must never appear in a catch clause — ART resolves catch types
-            // when the handler is verified and throws NoClassDefFoundError on
-            // 8.0/8.1, which is a hard crash on first launch. It extends
-            // ProviderException, so catching the parent and testing the level
-            // is both safe and equivalent.
-            val strongBoxUnavailable = strongBox &&
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.P &&
-                e is StrongBoxUnavailableException
-            if (strongBoxUnavailable) {
-                generate(alias, requireUserAuthentication, strongBox = false)
-            } else {
-                throw e
-            }
+        } catch (e: StrongBoxUnavailableException) {
+            // No StrongBox on this phone: the key goes in the TEE.
+            if (!strongBox) throw e
+            generate(alias, requireUserAuthentication, strongBox = false)
         }
     }
 

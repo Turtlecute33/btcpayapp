@@ -1423,8 +1423,8 @@ private fun WalletGeneratorFields(
  * it, so the dialog says so plainly rather than relying on the user to guess.
  *
  * With no private keys on the server it is the only key to every future
- * payment, so it never goes to the clipboard (below Android 13 any app, the
- * keyboard or a cloud clipboard can read it there), and the dialog window is
+ * payment, so it never goes to the clipboard (the keyboard or a cloud
+ * clipboard can read it there), and the dialog window is
  * always secure, whatever the "Block screenshots" setting says.
  */
 @Composable
