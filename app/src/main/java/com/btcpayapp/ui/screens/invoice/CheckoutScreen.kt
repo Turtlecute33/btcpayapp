@@ -12,7 +12,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -640,7 +640,11 @@ private fun PayingState(
         Spacer(Modifier.height(16.dp))
 
         if (state.methods.size > 1) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // FlowRow: with 3 or more methods or a large font, the chips go onto a second line.
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 state.methods.forEach { candidate ->
                     FilterChip(
                         selected = candidate.paymentMethodId == method?.paymentMethodId,
