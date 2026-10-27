@@ -3,7 +3,6 @@ package com.btcpayapp.data.api.endpoints
 import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.AppData
-import com.btcpayapp.data.api.dto.AppItem
 import com.btcpayapp.data.api.dto.AppItemStats
 import com.btcpayapp.data.api.dto.AppSalesStats
 import com.btcpayapp.data.api.dto.CrowdfundAppData
@@ -19,11 +18,7 @@ import kotlinx.serialization.json.JsonObject
 // Apps
 // ---------------------------------------------------------------------------
 
-internal suspend fun BtcPayApi.apps(): List<AppData> = get("api/v1/apps")
-
 internal suspend fun BtcPayApi.storeApps(storeId: String): List<AppData> = get("api/v1/stores/${storeId.pathSegment()}/apps")
-
-internal suspend fun BtcPayApi.app(appId: String): AppData = get("api/v1/apps/${appId.pathSegment()}")
 
 internal suspend fun BtcPayApi.deleteApp(appId: String) {
     call("DELETE", "api/v1/apps/${appId.pathSegment()}")
@@ -33,11 +28,8 @@ internal suspend fun BtcPayApi.deleteApp(appId: String) {
 // Point of Sale
 // ---------------------------------------------------------------------------
 
-internal suspend fun BtcPayApi.pointOfSaleApp(appId: String): PointOfSaleAppData =
-    get("api/v1/apps/pos/${appId.pathSegment()}")
-
 /**
- * The same GET, kept as raw JSON. An app update replaces every setting, also
+ * The GET of a Point of Sale app, kept as raw JSON. An app update replaces every setting, also
  * the ones this client does not model (per-item extension data, fields added in
  * newer releases). Editing the raw object and sending it back leaves those
  * untouched; a round trip through the typed [PointOfSaleAppData] drops them.
@@ -54,26 +46,16 @@ internal suspend fun BtcPayApi.createPointOfSaleApp(
  * Sends [body] as it is. The server replaces the whole app from it, so callers
  * start from [pointOfSaleAppJson] and change only the keys the user edited. The
  * items are the exception: they are read as `items` but written as the
- * `template` string ([encodeItemTemplate]).
+ * `template` string.
  */
 internal suspend fun BtcPayApi.updatePointOfSaleApp(appId: String, body: JsonObject): PointOfSaleAppData =
     put("api/v1/apps/pos/${appId.pathSegment()}", body.toString())
-
-/**
- * The server reads the item list as a JSON-encoded **string** in `template`
- * but returns it as a real array in `items`. This helper hides that asymmetry
- * so callers only ever deal with `List<AppItem>`.
- */
-internal fun BtcPayApi.encodeItemTemplate(items: List<AppItem>): String = body(items)
 
 // ---------------------------------------------------------------------------
 // Crowdfund
 // ---------------------------------------------------------------------------
 
-internal suspend fun BtcPayApi.crowdfundApp(appId: String): CrowdfundAppData =
-    get("api/v1/apps/crowdfund/${appId.pathSegment()}")
-
-/** The same GET as raw JSON, for the reason given on [pointOfSaleAppJson]. */
+/** The GET of a Crowdfund app as raw JSON, for the reason given on [pointOfSaleAppJson]. */
 internal suspend fun BtcPayApi.crowdfundAppJson(appId: String): JsonObject =
     get("api/v1/apps/crowdfund/${appId.pathSegment()}")
 

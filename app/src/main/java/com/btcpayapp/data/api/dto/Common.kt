@@ -1,12 +1,6 @@
-@file:UseSerializers(BigDecimalSerializer::class)
-
 package com.btcpayapp.data.api.dto
 
-import com.btcpayapp.data.api.BigDecimalSerializer
-import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.UseSerializers
-import kotlinx.serialization.json.JsonObject
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -137,16 +131,6 @@ data class ApplicationUserData(
 }
 
 @Serializable
-data class UpdateCurrentUserRequest(
-    val email: String? = null,
-    val name: String? = null,
-    val imageUrl: String? = null,
-    val currentPassword: String? = null,
-    val newPassword: String? = null,
-    val allowGreenfieldBasicAuth: Boolean? = null,
-)
-
-@Serializable
 data class CreateUserRequest(
     val email: String,
     val password: String? = null,
@@ -168,12 +152,6 @@ data class ApiKeyData(
     val label: String? = null,
     val created: Long? = null,
     val permissions: List<String> = emptyList(),
-)
-
-@Serializable
-data class CreateApiKeyRequest(
-    val label: String,
-    val permissions: List<String>,
 )
 
 @Serializable
@@ -228,55 +206,17 @@ data class UpdateNotificationSettingsRequest(
 // ---------------------------------------------------------------------------
 
 @Serializable
-data class PermissionMetadata(
-    val name: String = "",
-    val included: List<String> = emptyList(),
-)
-
-@Serializable
 data class RateSourceData(
     val id: String = "",
     val name: String = "",
-)
-
-@Serializable
-data class LanguageData(
-    val code: String = "",
-    val currentLanguage: String = "",
-)
-
-@Serializable
-data class FileData(
-    val id: String = "",
-    val userId: String = "",
-    val uri: String = "",
-    val url: String? = null,
-    val originalName: String? = null,
-    val storageName: String? = null,
-    val created: Long? = null,
 )
 
 // ---------------------------------------------------------------------------
 // Shared value types
 // ---------------------------------------------------------------------------
 
-/**
- * Free-form JSON carried by several models (`metadata`, `config`,
- * `additionalData`, `paymentProof`). Kept as a [JsonObject] so nothing is lost
- * on a round trip and unknown extensions stay viewable.
- */
-typealias RawJson = JsonObject
-
 @Serializable
 data class LabelData(
     val type: String = "",
     val text: String = "",
-)
-
-@Serializable
-data class HistogramData(
-    val type: String = "Week",
-    @SerialName("balance") val balance: java.math.BigDecimal = java.math.BigDecimal.ZERO,
-    val series: List<java.math.BigDecimal> = emptyList(),
-    val labels: List<Long> = emptyList(),
 )

@@ -3,7 +3,6 @@ package com.btcpayapp.data.api.endpoints
 import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.dto.ConnectToNodeRequest
 import com.btcpayapp.data.api.dto.CreateLightningInvoiceRequest
-import com.btcpayapp.data.api.dto.HistogramData
 import com.btcpayapp.data.api.dto.LightningAddressData
 import com.btcpayapp.data.api.dto.LightningBalanceData
 import com.btcpayapp.data.api.dto.LightningChannelData
@@ -38,13 +37,6 @@ internal suspend fun BtcPayApi.lightningNodeInfo(scope: LightningScope, cryptoCo
 
 internal suspend fun BtcPayApi.lightningBalance(scope: LightningScope, cryptoCode: String = "BTC"): LightningBalanceData =
     get("${scope.path(cryptoCode)}/balance")
-
-internal suspend fun BtcPayApi.lightningHistogram(scope: LightningScope, cryptoCode: String = "BTC"): HistogramData =
-    get("${scope.path(cryptoCode)}/histogram")
-
-/** Returns a bare JSON string, so it is decoded as one. */
-internal suspend fun BtcPayApi.lightningDepositAddress(scope: LightningScope, cryptoCode: String = "BTC"): String =
-    post("${scope.path(cryptoCode)}/address")
 
 internal suspend fun BtcPayApi.connectToLightningNode(
     scope: LightningScope,

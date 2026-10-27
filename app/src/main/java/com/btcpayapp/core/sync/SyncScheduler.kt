@@ -72,11 +72,6 @@ object SyncScheduler {
     fun cancel(context: Context) {
         context.getSystemService(JobScheduler::class.java)?.cancel(JOB_ID)
     }
-
-    fun isScheduled(context: Context): Boolean =
-        context.getSystemService(JobScheduler::class.java)
-            ?.allPendingJobs
-            ?.any { it.id == JOB_ID } == true
 }
 
 class SyncJobService : JobService() {

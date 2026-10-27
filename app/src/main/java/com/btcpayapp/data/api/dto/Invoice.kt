@@ -82,11 +82,6 @@ data class CreateInvoiceRequest(
 )
 
 @Serializable
-data class UpdateInvoiceRequest(
-    val metadata: JsonObject,
-)
-
-@Serializable
 data class MarkInvoiceStatusRequest(
     /** The server accepts only `Settled` or `Invalid` here. */
     val status: InvoiceStatus,

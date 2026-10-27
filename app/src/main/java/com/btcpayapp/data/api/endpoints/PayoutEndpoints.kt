@@ -6,14 +6,12 @@ import com.btcpayapp.data.api.dto.CreatePayoutRequest
 import com.btcpayapp.data.api.dto.CreatePullPaymentRequest
 import com.btcpayapp.data.api.dto.LightningPayoutProcessorSettings
 import com.btcpayapp.data.api.dto.LnurlData
-import com.btcpayapp.data.api.dto.MarkPayoutRequest
 import com.btcpayapp.data.api.dto.OnChainPayoutProcessorSettings
 import com.btcpayapp.data.api.dto.PaymentRequestData
 import com.btcpayapp.data.api.dto.PaymentRequestRequest
 import com.btcpayapp.data.api.dto.PayPaymentRequestRequest
 import com.btcpayapp.data.api.dto.PayoutData
 import com.btcpayapp.data.api.dto.PayoutProcessorData
-import com.btcpayapp.data.api.dto.PayoutState
 import com.btcpayapp.data.api.dto.PullPaymentData
 import com.btcpayapp.data.api.dto.InvoiceData
 import com.btcpayapp.data.api.dto.UpdateLightningPayoutProcessorSettings
@@ -133,9 +131,6 @@ internal suspend fun BtcPayApi.pullPaymentPayouts(
 private fun payoutPath(storeId: String, payoutId: String) =
     "api/v1/stores/${storeId.pathSegment()}/payouts/${payoutId.pathSegment()}"
 
-internal suspend fun BtcPayApi.payout(storeId: String, payoutId: String): PayoutData =
-    get(payoutPath(storeId, payoutId))
-
 internal suspend fun BtcPayApi.createPayout(storeId: String, request: CreatePayoutRequest): PayoutData =
     post("api/v1/stores/${storeId.pathSegment()}/payouts", body(request))
 
@@ -157,10 +152,6 @@ internal suspend fun BtcPayApi.cancelPayout(storeId: String, payoutId: String) {
 
 internal suspend fun BtcPayApi.markPayoutPaid(storeId: String, payoutId: String) {
     call("POST", "${payoutPath(storeId, payoutId)}/mark-paid")
-}
-
-internal suspend fun BtcPayApi.markPayout(storeId: String, payoutId: String, state: PayoutState) {
-    call("POST", "${payoutPath(storeId, payoutId)}/mark", body(MarkPayoutRequest(state)))
 }
 
 // ---------------------------------------------------------------------------

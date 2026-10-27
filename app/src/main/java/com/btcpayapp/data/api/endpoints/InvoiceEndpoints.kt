@@ -9,8 +9,6 @@ import com.btcpayapp.data.api.dto.MarkInvoiceStatusRequest
 import com.btcpayapp.data.api.dto.PullPaymentData
 import com.btcpayapp.data.api.dto.RefundInvoiceRequest
 import com.btcpayapp.data.api.dto.RefundTriggerData
-import com.btcpayapp.data.api.dto.UpdateInvoiceRequest
-import kotlinx.serialization.json.JsonObject
 
 /**
  * `orderId` and `status` are repeatable query parameters, and `startDate` /
@@ -68,16 +66,6 @@ internal suspend fun BtcPayApi.invoiceWithPaymentMethods(storeId: String, invoic
 
 internal suspend fun BtcPayApi.createInvoice(storeId: String, request: CreateInvoiceRequest): InvoiceData =
     post("api/v1/stores/${storeId.pathSegment()}/invoices", body(request))
-
-/** Metadata is replaced wholesale, so callers must merge before sending. */
-internal suspend fun BtcPayApi.updateInvoiceMetadata(
-    storeId: String,
-    invoiceId: String,
-    metadata: JsonObject,
-): InvoiceData = put(
-    "api/v1/stores/${storeId.pathSegment()}/invoices/${invoiceId.pathSegment()}",
-    body(UpdateInvoiceRequest(metadata)),
-)
 
 /** Archives rather than deletes; [unarchiveInvoice] reverses it. */
 internal suspend fun BtcPayApi.archiveInvoice(storeId: String, invoiceId: String) {

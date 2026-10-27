@@ -4,7 +4,6 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyStore
-import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -156,8 +155,4 @@ object Keystore {
         Cipher.getInstance(TRANSFORMATION).apply {
             init(Cipher.ENCRYPT_MODE, secretKey(ALIAS_LOCK, requireUserAuthentication = true))
         }
-
-    private val secureRandom by lazy { SecureRandom() }
-
-    fun randomBytes(size: Int): ByteArray = ByteArray(size).also { secureRandom.nextBytes(it) }
 }

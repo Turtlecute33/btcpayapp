@@ -8,7 +8,6 @@ import com.btcpayapp.data.api.LabelListSerializer
 import com.btcpayapp.data.api.TolerantLongSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.UseSerializers
-import kotlinx.serialization.json.JsonObject
 import java.math.BigDecimal
 
 @Serializable
@@ -109,11 +108,6 @@ data class TransactionDestination(
 )
 
 @Serializable
-data class CreateTransactionPsbtResponse(
-    val psbt: String = "",
-)
-
-@Serializable
 data class BroadcastTransactionRequest(
     /** A finalised PSBT (base64) or a raw transaction (hex). */
     val transaction: String,
@@ -123,31 +117,4 @@ data class BroadcastTransactionRequest(
 data class PatchTransactionRequest(
     val comment: String? = null,
     val labels: List<String>? = null,
-)
-
-// ---------------------------------------------------------------------------
-// Wallet objects (labels, attachments and the links between them)
-// ---------------------------------------------------------------------------
-
-@Serializable
-data class WalletObjectData(
-    val type: String = "",
-    val id: String = "",
-    val data: JsonObject? = null,
-    val links: List<WalletObjectLink> = emptyList(),
-)
-
-@Serializable
-data class WalletObjectLink(
-    val type: String = "",
-    val id: String = "",
-    val linkData: JsonObject? = null,
-    val objectData: JsonObject? = null,
-)
-
-@Serializable
-data class AddWalletObjectLinkRequest(
-    val type: String,
-    val id: String,
-    val data: JsonObject? = null,
 )

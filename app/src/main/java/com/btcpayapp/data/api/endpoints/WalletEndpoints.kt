@@ -3,9 +3,7 @@ package com.btcpayapp.data.api.endpoints
 import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.BroadcastTransactionRequest
-import com.btcpayapp.data.api.dto.CreateTransactionPsbtResponse
 import com.btcpayapp.data.api.dto.CreateTransactionRequest
-import com.btcpayapp.data.api.dto.HistogramData
 import com.btcpayapp.data.api.dto.PatchTransactionRequest
 import com.btcpayapp.data.api.dto.WalletAddressData
 import com.btcpayapp.data.api.dto.WalletFeeRateData
@@ -25,9 +23,6 @@ private fun walletPath(storeId: String, paymentMethodId: String) =
 
 internal suspend fun BtcPayApi.walletOverview(storeId: String, paymentMethodId: String): WalletOverviewData =
     get(walletPath(storeId, paymentMethodId))
-
-internal suspend fun BtcPayApi.walletHistogram(storeId: String, paymentMethodId: String): HistogramData =
-    get("${walletPath(storeId, paymentMethodId)}/histogram")
 
 internal suspend fun BtcPayApi.walletFeeRate(
     storeId: String,
@@ -50,11 +45,6 @@ internal suspend fun BtcPayApi.walletAddress(
     "${walletPath(storeId, paymentMethodId)}/address",
     listOf("forceGenerate" to forceGenerate.takeIf { it }),
 )
-
-/** Releases the last reserved address back into the pool. */
-internal suspend fun BtcPayApi.unreserveWalletAddress(storeId: String, paymentMethodId: String) {
-    call("DELETE", "${walletPath(storeId, paymentMethodId)}/address")
-}
 
 internal suspend fun BtcPayApi.walletUtxos(storeId: String, paymentMethodId: String): List<WalletUtxoData> =
     get("${walletPath(storeId, paymentMethodId)}/utxos")
@@ -104,19 +94,6 @@ internal suspend fun BtcPayApi.signTransaction(
 ): String = post(
     "${walletPath(storeId, paymentMethodId)}/transactions",
     body(request.copy(signWithSeed = true, proceedWithBroadcast = false, proceedWithPayjoin = false)),
-)
-
-/**
- * Same endpoint with `signWithSeed = false`, which returns an unsigned PSBT for
- * an external signer instead of moving any money.
- */
-internal suspend fun BtcPayApi.createUnsignedPsbt(
-    storeId: String,
-    paymentMethodId: String,
-    request: CreateTransactionRequest,
-): CreateTransactionPsbtResponse = post(
-    "${walletPath(storeId, paymentMethodId)}/transactions",
-    body(request.copy(signWithSeed = false, proceedWithBroadcast = false)),
 )
 
 /**

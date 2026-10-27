@@ -5,21 +5,16 @@ import com.btcpayapp.data.api.BtcPayApi
 import com.btcpayapp.data.api.ServerVersion
 import com.btcpayapp.data.api.dto.ApiKeyData
 import com.btcpayapp.data.api.dto.ApplicationUserData
-import com.btcpayapp.data.api.dto.CreateApiKeyRequest
 import com.btcpayapp.data.api.dto.CreateUserRequest
 import com.btcpayapp.data.api.dto.EmailSettingsData
-import com.btcpayapp.data.api.dto.FileData
 import com.btcpayapp.data.api.dto.HealthData
-import com.btcpayapp.data.api.dto.LanguageData
 import com.btcpayapp.data.api.dto.NotificationData
 import com.btcpayapp.data.api.dto.NotificationSettingsData
-import com.btcpayapp.data.api.dto.PermissionMetadata
 import com.btcpayapp.data.api.dto.RateSourceData
 import com.btcpayapp.data.api.dto.RoleData
 import com.btcpayapp.data.api.dto.ServerInfoData
 import com.btcpayapp.data.api.dto.SetApprovalRequest
 import com.btcpayapp.data.api.dto.SetLockRequest
-import com.btcpayapp.data.api.dto.UpdateCurrentUserRequest
 import com.btcpayapp.data.api.dto.UpdateEmailSettingsRequest
 import com.btcpayapp.data.api.dto.UpdateNotificationRequest
 import com.btcpayapp.data.api.dto.UpdateNotificationSettingsRequest
@@ -74,20 +69,9 @@ internal suspend fun BtcPayApi.updateServerEmailSettings(request: UpdateEmailSet
 
 internal suspend fun BtcPayApi.currentUser(): ApplicationUserData = get("api/v1/users/me")
 
-internal suspend fun BtcPayApi.updateCurrentUser(request: UpdateCurrentUserRequest): ApplicationUserData =
-    put("api/v1/users/me", body(request))
-
 // ---------------------------------------------------------------------------
 // API keys
 // ---------------------------------------------------------------------------
-
-/**
- * Mints a scoped key for the *authenticated* user. The response carries the
- * cleartext key exactly once — the server nulls its stored copy five minutes
- * later — so the caller must persist it immediately.
- */
-internal suspend fun BtcPayApi.createApiKey(request: CreateApiKeyRequest): ApiKeyData =
-    post("api/v1/api-keys", body(request))
 
 internal suspend fun BtcPayApi.currentApiKey(): ApiKeyData = get("api/v1/api-keys/current")
 
@@ -101,9 +85,6 @@ internal suspend fun BtcPayApi.revokeCurrentApiKey() {
 // ---------------------------------------------------------------------------
 
 internal suspend fun BtcPayApi.users(): List<ApplicationUserData> = get("api/v1/users")
-
-internal suspend fun BtcPayApi.user(idOrEmail: String): ApplicationUserData =
-    get("api/v1/users/${idOrEmail.pathSegment()}")
 
 internal suspend fun BtcPayApi.createUser(request: CreateUserRequest): ApplicationUserData =
     post("api/v1/users", body(request))
@@ -134,9 +115,6 @@ internal suspend fun BtcPayApi.notifications(
     listOf("storeId" to storeIds, "seen" to seen, "skip" to skip, "take" to take),
 )
 
-internal suspend fun BtcPayApi.notification(id: String): NotificationData =
-    get("api/v1/users/me/notifications/${id.pathSegment()}")
-
 /** A null [seen] toggles. */
 internal suspend fun BtcPayApi.markNotification(id: String, seen: Boolean?): NotificationData =
     put("api/v1/users/me/notifications/${id.pathSegment()}", body(UpdateNotificationRequest(seen)))
@@ -152,24 +130,10 @@ internal suspend fun BtcPayApi.updateNotificationSettings(disabled: List<String>
     put("api/v1/users/me/notification-settings", body(UpdateNotificationSettingsRequest(disabled)))
 
 // ---------------------------------------------------------------------------
-// Files
-// ---------------------------------------------------------------------------
-
-internal suspend fun BtcPayApi.files(): List<FileData> = get("api/v1/files")
-
-internal suspend fun BtcPayApi.deleteFile(fileId: String) {
-    call("DELETE", "api/v1/files/${fileId.pathSegment()}")
-}
-
-// ---------------------------------------------------------------------------
 // Misc — note these are served from the site root, not under /api/v1
 // ---------------------------------------------------------------------------
 
-internal suspend fun BtcPayApi.permissionMetadata(): List<PermissionMetadata> = get("misc/permissions")
-
 internal suspend fun BtcPayApi.rateSources(): List<RateSourceData> = get("misc/rate-sources")
-
-internal suspend fun BtcPayApi.languages(): List<LanguageData> = get("misc/lang")
 
 /**
  * Percent-encodes a value being interpolated into a path. Store ids and invoice

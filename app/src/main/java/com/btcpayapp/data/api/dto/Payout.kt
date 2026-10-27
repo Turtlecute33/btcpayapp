@@ -53,23 +53,6 @@ data class LnurlData(
     val lnurlUri: String = "",
 )
 
-@Serializable
-data class RegisterBoltcardRequest(
-    val UID: String,
-    val onExisting: String = "UpdateVersion",
-)
-
-@Serializable
-data class BoltcardData(
-    val LNURLW: String = "",
-    val version: Int = 0,
-    val K0: String = "",
-    val K1: String = "",
-    val K2: String = "",
-    val K3: String = "",
-    val K4: String = "",
-)
-
 // ---------------------------------------------------------------------------
 // Payouts
 // ---------------------------------------------------------------------------
@@ -124,12 +107,6 @@ data class CreatePayoutRequest(
 data class ApprovePayoutRequest(
     val revision: Int,
     val rateRule: String? = null,
-)
-
-@Serializable
-data class MarkPayoutRequest(
-    val state: PayoutState,
-    val paymentProof: JsonObject? = null,
 )
 
 // ---------------------------------------------------------------------------

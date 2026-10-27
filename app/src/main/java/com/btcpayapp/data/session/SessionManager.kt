@@ -337,10 +337,6 @@ class SessionManager(
         }.onFailure { it.record() }
     }
 
-    fun clearError() {
-        _lastError.value = null
-    }
-
     private fun Throwable.record() {
         if (this is ApiException) {
             _lastError.value = this
