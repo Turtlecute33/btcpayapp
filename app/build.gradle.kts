@@ -138,11 +138,14 @@ android {
 
     packaging {
         resources {
+            // Licence files also in the library folders (META-INF/androidx/...). kotlin/** holds the
+            // builtins metadata that only kotlin-reflect reads, and the app does not use it.
             excludes += setOf(
                 "/META-INF/{AL2.0,LGPL2.1}",
                 "/META-INF/*.version",
                 "/META-INF/DEPENDENCIES",
-                "DebugProbesKt.bin",
+                "META-INF/versions/**", "META-INF/*.md", "META-INF/LICENSE*", "META-INF/NOTICE*",
+                "META-INF/**/LICENSE*", "META-INF/**/NOTICE*", "DebugProbesKt.bin", "kotlin/**",
                 "kotlin-tooling-metadata.json",
             )
         }
