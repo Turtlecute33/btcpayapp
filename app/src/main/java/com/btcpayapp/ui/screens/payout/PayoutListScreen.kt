@@ -89,6 +89,7 @@ import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
 import com.btcpayapp.ui.theme.MonospaceStyle
 import java.math.BigDecimal
 import java.math.RoundingMode
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -256,10 +257,14 @@ class PayoutListViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
+    /** The load in flight. A new load cancels it, so an old answer cannot replace a newer one. */
+    private var loadJob: Job? = null
+
     private fun load(refreshing: Boolean = false) {
         val store = bound.id ?: return
         val filter = _state.value.filter
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _state.update {
                 it.copy(loading = !refreshing && it.payouts.isEmpty(), refreshing = refreshing, error = null)
             }
