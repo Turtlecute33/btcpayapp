@@ -52,12 +52,10 @@ private const val MAX_AHEAD_SECONDS = 24 * 60 * 60L
  *
  * The invoice poll reports every settlement in the stores it reads
  * ([invoiceStores]), also of a payment it announced as detected before, and
- * the payout poll every payout awaiting approval in its stores
- * ([payoutStores]). The same events from the feed would be a second
- * notification for one payment. A payout notification without a status is one
- * awaiting approval: BTCPay renders it with that text. A store that a poll
- * does not read (its alert is off, or the key may not view it) has only the
- * feed.
+ * the payout check every payout awaiting approval in the stores whose payouts
+ * this run read ([payoutStores]). The same events from the feed would be a
+ * second notification for one payment. A store that a poll does not read (its
+ * alert is off, or the key may not view it) has only the feed.
  *
  * A late or partial payment, or a payment that did not confirm, is covered
  * only when the poll announced that invoice in this run
@@ -74,9 +72,18 @@ internal fun coveredByOwnAlerts(
     "invoice_confirmed" -> invoiceStores.reads(item.storeId)
     "invoice_paidafterexpiration", "invoice_expiredpaidpartial", "invoice_failedtoconfirm" ->
         announcedInvoiceIds.any { it.isNotEmpty() && item.link?.contains(it) == true }
-    "payout", "payout_awaitingapproval" -> payoutStores.reads(item.storeId)
+    in PAYOUT_WAITING -> payoutStores.reads(item.storeId)
     else -> false
 }
+
+/**
+ * A payout that waits for approval. A payout notification without a status is
+ * one: BTCPay renders it with that text.
+ */
+internal val NotificationData.isPayoutWaiting: Boolean
+    get() = identifier.lowercase() in PAYOUT_WAITING
+
+private val PAYOUT_WAITING = setOf("payout", "payout_awaitingapproval")
 
 /** An entry that names no store counts as read when any store is, so it does not come twice. */
 private fun Set<String>.reads(storeId: String?): Boolean = if (storeId == null) isNotEmpty() else storeId in this

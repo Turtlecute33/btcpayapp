@@ -30,6 +30,8 @@ data class SyncState(
     val alertedAccounts: List<String> = emptyList(),
     /** `accountId` → how far that account's BTCPay notification feed has been read. */
     val feedPolls: Map<String, FeedPollState> = emptyMap(),
+    /** `accountId` → when (epoch ms) the job last read the payout lists of its stores. */
+    val payoutChecks: Map<String, Long> = emptyMap(),
 ) {
     fun feedPoll(accountId: String): FeedPollState? = feedPolls[accountId]
 
@@ -52,6 +54,19 @@ data class SyncState(
 
     fun withAnnounced(accountId: String, storeId: String, ids: List<String>): SyncState =
         copy(announcedPayouts = announcedPayouts + (key(accountId, storeId) to ids.distinct()))
+
+    /**
+     * True when the payout lists of [accountId] were not read in the last
+     * [PAYOUT_CHECK_MS], or the phone clock was set back since. The list has
+     * no server paging, so each read gets the full payout history of a store.
+     */
+    fun payoutsDue(accountId: String, now: Long): Boolean {
+        val last = payoutChecks[accountId] ?: return true
+        return now < last || now - last >= PAYOUT_CHECK_MS
+    }
+
+    fun withPayoutCheck(accountId: String, now: Long): SyncState =
+        copy(payoutChecks = payoutChecks + (accountId to now))
 
     /** Starts the outage clock of [accountId] at [now], unless it already runs. */
     fun withAccountFailure(accountId: String, now: Long): SyncState =
@@ -81,7 +96,7 @@ data class SyncState(
 
     /**
      * Everything kept for [accountId]: its store polls, announced payouts,
-     * feed position and outage entries. For account removal, so no invoice or
+     * payout check time, feed position and outage entries. For account removal, so no invoice or
      * payout id of a removed server stays on the device.
      */
     fun forgetAccount(accountId: String): SyncState = keepAccounts { it != accountId }
@@ -100,6 +115,7 @@ data class SyncState(
             accountFailureSince = accountFailureSince.filterKeys(keep),
             alertedAccounts = alertedAccounts.filter(keep),
             feedPolls = feedPolls.filterKeys(keep),
+            payoutChecks = payoutChecks.filterKeys(keep),
         )
     }
 
@@ -108,6 +124,13 @@ data class SyncState(
     companion object {
         /** How long a server must stay unreachable before the user is told. */
         const val SERVER_ISSUE_AFTER_MS: Long = 60 * 60 * 1000L
+
+        /**
+         * About an hour between payout list reads. A little less, so that a
+         * run that comes some minutes early still reads them: with a 60-minute
+         * interval, the lists are then read on each run, not on every second one.
+         */
+        const val PAYOUT_CHECK_MS: Long = 50 * 60 * 1000L
     }
 }
 

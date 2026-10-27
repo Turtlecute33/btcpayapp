@@ -42,9 +42,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * payment events through Firebase — a third party learning when and how often a
  * merchant gets paid — and would tie the app to Google Play services. A poll
  * talks only to the merchant's own server: per store, the invoices created
- * since the last run, one read per invoice still open and the payout list; per
- * account, the feed. Its cost follows the invoices opened in the last expiry
- * window, not the store's history.
+ * since the last run, one read per invoice still open and, about once an hour,
+ * the payout list; per account, the feed. Its cost follows the invoices opened
+ * in the last expiry window, not the store's history.
  */
 class SyncEngine internal constructor(
     private val accounts: AccountRepository,
@@ -177,7 +177,10 @@ class SyncEngine internal constructor(
         // from a server that is up.
         suspend fun attempt(what: String, countsAgainstAccount: Boolean = true, block: suspend () -> Int) {
             try {
-                found += block()
+                // Not `found += block()`: that reads `found` before the block,
+                // and the feed read can run a payout check, which adds to it.
+                val count = block()
+                found += count
             } catch (e: Exception) {
                 // A cancelled run (the job's limit, onStopJob, this account's
                 // limit) can fail its call as a plain IO error. Rethrow the
@@ -195,24 +198,35 @@ class SyncEngine internal constructor(
             config.notifyPayouts && Permissions.covers(account.permissions, CAN_VIEW_PAYOUTS, it)
         }.toSet()
 
+        // The payout list has no server paging, so it is read about once an
+        // hour, not on each run (see SyncState.payoutsDue).
+        val now = System.currentTimeMillis()
+        val payoutsDue = stateFile.state.value.payoutsDue(account.id, now)
+        val payoutsRead = mutableSetOf<String>()
+
+        // Never counted against the account: stores() has just shown the
+        // server answers, and a store with a long payout history can pass the
+        // 8 MB response cap, which fails as a Transport error.
+        suspend fun checkPayouts(storeId: String) {
+            payoutsRead += storeId
+            attempt("payout check", countsAgainstAccount = false) { notifyPendingPayouts(api, account, storeId) }
+        }
+
         storeIds.forEach { storeId ->
             if (storeId in invoiceStores) {
                 attempt("invoice poll") { notifyNewSettlements(api, account, storeId, announcedInvoices) }
             }
-            // Never counted against the account: stores() has just shown the
-            // server answers, and the payout list has no server paging, so a
-            // store with a long history can pass the 8 MB response cap, which
-            // fails as a Transport error.
-            if (storeId in payoutStores) {
-                attempt("payout check", countsAgainstAccount = false) {
-                    notifyPendingPayouts(api, account, storeId)
-                }
-            }
+            if (payoutsDue && storeId in payoutStores) checkPayouts(storeId)
         }
+        if (payoutsRead.isNotEmpty()) saved(TAG) { stateFile.update { it.withPayoutCheck(account.id, now) } }
         // After the invoice polls, so that a late payment or a failure to
         // confirm that they announced is not announced again by the feed.
         if (config.notifyServerNotifications && Permissions.covers(account.permissions, CAN_VIEW_NOTIFICATIONS)) {
-            attempt("feed read") { notifyServerFeed(api, account, invoiceStores, payoutStores, announcedInvoices) }
+            attempt("feed read") {
+                notifyServerFeed(api, account, invoiceStores, payoutsRead, announcedInvoices) { storeId ->
+                    if (storeId in payoutStores && storeId !in payoutsRead) checkPayouts(storeId)
+                }
+            }
         }
         return AccountOutcome(found, problem = if (reached) null else UNREACHABLE_BODY)
     }
@@ -253,18 +267,25 @@ class SyncEngine internal constructor(
      * One request per account, whatever the number of stores: the server's own
      * notification feed, unseen entries only. An entry read on the web first
      * does not reach the phone as well.
+     *
+     * A new payout entry first goes to [checkPayouts] with its store, which
+     * reads that store's payouts if this run did not ([payoutsRead]). So the
+     * alert comes now, and only once: from the payout check, which remembers
+     * the payout, not from the feed and then again from the next check.
      */
     private suspend fun notifyServerFeed(
         api: BtcPayApi,
         account: Account,
         invoiceStores: Set<String>,
-        payoutStores: Set<String>,
+        payoutsRead: Set<String>,
         announcedInvoices: Set<String>,
+        checkPayouts: suspend (storeId: String) -> Unit,
     ): Int {
         val previous = stateFile.state.value.feedPoll(account.id)
         val result = evaluateFeed(previous, api.notifications(seen = false, take = FEED_TAKE), nowSeconds())
+        result.fresh.filter { it.isPayoutWaiting }.mapNotNull { it.storeId }.distinct().forEach { checkPayouts(it) }
         val shown = result.fresh.filterNot {
-            coveredByOwnAlerts(it, invoiceStores, payoutStores, announcedInvoices)
+            coveredByOwnAlerts(it, invoiceStores, payoutsRead, announcedInvoices)
         }
 
         shown.forEach { item ->

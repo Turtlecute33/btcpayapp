@@ -50,6 +50,13 @@ class FeedPollingTest {
         assertTrue(covered("payout", payments = false, payouts = true))
     }
 
+    @Test fun `only a payout that waits for approval starts a payout check`() {
+        assertTrue(event("payout_AwaitingApproval").isPayoutWaiting)
+        assertTrue(event("payout").isPayoutWaiting)
+        assertFalse(event("payout_awaitingpayment").isPayoutWaiting)
+        assertFalse(event("invoice_confirmed").isPayoutWaiting)
+    }
+
     @Test fun `a late payment or a failure to confirm comes from the feed unless the poll announced that invoice in this run`() {
         val link = "https://pay.example.com/invoices/Inv123"
         listOf("invoice_paidAfterExpiration", "invoice_expiredpaidpartial", "invoice_failedToConfirm").forEach {

@@ -170,6 +170,34 @@ class SyncEngineTest {
         assertNotNull("adopted again, as on a first run", state.state.value.invoicePoll("a", "s1"))
     }
 
+    @Test fun `payout lists are read about once an hour`() = runBlocking<Unit> {
+        answerAll("s1")
+        engine.run()
+        engine.run()
+        assertEquals(1, server.asked.count { it == "/api/v1/stores/s1/payouts" })
+
+        state.update { it.withPayoutCheck("a", System.currentTimeMillis() - SyncState.PAYOUT_CHECK_MS) }
+        engine.run()
+        assertEquals(2, server.asked.count { it == "/api/v1/stores/s1/payouts" })
+    }
+
+    @Test fun `a waiting payout in the feed is checked at once and told once`() = runBlocking<Unit> {
+        answerAll("s1")
+        state.update { it.withPayoutCheck("a", System.currentTimeMillis()).withFeedPoll("a", FeedPollState(since = 1)) }
+        server.answers["/api/v1/stores/s1/payouts"] = ok("""[{"id":"p1","state":"AwaitingApproval"}]""")
+        server.answers["/api/v1/users/me/notifications"] =
+            ok("""[{"id":"n1","identifier":"payout_awaitingapproval","storeId":"s1","createdTime":5}]""")
+        assertEquals(SyncEngine.Result.FoundUpdates(1), engine.run())
+        assertEquals(listOf("p1"), notifier.payouts)
+        assertTrue("not again from the feed", notifier.feed.isEmpty())
+
+        // The next hourly check does not tell it again.
+        state.update { it.withPayoutCheck("a", System.currentTimeMillis() - SyncState.PAYOUT_CHECK_MS) }
+        engine.run()
+        assertEquals(listOf("p1"), notifier.payouts)
+        assertTrue(notifier.feed.isEmpty())
+    }
+
     @Test fun `what the key may not read is not asked`() = runBlocking<Unit> {
         vault.update { Vault(accounts = listOf(account.copy(permissions = listOf("btcpay.store.canviewinvoices:s1")))) }
         answerAll("s1", "s2")
@@ -193,6 +221,8 @@ class SyncEngineTest {
     private class RecordingNotifier : Notifier(ContextWrapper(null)) {
         var permitted = true
         val payments = mutableListOf<String>()
+        val payouts = mutableListOf<String>()
+        val feed = mutableListOf<String>()
         val serverIssues = mutableListOf<String>()
         val cleared = mutableListOf<String>()
 
@@ -216,7 +246,9 @@ class SyncEngineTest {
             title: String,
             body: String,
             concealed: Boolean,
-        ) = Unit
+        ) {
+            payouts += payoutId
+        }
 
         override fun serverIssue(accountId: String, title: String, body: String, concealed: Boolean) {
             serverIssues += body
@@ -234,7 +266,9 @@ class SyncEngineTest {
             title: String,
             body: String,
             concealed: Boolean,
-        ) = Unit
+        ) {
+            feed += notificationId
+        }
 
         override fun cancelAccount(accountId: String) = Unit
     }

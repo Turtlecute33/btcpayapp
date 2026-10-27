@@ -1,5 +1,6 @@
 package com.btcpayapp.core.sync
 
+import com.btcpayapp.data.api.ApiJson
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -23,6 +24,7 @@ class SyncStateTest {
         .withFeedPoll(accountId, FeedPollState(since = 7))
         .withAccountFailure(accountId, now = 10)
         .withServerIssueAlerted(accountId)
+        .withPayoutCheck(accountId, now = 20)
 
     private fun SyncState.plus(other: SyncState) = copy(
         invoiceWatermarks = invoiceWatermarks + other.invoiceWatermarks,
@@ -31,6 +33,7 @@ class SyncStateTest {
         accountFailureSince = accountFailureSince + other.accountFailureSince,
         alertedAccounts = alertedAccounts + other.alertedAccounts,
         feedPolls = feedPolls + other.feedPolls,
+        payoutChecks = payoutChecks + other.payoutChecks,
     )
 
     @Test fun `forgetting an account removes only its entries`() {
@@ -64,6 +67,24 @@ class SyncStateTest {
         assertEquals(failing, failing.withAccountFailure("a", now = 5_000))
         assertFalse(failing.withServerIssueAlerted("a").serverIssueDue("a", now = 1_000 + 2 * hour))
         assertFalse(failing.serverIssueDue("b", now = 1_000 + hour))
+    }
+
+    @Test fun `payout lists are due about once an hour, and when the clock was set back`() {
+        val checked = SyncState().withPayoutCheck("a", now = 1_000)
+        assertTrue(SyncState().payoutsDue("a", now = 1_000))
+        assertFalse(checked.payoutsDue("a", now = 1_000 + SyncState.PAYOUT_CHECK_MS - 1))
+        assertTrue(checked.payoutsDue("a", now = 1_000 + SyncState.PAYOUT_CHECK_MS))
+        assertTrue(checked.payoutsDue("a", now = 999))
+        assertTrue(checked.payoutsDue("b", now = 1_000))
+    }
+
+    @Test fun `the payout check time survives a save, and an older document loads without it`() {
+        val json = ApiJson.instance
+        val state = SyncState().withPayoutCheck("a", now = 1_000)
+        assertEquals(state, json.decodeFromString(SyncState.serializer(), json.encodeToString(SyncState.serializer(), state)))
+        val older = json.decodeFromString(SyncState.serializer(), """{"lastRunAt":5}""")
+        assertEquals(SyncState(lastRunAt = 5), older)
+        assertTrue(older.payoutsDue("a", now = 1_000))
     }
 
     @Test fun `a success clears the failure clock and the alert flag of that account only`() {

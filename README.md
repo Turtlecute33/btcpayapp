@@ -91,8 +91,10 @@ store invitations 2.4.4.
 
 Background alerts check invoices while they are open. A payment that arrives
 after an invoice expired is reported through your server's own notifications,
-so give the app's key the notification permission. Lightning history shows
-what your node returns; some nodes return only their oldest invoices.
+so give the app's key the notification permission. Payout lists are read about
+once an hour; with the notification permission, a new payout in your server's
+notifications is checked at once. Lightning history shows what your node
+returns; some nodes return only their oldest invoices.
 
 ## Build
 
