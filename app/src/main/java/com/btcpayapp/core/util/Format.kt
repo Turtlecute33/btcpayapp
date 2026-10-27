@@ -1,5 +1,7 @@
 package com.btcpayapp.core.util
 
+import android.content.Context
+import android.text.format.DateFormat
 import com.btcpayapp.data.model.BitcoinUnit
 import java.math.BigDecimal
 import java.math.RoundingMode
@@ -320,16 +322,58 @@ object Amounts {
 
 object Dates {
 
-    // The pattern is fixed, but the zone is NOT baked in. `withZone` at class
-    // init captures the zone once for the whole process lifetime; Android
-    // recreates activities on a timezone or locale change but does not restart
-    // the process, so every timestamp in the app would stay wrong after a DST
-    // transition or a flight until the app was force-stopped.
-    private val dateTime: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy, HH:mm")
+    // The zone is NOT baked in. `withZone` at class init captures the zone once
+    // for the whole process lifetime; Android recreates activities on a timezone
+    // or locale change but does not restart the process, so every timestamp in
+    // the app would stay wrong after a DST transition or a flight until the app
+    // was force-stopped.
+    private class Formats(
+        val locale: Locale,
+        val is24: Boolean,
+        val dateTime: DateTimeFormatter,
+        val dateOnly: DateTimeFormatter,
+        val timeOnly: DateTimeFormatter,
+    )
 
-    private val dateOnly: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy")
+    @Volatile private var appContext: Context? = null
 
-    private val timeOnly: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+    @Volatile private var formats: Formats? = null
+
+    /** Call from Application.onCreate, so that the system 12/24-hour setting is read. */
+    fun init(context: Context) {
+        appContext = context.applicationContext
+    }
+
+    /**
+     * The patterns of the current locale and 12/24-hour setting. One set is
+     * kept and made again only when one of the two changes, so list rows do
+     * not build a formatter each. Without [init] (JVM tests) the time is 24-hour.
+     */
+    private fun formats(): Formats {
+        val locale = Locale.getDefault()
+        val is24 = appContext?.let(DateFormat::is24HourFormat) ?: true
+        formats?.takeIf { it.locale == locale && it.is24 == is24 }?.let { return it }
+        return Formats(
+            locale = locale,
+            is24 = is24,
+            dateTime = if (is24) {
+                pattern(locale, "dMMMyyyyHHmm", "d MMM yyyy, HH:mm")
+            } else {
+                pattern(locale, "dMMMyyyyhmma", "d MMM yyyy, h:mm a")
+            },
+            dateOnly = pattern(locale, "dMMMyyyy", "d MMM yyyy"),
+            timeOnly = if (is24) pattern(locale, "Hm", "HH:mm") else pattern(locale, "hma", "h:mm a"),
+        ).also { formats = it }
+    }
+
+    /**
+     * The locale's best pattern for [skeleton], or [fallback] when there is
+     * none (JVM tests) or java.time cannot read the ICU pattern.
+     */
+    private fun pattern(locale: Locale, skeleton: String, fallback: String): DateTimeFormatter =
+        DateFormat.getBestDateTimePattern(locale, skeleton)
+            ?.let { runCatching { DateTimeFormatter.ofPattern(it, locale) }.getOrNull() }
+            ?: DateTimeFormatter.ofPattern(fallback, locale)
 
     /** 9999-12-31T23:59:59Z, the last second with a four-digit year. */
     private const val MAX_EPOCH_SECONDS = 253_402_300_799L
@@ -345,13 +389,13 @@ object Dates {
     private fun instant(epochSeconds: Long): Instant = Instant.ofEpochSecond(clamp(epochSeconds))
 
     /** [epochSeconds] — BTCPay sends unix seconds, not milliseconds. */
-    fun full(epochSeconds: Long): String = dateTime.withZone(ZoneId.systemDefault())
+    fun full(epochSeconds: Long): String = formats().dateTime.withZone(ZoneId.systemDefault())
         .format(instant(epochSeconds))
 
-    fun date(epochSeconds: Long): String = dateOnly.withZone(ZoneId.systemDefault())
+    fun date(epochSeconds: Long): String = formats().dateOnly.withZone(ZoneId.systemDefault())
         .format(instant(epochSeconds))
 
-    fun time(epochSeconds: Long): String = timeOnly.withZone(ZoneId.systemDefault())
+    fun time(epochSeconds: Long): String = formats().timeOnly.withZone(ZoneId.systemDefault())
         .format(instant(epochSeconds))
 
     // The Material date picker speaks UTC midnight: selectedDateMillis is

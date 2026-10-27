@@ -5,6 +5,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.btcpayapp.core.sync.SyncScheduler
+import com.btcpayapp.core.util.Dates
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -24,6 +25,7 @@ class BtcPayApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        Dates.init(this)
         graph = AppGraph(this)
         observeProcessLifecycle()
         keepBackgroundSyncInSyncWithSettings()
