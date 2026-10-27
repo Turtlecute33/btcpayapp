@@ -9,6 +9,7 @@
   (the user types the start of a fingerprint read on the server, and only a
   match pins the key), which is a far narrower grant than trusting a whole
   extra root.
+  CT needs this opt-in on Android 16; Android 15 and lower ignore it.
 
   One exception to the TLS rule:
     * .onion - Tor already provides authentication and encryption end to end,
@@ -26,6 +27,7 @@
 <network-security-config>
 
     <base-config cleartextTrafficPermitted="false">
+        <certificateTransparency enabled="true" />
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
