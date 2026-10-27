@@ -97,6 +97,12 @@ object Amounts {
      */
     fun format(amount: BigDecimal, currency: String, locale: Locale = Locale.getDefault()): String {
         val code = currency.uppercase(Locale.ROOT)
+        // Sats are whole numbers: group the digits as formatBitcoin does for 'sat',
+        // so that "1,000,000 SATS" and "21,000 sat" have one form.
+        if (code == "SATS" || code == "SAT") {
+            val integer = numbersFor(locale).integer
+            return "${synchronized(integer) { integer.format(amount.setScale(0, RoundingMode.HALF_UP)) }} $code"
+        }
         if (isCrypto(code)) return "${display(amount, cryptoScale(code), locale)} $code"
 
         val iso = isoCurrency(code) ?: return "${display(amount, 2, locale)} $code"

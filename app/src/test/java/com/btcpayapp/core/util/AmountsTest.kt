@@ -95,7 +95,16 @@ class AmountsTest {
     @Test
     fun `crypto codes fall back to a suffix because they are not ISO 4217`() {
         assertEquals("0.5 BTC", Amounts.format(BigDecimal("0.50000000"), "BTC", uk))
-        assertEquals("1500 SATS", Amounts.format(BigDecimal("1500"), "SATS", uk))
+        assertEquals("1,500 SATS", Amounts.format(BigDecimal("1500"), "SATS", uk))
+    }
+
+    @Test
+    fun `sats amounts group their digits like the sat unit`() {
+        assertEquals("1,000,000 SATS", Amounts.format(BigDecimal("1000000"), "SATS", uk))
+        assertEquals("21,000 SAT", Amounts.format(BigDecimal("21000"), "sat", uk))
+        assertEquals("-1,500 SATS", Amounts.format(BigDecimal("-1500"), "SATS", uk))
+        assertEquals("1,501 SATS", Amounts.format(BigDecimal("1500.5"), "SATS", uk))
+        assertEquals("21.000 SATS", Amounts.format(BigDecimal("21000"), "SATS", Locale.GERMANY))
     }
 
     @Test
