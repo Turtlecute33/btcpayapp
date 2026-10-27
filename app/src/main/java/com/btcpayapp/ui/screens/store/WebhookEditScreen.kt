@@ -47,7 +47,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
-import com.btcpayapp.core.net.isLocalNetworkHost
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.asApiException
 import com.btcpayapp.data.api.dto.WebhookAuthorizedEvents
@@ -74,6 +73,8 @@ import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.components.confirmDiscardChanges
+import com.btcpayapp.ui.components.hostOf
+import com.btcpayapp.ui.components.isPublicCleartext
 import com.btcpayapp.ui.components.rememberSpendGate
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -113,42 +114,6 @@ data class WebhookEditState(
     /** A new target URL, waiting for its review and the spend gate. */
     val confirmTarget: String? = null,
 )
-
-/**
- * The host of [url], read by hand: `java.net.URI` gives no host for a name
- * with '_', and Docker service names, a common webhook target, often have one.
- * A '\' is read as '/', as the server's .NET `Uri` does for http, so
- * `http://shop.example\@10.0.0.1/` is shop.example here too.
- */
-internal fun hostOf(url: String): String? {
-    val authority = url.replace('\\', '/').substringAfter("://", "")
-        .substringBefore('/').substringBefore('?').substringBefore('#')
-        .substringAfterLast('@')
-    val host = if (authority.startsWith('[')) authority.substringBefore(']') + "]" else authority.substringBefore(':')
-    return host.takeIf { it.isNotBlank() && it != "[]" }
-}
-
-/**
- * True when an http:// webhook to [host] needs no "Send unencrypted?".
- *
- * [isLocalNetworkHost] calls a dotless name local, but the server reads a
- * host made of numbers the way `inet_aton` does: "134744072", "0x08080808"
- * and "010.0.0.1" are public addresses to it. So such a host passes only as a
- * plain dotted quad, and a host with a '%' escape, which the server may
- * decode, always asks.
- */
-internal fun isLocalWebhookHost(host: String): Boolean {
-    val name = host.trimEnd('.')
-    if ('%' in name) return false
-    val parts = name.split('.')
-    val numeric = parts.all { part ->
-        part.isNotEmpty() && (part.all { it in '0'..'9' } || part.startsWith("0x", ignoreCase = true))
-    }
-    val plainQuad = parts.size == 4 && parts.all { part ->
-        part.all { it in '0'..'9' } && (part == "0" || !part.startsWith('0'))
-    }
-    return (!numeric || plainQuad) && isLocalNetworkHost(host)
-}
 
 class WebhookEditViewModel(
     private val graph: AppGraph,
@@ -258,7 +223,7 @@ class WebhookEditViewModel(
             _state.update { it.copy(urlError = "Enter a full URL starting with https://") }
             return
         }
-        if (scheme == "http" && !isLocalWebhookHost(host) && !allowCleartext && !passed) {
+        if (isPublicCleartext(url) && !allowCleartext && !passed) {
             _state.update { it.copy(confirmCleartext = true) }
             return
         }

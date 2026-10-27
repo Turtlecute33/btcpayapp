@@ -34,12 +34,15 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
@@ -77,8 +80,13 @@ import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SectionHeader
+import com.btcpayapp.ui.components.TargetReviewDialog
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.changedTargets
 import com.btcpayapp.ui.components.confirmDiscardChanges
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.targetHosts
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -175,6 +183,11 @@ data class PointOfSaleEditState(
     val storeCurrency: String = "",
     val dirty: Boolean = false,
     val finished: Boolean = false,
+    /** The URLs as loaded; empty for a new app. Any other URL is a new target. */
+    val loadedNotificationUrl: String = "",
+    val loadedRedirectUrl: String = "",
+    /** New target URLs, waiting for their review and the spend gate. */
+    val confirmTargets: List<String>? = null,
 )
 
 class PointOfSaleEditViewModel(
@@ -232,6 +245,7 @@ class PointOfSaleEditViewModel(
     fun setRedirectAutomatically(value: Boolean) = edit { it.copy(redirectAutomatically = value) }
     fun setFormId(value: String) = edit { it.copy(formId = value) }
     fun dismissError() = _state.update { it.copy(error = null) }
+    fun dismissTargets() = _state.update { it.copy(confirmTargets = null) }
 
     /** A change the user made, so leaving asks first. */
     private fun edit(transform: (PointOfSaleEditState) -> PointOfSaleEditState) =
@@ -307,7 +321,14 @@ class PointOfSaleEditViewModel(
         }
     }
 
-    fun save() {
+    /**
+     * [reviewed] are the new target URLs that passed their review and the
+     * spend gate. The server posts the invoices of this app to the
+     * notification URL and sends buyers to the redirect URL, so without them
+     * anyone with the unlocked phone could send order data or buyers to a
+     * host of their own.
+     */
+    fun save(reviewed: List<String>? = null) {
         val snapshot = _state.value
         // Re-entrancy guard. `enabled` is one recomposition behind the click,
         // so two taps in the same frame would both get through and create two
@@ -321,6 +342,11 @@ class PointOfSaleEditViewModel(
         // is not shown before that.
         val loaded = raw
         if (appId != null && loaded == null) return
+        val targets = snapshot.newTargets()
+        if (targets.isNotEmpty() && targets != reviewed) {
+            _state.update { it.copy(confirmTargets = targets) }
+            return
+        }
 
         viewModelScope.launch {
             _state.update { it.copy(saving = true, error = null) }
@@ -375,7 +401,13 @@ internal fun PointOfSaleEditState.withLoaded(data: PointOfSaleAppData) = copy(
     redirectAutomatically = data.redirectAutomatically,
     formId = data.formId.orEmpty(),
     items = data.items.map { item -> item.toDraft() },
+    loadedNotificationUrl = data.notificationUrl.orEmpty(),
+    loadedRedirectUrl = data.redirectUrl.orEmpty(),
 )
+
+/** The URLs that a save must review first; see [changedTargets]. */
+internal fun PointOfSaleEditState.newTargets(): List<String> =
+    changedTargets(notificationUrl to loadedNotificationUrl, redirectUrl to loadedRedirectUrl)
 
 /** The form as a typed request. Only what the form edits; [pointOfSaleBody] keeps the rest. */
 internal fun PointOfSaleEditState.toRequest(template: String) = PointOfSaleAppRequest(
@@ -499,9 +531,28 @@ fun PointOfSaleEditScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     // The toolbar and the system back both ask first once something changed.
     val back = confirmDiscardChanges(state.dirty, onBack)
+    val snackbarHostState = remember { SnackbarHostState() }
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(state.finished) {
         if (state.finished) onBack()
+    }
+
+    state.confirmTargets?.let { targets ->
+        TargetReviewDialog(
+            targets = targets,
+            message = "Your server posts the invoices of this app to the notification URL, with order " +
+                "and buyer details, and sends buyers to the redirect URL after they pay.",
+            onConfirm = {
+                viewModel.dismissTargets()
+                val hosts = targetHosts(targets)
+                scope.afterSpendGate(gate, "Confirm app URL", hosts, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.save(reviewed = targets)
+                }
+            },
+            onDismiss = viewModel::dismissTargets,
+        )
     }
 
     state.itemEditor?.let { draft ->
@@ -517,6 +568,7 @@ fun PointOfSaleEditScreen(
     AppScreen(
         title = if (appId == null) "New point of sale" else "Edit point of sale",
         onBack = back,
+        snackbarHostState = snackbarHostState,
         bottomBar = {
             ActionBar {
                 // The spinner pushes the Save button aside rather than
@@ -529,7 +581,7 @@ fun PointOfSaleEditScreen(
                 ) {
                     CircularProgressIndicator(Modifier.padding(end = 8.dp).size(20.dp))
                 }
-                Button(onClick = viewModel::save, enabled = !state.saving) { Text("Save") }
+                Button(onClick = { viewModel.save() }, enabled = !state.saving) { Text("Save") }
             }
         },
     ) { padding ->

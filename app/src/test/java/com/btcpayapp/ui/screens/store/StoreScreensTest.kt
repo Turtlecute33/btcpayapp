@@ -1,6 +1,8 @@
 package com.btcpayapp.ui.screens.store
 
 import com.btcpayapp.data.api.dto.RoleData
+import com.btcpayapp.ui.components.hostOf
+import com.btcpayapp.ui.components.isLocalWebhookHost
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

@@ -15,10 +15,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
@@ -53,8 +56,13 @@ import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
+import com.btcpayapp.ui.components.TargetReviewDialog
+import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.components.arrive
+import com.btcpayapp.ui.components.changedTargets
 import com.btcpayapp.ui.components.confirmDiscardChanges
+import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.components.targetHosts
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -126,6 +134,10 @@ data class CrowdfundEditState(
     val editable: Boolean = true,
     val dirty: Boolean = false,
     val finished: Boolean = false,
+    /** The URL as loaded; empty for a new crowdfund. Any other URL is a new target. */
+    val loadedNotificationUrl: String = "",
+    /** New target URLs, waiting for their review and the spend gate. */
+    val confirmTargets: List<String>? = null,
 )
 
 class CrowdfundEditViewModel(
@@ -179,6 +191,7 @@ class CrowdfundEditViewModel(
     fun setSortPerksByPopularity(value: Boolean) = edit { it.copy(sortPerksByPopularity = value) }
     fun setPerksTemplate(value: String) = edit { it.copy(perksTemplate = value, perksError = null) }
     fun dismissError() = _state.update { it.copy(error = null) }
+    fun dismissTargets() = _state.update { it.copy(confirmTargets = null) }
 
     /** A change the user made, so leaving asks first. */
     private fun edit(transform: (CrowdfundEditState) -> CrowdfundEditState) =
@@ -202,7 +215,13 @@ class CrowdfundEditViewModel(
         }
     }
 
-    fun save() {
+    /**
+     * [reviewed] are the new target URLs that passed their review and the
+     * spend gate. The server posts each contribution to the notification URL,
+     * so without them anyone with the unlocked phone could send that data to a
+     * host of their own.
+     */
+    fun save(reviewed: List<String>? = null) {
         val snapshot = _state.value
         // Re-entrancy guard. `enabled` is one recomposition behind the click,
         // so two taps in the same frame would both get through and create two
@@ -223,6 +242,11 @@ class CrowdfundEditViewModel(
         val perksError = "Perks must be a JSON array, for example [] or [{…}].".takeIf { !perksValid }
         if (nameError != null || targetError != null || perksError != null) {
             _state.update { it.copy(nameError = nameError, targetError = targetError, perksError = perksError) }
+            return
+        }
+        val targets = snapshot.newTargets()
+        if (targets.isNotEmpty() && targets != reviewed) {
+            _state.update { it.copy(confirmTargets = targets) }
             return
         }
 
@@ -271,7 +295,11 @@ internal fun CrowdfundEditState.withLoaded(data: CrowdfundAppData) = copy(
     // The read side hands back a parsed array; the write side wants it
     // re-encoded into a string, so keep the text here.
     perksTemplate = data.perks?.toString().orEmpty(),
+    loadedNotificationUrl = data.notificationUrl.orEmpty(),
 )
+
+/** The URLs that a save must review first; see [changedTargets]. */
+internal fun CrowdfundEditState.newTargets(): List<String> = changedTargets(notificationUrl to loadedNotificationUrl)
 
 /**
  * The form as a typed request. Only what the form edits; [crowdfundBody]
@@ -329,14 +357,34 @@ fun CrowdfundEditScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     // The toolbar and the system back both ask first once something changed.
     val back = confirmDiscardChanges(state.dirty, onBack)
+    val snackbarHostState = remember { SnackbarHostState() }
+    val gate = rememberSpendGate()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(state.finished) {
         if (state.finished) onBack()
     }
 
+    state.confirmTargets?.let { targets ->
+        TargetReviewDialog(
+            targets = targets,
+            message = "Your server posts each contribution to this crowdfund to the notification URL, " +
+                "with order and buyer details.",
+            onConfirm = {
+                viewModel.dismissTargets()
+                val hosts = targetHosts(targets)
+                scope.afterSpendGate(gate, "Confirm app URL", hosts, { snackbarHostState.showSnackbar(it) }) {
+                    viewModel.save(reviewed = targets)
+                }
+            },
+            onDismiss = viewModel::dismissTargets,
+        )
+    }
+
     AppScreen(
         title = if (appId == null) "New crowdfund" else "Edit crowdfund",
         onBack = back,
+        snackbarHostState = snackbarHostState,
         bottomBar = {
             if (state.editable) {
                 ActionBar {
@@ -350,7 +398,7 @@ fun CrowdfundEditScreen(
                     ) {
                         CircularProgressIndicator(Modifier.padding(end = 8.dp).size(20.dp))
                     }
-                    Button(onClick = viewModel::save, enabled = !state.saving) { Text("Save") }
+                    Button(onClick = { viewModel.save() }, enabled = !state.saving) { Text("Save") }
                 }
             }
         },
