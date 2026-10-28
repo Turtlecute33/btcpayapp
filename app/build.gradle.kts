@@ -149,6 +149,9 @@ android {
                 "kotlin-tooling-metadata.json",
             )
         }
+        // androidx.graphics.path loads its native code only below Android 14; from Android 14 the
+        // platform's PathIterator does the work, and minSdk is 35.
+        jniLibs.excludes += "lib/*/libandroidx.graphics.path.so"
     }
 
     lint {
