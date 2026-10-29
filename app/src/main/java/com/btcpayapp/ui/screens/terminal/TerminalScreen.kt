@@ -634,7 +634,7 @@ private fun CurrencyRow(selected: String, options: List<String>, more: List<Stri
         contentPadding = PaddingValues(horizontal = 16.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(options, key = { it }) { code ->
+        items(options, key = { "cur:$it" }) { code ->
             FilterChip(
                 selected = code == selected,
                 onClick = { onSelect(code) },

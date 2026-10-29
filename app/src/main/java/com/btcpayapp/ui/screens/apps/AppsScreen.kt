@@ -409,7 +409,7 @@ fun AppsScreen(
                                     modifier = Modifier.animateItem(),
                                 )
                             }
-                            items(group.size, key = { group[it].id }) { index ->
+                            items(group.size, key = { "app:${group[it].id}" }) { index ->
                                 val app = group[index]
                                 AppRow(
                                     app = app,

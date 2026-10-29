@@ -1052,7 +1052,7 @@ private fun LazyListScope.onChainActivity(
     // key, which would be a crash.
     items(
         count = state.transactions.size,
-        key = { index -> state.transactions[index].transactionHash ?: "row-$index" },
+        key = { index -> state.transactions[index].transactionHash?.let { "tx:$it" } ?: "row-$index" },
     ) { index ->
         if (index == trigger && !state.transactionsComplete) {
             LaunchedEffect(count) { onLoadMore() }

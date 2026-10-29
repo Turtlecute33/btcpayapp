@@ -290,10 +290,10 @@ class InvoiceListViewModel(private val graph: AppGraph) : ViewModel() {
                     // `skip` against a list the server returns newest-first
                     // means an invoice created while the user scrolls shifts
                     // every later page by one, so the boundary row comes back
-                    // twice. With `key = { it.id }` on the LazyColumn a
+                    // twice. With the invoice id as the LazyColumn key a
                     // repeated id is a hard IllegalArgumentException, which
                     // would crash the Invoices tab on any busy store.
-                    invoices = if (skip == 0) page else (current.invoices + page).distinctBy { it.id },
+                    invoices = (if (skip == 0) page else current.invoices + page).distinctBy { it.id },
                     loading = false,
                     refreshing = false,
                     loadingMore = false,
@@ -441,7 +441,7 @@ fun InvoiceListScreen(
 
                     InvoiceListPhase.Content ->
                         LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
-                            items(state.invoices, key = { it.id }) { invoice ->
+                            items(state.invoices, key = { "inv:${it.id}" }) { invoice ->
                                 // On the item rather than on the row, because
                                 // the row and its divider move together and a
                                 // rule left behind by a reordering row is worse
