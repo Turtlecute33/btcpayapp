@@ -16,7 +16,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 
 | ID | Finding | Area | Effort | Risk | Status |
 |---|---|---|---|---|---|
-| BTCPAY-OPT-01 | Return Cancelled when the biometric prompt starts after the activity state is saved | stability | S | low | approved |
+| BTCPAY-OPT-01 | Return Cancelled when the biometric prompt starts after the activity state is saved | stability | S | low | applied |
 | BTCPAY-OPT-02 | Start the screen's own requests first on pull-to-refresh in Home and Wallet | speed | S | low | approved |
 | BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | approved |
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | approved |
@@ -39,7 +39,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Effort**: S. **Risk**: low. **Net lines**: about +2 (estimate).
 - **Owner check**: Confirm that you accept a one-line change in the SEC-002 prompt function. It only returns Cancelled, and it makes the 120 s rule and the idle lock apply again, so the lock gets stricter.
 - **Owner decision**: Owner approved the one-line change in the SEC-002 prompt function (it fails closed).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). javap of biometric-1.1.0 shows the same isStateSaved check. Not checked: no run-time check on a device (the Home-during-first-prompt test in Verify).
+- **Status**: applied
 
 ### BTCPAY-OPT-02: Start the screen's own requests first on pull-to-refresh in Home and Wallet
 

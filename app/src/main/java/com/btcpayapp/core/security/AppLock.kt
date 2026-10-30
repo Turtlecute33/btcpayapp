@@ -312,6 +312,11 @@ object Biometrics {
         val cipher = withContext(Dispatchers.IO) { lockCipher() }
             ?: return AuthOutcome.Failed(-1, "Could not prepare secure authentication. Try again.")
 
+        // When the activity state is saved (from onStop), the library ignores
+        // authenticate() and calls no callback. Return Cancelled, not Success,
+        // so that the caller does not wait for ever.
+        if (activity.supportFragmentManager.isStateSaved) return AuthOutcome.Cancelled
+
         return suspendCancellableCoroutine { continuation ->
             val executor = ContextCompat.getMainExecutor(activity)
 
