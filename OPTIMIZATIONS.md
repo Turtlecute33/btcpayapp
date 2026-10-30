@@ -1,7 +1,7 @@
 # Optimizations
 
 Review of BTCPay (btcpayapp) on 2026-10-30, at commit 3bb78a6 on branch fix/production-review.
-Status: review only. No change is applied yet. The owner selects the items to apply.
+Status: the owner approved all 10 items. 9 are applied on branch optimize, 1 is not applied. See Results.
 
 Rules for this list: the security-review changes (the audit of 2026-10-27: the commits with a 'Report: <ID>' line, see `git log --grep='Report:' --format='%h %s'`; /Users/user/Documents/Github/android/NEXT-STEPS.md has the status of each item in sections 5 and 6 and in the appendix section for this app) stay as they are. No change to storage formats, database schemas, preference keys or encryption. Each applied item is one commit, so that you can revert it alone.
 
@@ -21,7 +21,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | applied |
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | applied |
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | applied |
-| BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
+| BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | not applied |
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | applied |
 | BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | applied |
 | BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | applied |
@@ -104,7 +104,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Build config from a8d48af, not a 'Report:' commit. The Log stripping rule stays (v/d/i/w/e), so release logs stay stripped. No keep rule for app code goes; the app has no reflection. No storage, preference key or key change. No dependency.
 - **Verify**: A missing -dontwarn shows as a build error, not a runtime risk. Run assembleRelease, diff usage.txt and seeds.txt against the 0.2.6 build, and do one install that opens the scanner and a checkout.
 - **Effort**: S. **Risk**: low. **Net lines**: about -40 (estimate).
-- **Status**: approved
+- **Status**: not applied: the session had no permission to edit app/proguard-rules.pro. Give that permission and do the item again, with a new base release build for the usage.txt and seeds.txt diff.
 
 ### BTCPAY-OPT-07: Use one label and one order for the invoice confirmation policy
 
@@ -173,3 +173,37 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - Crash classes closed: no `!!`, no unchecked casts, no GlobalScope or runBlocking, server list keys deduplicated (00fdde8), amount and Bolt11 parsing bounds-checked.
 - R8 and packaging: minify, shrinkResources and proguard-android-optimize are on. localeFilters is 'en'. All 20 app resource files are used. CameraX, material-icons-extended, androidx.biometric and lnnodes.bin stay as the owner decided.
 - UI states: every server list has a skeleton, an empty state, an error state with retry and pull-to-refresh. 21 ConfirmDialogs guard destructive and money actions. Icon buttons have descriptions and 48 dp targets. The audit UX items UX-001 to UX-011 are in place.
+
+## Results
+
+Full check on 2026-10-30 at 51a7f1e (branch optimize), with JDK 21. Each command ran as a separate Gradle command.
+
+| Command | Result |
+|---|---|
+| `./gradlew :app:testDebugUnitTest` | pass: 602 tests, 0 failures, 0 skipped (up to date from the run after BTCPAY-OPT-10, same inputs) |
+| `./gradlew :app:lintDebug` | pass: 0 errors, 15 warnings, 1 hint. No issue is on a line that this branch changed. |
+| `./gradlew :app:assembleDebug` | pass |
+| `./gradlew :app:assembleRelease` | pass |
+
+Release APK size (0.2.6, versionCode 206, measured):
+
+| | Before (3bb78a6) | After (51a7f1e) | Change |
+|---|---|---|---|
+| APK | 6,286,520 bytes | 6,270,136 bytes | -16,384 bytes |
+| Download size (apkanalyzer) | 3,207,265 bytes | 3,204,915 bytes | -2,350 bytes |
+| classes.dex | 5,561,196 bytes | 5,555,556 bytes | -5,640 bytes |
+
+Not applied:
+
+- BTCPAY-OPT-06: the session had no permission to edit app/proguard-rules.pro.
+
+The owner must still check by hand (no device or emulator was used; no Windows check applies to this app):
+
+- BTCPAY-OPT-01: turn on the app lock, install fresh and press Home within 1 s while the lock screen prepares the first prompt. Come back: Unlock must be enabled, and one tap must show the prompt.
+- BTCPAY-OPT-02: count the GETs in the server access log for one pull on Home and on Wallet. Open decision: if a session refresh during a Wallet pull finds no enabled payment method, the pull indicator can keep spinning. This race was there before the change. A possible fix is `refreshing = false` in the state copy of the Wallet collector; it is not applied.
+- BTCPAY-OPT-03: open Checkout > Invoice details and double-tap Back fast. The app must stop on Checkout.
+- BTCPAY-OPT-05: start a charge on a slow link and change the system language (or connect a hardware keyboard) before the answer comes. Checkout must open. Do the same for New invoice and Refund.
+- BTCPAY-OPT-07: open New invoice > More options and Store settings. Both must show the same labels in the order 0, 1, 2, 6.
+- BTCPAY-OPT-08: install over 0.2.6 data. Accounts, settings, the app lock and background sync must work as before.
+- BTCPAY-OPT-09: CI (.github/workflows/ci.yml:41) runs testDebugUnitTest, lintRelease and assembleRelease in one Gradle command. With in-process Kotlin, this can fail. Run CI one time. If it fails, run each variant in a separate command, or set `-Pkotlin.compiler.execution.strategy=daemon` in CI. Also accept the new sha256 of kotlin-gradle-plugin-2.2.10.module in verification-metadata.xml, or revert 74bf99e alone.
+- BTCPAY-OPT-10: check More, Server, Store settings, App settings, Lightning, Wallet and Payment methods, in LTR and with an RTL pseudo-locale.
