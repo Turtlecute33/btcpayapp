@@ -210,13 +210,17 @@ class HomeViewModel(private val graph: AppGraph) : ViewModel() {
      * Refreshes the session as well as this screen. The store list lives in
      * [com.btcpayapp.data.session.SessionManager], so a screen-only refresh
      * would leave a session that failed at startup stuck forever.
+     *
+     * The dashboard needs only the store id, so it starts first and does not
+     * wait for the session. If the store changes, the collector in init
+     * cancels this load and loads the new store.
      */
     fun refresh() {
+        graph.session.activeStore.value?.id?.let { loadDashboard(it, refreshing = true) }
         viewModelScope.launch {
             graph.session.refresh()
             val storeId = graph.session.activeStore.value?.id ?: return@launch
             graph.session.refreshPaymentMethods(storeId)
-            loadDashboard(storeId, refreshing = true)
             loadBalances(storeId)
         }
     }

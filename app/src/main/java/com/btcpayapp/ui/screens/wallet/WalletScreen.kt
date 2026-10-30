@@ -318,6 +318,8 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
                         lightningOffline = false,
                         canSpendOnChain = selected?.let(graph.session::canSpendOnChain) ?: true,
                         canSpendLightning = graph.session.canSpendLightning(),
+                        // A pull that this stops must not leave the indicator on.
+                        refreshing = false,
                         error = null,
                     )
                 }
@@ -388,10 +390,13 @@ class WalletViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     fun refresh() {
+        // The wallet loads first, with the methods that it has. If the session
+        // changes the store or its methods, the collector in init stops this
+        // load, and loads again if a method is enabled.
+        load(refreshing = true)
         viewModelScope.launch {
             graph.session.refresh()
             graph.session.activeStore.value?.id?.let { graph.session.refreshPaymentMethods(it) }
-            load(refreshing = true)
         }
     }
 

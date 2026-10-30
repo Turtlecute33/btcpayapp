@@ -17,7 +17,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | ID | Finding | Area | Effort | Risk | Status |
 |---|---|---|---|---|---|
 | BTCPAY-OPT-01 | Return Cancelled when the biometric prompt starts after the activity state is saved | stability | S | low | applied |
-| BTCPAY-OPT-02 | Start the screen's own requests first on pull-to-refresh in Home and Wallet | speed | S | low | approved |
+| BTCPAY-OPT-02 | Start the screen's own requests first on pull-to-refresh in Home and Wallet | speed | S | low | applied |
 | BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | approved |
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | approved |
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | approved |
@@ -52,7 +52,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Only the order of read-only GET requests in two view models changes. git blame on HomeScreen.kt:214-221 and WalletScreen.kt:390-396 gives a8d48af and f2d14a0, not a 'Report:' commit. No storage, schema, preference key, encryption or key handling is touched. No dependency.
 - **Verify**: The review checked that the collectors cancel the job in flight, so a dashboard load that starts before session.refresh cannot write data for an old store. After the change: count GETs in the server access log for one pull on Home and on Wallet, before and after.
 - **Effort**: S. **Risk**: low. **Net lines**: about 0 (estimate).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). Not checked: no run-time check on a device and no count of GETs in a server access log (the Verify step); no unit test covers the two view models.
+- **Status**: applied
 
 ### BTCPAY-OPT-03: Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed)
 
