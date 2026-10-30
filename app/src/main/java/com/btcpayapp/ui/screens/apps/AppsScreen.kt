@@ -104,7 +104,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-const val APP_TYPE_POINT_OF_SALE = "PointOfSale"
 const val APP_TYPE_CROWDFUND = "Crowdfund"
 
 private const val SALES_DAYS = 7

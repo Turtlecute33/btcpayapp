@@ -9,8 +9,7 @@ import com.btcpayapp.BuildConfig
  * folded, and R8 additionally strips `android.util.Log` via a rule).
  *
  * Nothing in this app ever logs an API key, a BOLT11 invoice, a derivation
- * scheme, a seed, or a full response body. [redact] exists for the cases where
- * some identifying fragment genuinely helps debugging.
+ * scheme, a seed, or a full response body.
  */
 internal object Log {
 
@@ -33,12 +32,5 @@ internal object Log {
         // credential-bearing URLs in their messages and nested causes.
         if (BuildConfig.DEBUG) android.util.Log.e(tag, message() +
             (throwable?.let { " [${it.javaClass.simpleName}]" } ?: ""))
-    }
-
-    /** Keeps the first and last two characters so a value can be told apart. */
-    fun redact(value: String?): String = when {
-        value == null -> "null"
-        value.length <= 6 -> "***"
-        else -> "${value.take(2)}…${value.takeLast(2)}(${value.length})"
     }
 }

@@ -19,7 +19,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-01 | Return Cancelled when the biometric prompt starts after the activity state is saved | stability | S | low | applied |
 | BTCPAY-OPT-02 | Start the screen's own requests first on pull-to-refresh in Home and Wallet | speed | S | low | applied |
 | BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | applied |
-| BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | approved |
+| BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | applied |
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | approved |
 | BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | approved |
@@ -78,7 +78,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: No line comes from a 'Report:' commit. 5f8a9eb (BTCPAY-UX-011) did the same kind of removal. SyncState keeps every serialized field, so the sync-state file does not change. InvoiceData wire fields do not change (isSettled has no backing field). Log.redact has no caller, and release logging stays stripped. No preference key, storage or key handling is touched. No dependency.
 - **Verify**: Merged from two minimalism findings (same root cause: dead code). Run testDebugUnitTest and assembleRelease, then compare usage.txt with the 0.2.6 build.
 - **Effort**: S. **Risk**: low. **Net lines**: about -42 (estimate).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (600 tests; the checkoutUrl test is removed). `./gradlew :app:assembleRelease` passed. Compared with the 0.2.6 build: usage.txt no longer lists the removed declarations or the allAccounts map classes, seeds.txt does not change, and mapping.txt has no ApiJson.pretty lambda and no allAccounts stateIn in `SessionManager.<init>`. Not checked: no run-time check on a device.
+- **Status**: applied
 
 ### BTCPAY-OPT-05: Open Checkout from screen state, not from a navigation callback held by the ViewModel
 

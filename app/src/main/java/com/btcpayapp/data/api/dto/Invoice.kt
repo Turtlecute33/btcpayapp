@@ -37,7 +37,6 @@ data class InvoiceData(
      */
     val paymentMethods: List<InvoicePaymentMethodData>? = null,
 ) {
-    val isSettled: Boolean get() = status == InvoiceStatus.Settled
     val isOpen: Boolean get() = status == InvoiceStatus.New || status == InvoiceStatus.Processing
     val dueAmount: BigDecimal get() = (amount - paidAmount).coerceAtLeast(BigDecimal.ZERO)
 }

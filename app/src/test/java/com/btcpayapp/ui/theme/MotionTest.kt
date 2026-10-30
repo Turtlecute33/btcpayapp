@@ -47,7 +47,6 @@ class MotionTest {
             "spatialSlow" to Motion.spatialSlow,
             "spatialOffset" to Motion.spatialOffset,
             "spatialSize" to Motion.spatialSize,
-            "spatialDp" to Motion.spatialDp,
         ).forEach { (name, value) ->
             assertTrue("$name must carry some overshoot", spec(value).dampingRatio < 1f)
         }

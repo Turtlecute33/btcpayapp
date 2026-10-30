@@ -55,10 +55,6 @@ class SessionManager(
         .distinctUntilChanged()
         .stateIn(scope, SharingStarted.Eagerly, null)
 
-    val allAccounts: StateFlow<List<Account>> = accounts.vault
-        .map { it.accounts }
-        .stateIn(scope, SharingStarted.Eagerly, emptyList())
-
     /**
      * Derived for the UI's convenience only.
      *

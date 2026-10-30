@@ -13,7 +13,6 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 
@@ -107,14 +106,8 @@ object Motion {
     val spatialOffset: FiniteAnimationSpec<IntOffset> =
         spring(SPATIAL_DAMPING, SPATIAL_STIFFNESS, IntOffset.VisibilityThreshold)
 
-    val spatialOffsetFast: FiniteAnimationSpec<IntOffset> =
-        spring(FAST_SPATIAL_DAMPING, FAST_SPATIAL_STIFFNESS, IntOffset.VisibilityThreshold)
-
     val spatialSize: FiniteAnimationSpec<IntSize> =
         spring(SPATIAL_DAMPING, SPATIAL_STIFFNESS, IntSize.VisibilityThreshold)
-
-    val spatialDp: FiniteAnimationSpec<Dp> =
-        spring(SPATIAL_DAMPING, SPATIAL_STIFFNESS, Dp.VisibilityThreshold)
 
     /**
      * One rectangle becoming another: a row growing into the screen it opens.
@@ -125,9 +118,6 @@ object Motion {
      * is one object moving — the transition exists to create.
      */
     val bounds: FiniteAnimationSpec<Rect> = spring(1f, 380f, Rect.VisibilityThreshold)
-
-    /** Alias for [spatial], read at call sites that animate a scale factor. */
-    val spatialScale: FiniteAnimationSpec<Float> = spatial
 
     /**
      * Whole screens sliding, and nothing else.
@@ -164,13 +154,9 @@ object Motion {
      *
      * A spring models a thing being pushed and settling. A shimmer sweeping
      * across a placeholder, or a dot pulsing to say a socket is still open, is
-     * not being pushed by anyone — it is a loop, and a loop needs a period. Two
-     * curves, because the same asymmetry applies: leaving is quicker than
-     * arriving.
+     * not being pushed by anyone — it is a loop, and a loop needs a period.
      */
     val emphasised: Easing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-    val emphasisedDecelerate: Easing = CubicBezierEasing(0.05f, 0.7f, 0.1f, 1f)
-    val emphasisedAccelerate: Easing = CubicBezierEasing(0.3f, 0f, 0.8f, 0.15f)
 
     /** One sweep of a loading placeholder, milliseconds. */
     const val SHIMMER_PERIOD_MS: Int = 1400

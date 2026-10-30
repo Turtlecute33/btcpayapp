@@ -122,9 +122,5 @@ object Pairing {
         return "${baseUrl.trimEnd('/')}/api-keys/authorize?$query"
     }
 
-    /** The checkout page for an invoice, for "open in browser" and sharing. */
-    fun checkoutUrl(baseUrl: String, invoiceId: String): String =
-        "${baseUrl.trimEnd('/')}/i/$invoiceId"
-
     private fun String.encode(): String = URLEncoder.encode(this, "UTF-8").replace("+", "%20")
 }

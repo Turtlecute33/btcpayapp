@@ -102,11 +102,6 @@ class PairingTest {
         assertEquals(emptyList<String>(), mutating)
     }
 
-    @Test
-    fun `checkout url is built from the invoice id`() {
-        assertEquals("$BASE/i/inv123", Pairing.checkoutUrl(BASE, "inv123"))
-    }
-
     private companion object {
         const val BASE = "https://pay.example.com"
     }

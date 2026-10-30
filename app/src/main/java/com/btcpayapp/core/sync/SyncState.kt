@@ -43,12 +43,6 @@ data class SyncState(
     fun withInvoicePoll(accountId: String, storeId: String, poll: InvoicePollState): SyncState =
         copy(invoicePolls = invoicePolls + (key(accountId, storeId) to poll))
 
-    fun watermark(accountId: String, storeId: String): Long =
-        invoiceWatermarks[key(accountId, storeId)] ?: 0L
-
-    fun withWatermark(accountId: String, storeId: String, value: Long): SyncState =
-        copy(invoiceWatermarks = invoiceWatermarks + (key(accountId, storeId) to value))
-
     fun announced(accountId: String, storeId: String): List<String> =
         announcedPayouts[key(accountId, storeId)].orEmpty()
 

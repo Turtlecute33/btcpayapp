@@ -71,9 +71,6 @@ object ApiJson {
         prettyPrint = false
     }
 
-    /** Pretty printer used only for the developer-facing raw-response viewer. */
-    val pretty: Json = Json(instance) { prettyPrint = true }
-
     /**
      * The fields of [value] a whole-object PUT should change, for [overlaid].
      *

@@ -20,7 +20,7 @@ class SyncStateTest {
     private fun populated(accountId: String) = SyncState()
         .withInvoicePoll(accountId, "s", InvoicePollState(since = 1, pending = listOf("i")))
         .withAnnounced(accountId, "s", listOf("p"))
-        .withWatermark(accountId, "s", 5)
+        .copy(invoiceWatermarks = mapOf("$accountId|s" to 5L))
         .withFeedPoll(accountId, FeedPollState(since = 7))
         .withAccountFailure(accountId, now = 10)
         .withServerIssueAlerted(accountId)
