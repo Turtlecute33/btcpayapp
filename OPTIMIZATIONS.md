@@ -22,7 +22,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | applied |
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | applied |
 | BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
-| BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | approved |
+| BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | applied |
 | BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | approved |
 | BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | approved |
 | BTCPAY-OPT-10 | Replace seven private chevron-row composables with one shared NavRow | minimalism | M | medium | approved |
@@ -116,7 +116,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Display text and list order only. The SpeedPolicy enum, its serializer and the value sent to the server do not change.
 - **Verify**: No UI tests. On an emulator: open New invoice > More options and Store settings, and check the same labels in the order 0, 1, 2, 6.
 - **Effort**: S. **Risk**: low. **Net lines**: about -6 (estimate).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (600 tests). Not checked: no run-time check on a device or emulator (the labels and the 0, 1, 2, 6 order in Verify); no unit test covers the dropdown list or the label.
+- **Status**: applied
 
 ### BTCPAY-OPT-08: Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads
 

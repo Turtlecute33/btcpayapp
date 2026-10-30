@@ -706,7 +706,7 @@ private fun StoreCheckoutSection(
     FormSection("Checkout", modifier) {
         FormDropdown(
             label = "Consider an invoice paid after",
-            options = SpeedPolicy.entries.filter { it != SpeedPolicy.Unknown },
+            options = speedPolicyOptions,
             selected = store.speedPolicy,
             onSelect = { value -> viewModel.edit { it.copy(speedPolicy = value) } },
             optionLabel = { it.speedLabel() },
@@ -1075,7 +1075,11 @@ private fun paymentMethodIds(): List<String> {
     return methods.map { it.paymentMethodId }
 }
 
-private fun SpeedPolicy.speedLabel(): String {
+/** The policies in the order 0, 1, 2, 6 confirmations, for the store and the invoice dropdowns. */
+internal val speedPolicyOptions: List<SpeedPolicy> =
+    SpeedPolicy.entries.filter { it != SpeedPolicy.Unknown }.sortedBy { it.confirmations }
+
+internal fun SpeedPolicy.speedLabel(): String {
     val plural = if (confirmations == 1) "confirmation" else "confirmations"
     return "${TextUtil.sentenceCase(name)} · $confirmations $plural"
 }

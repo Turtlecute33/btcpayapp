@@ -48,6 +48,8 @@ import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.NoStoreSelectedState
+import com.btcpayapp.ui.screens.store.speedLabel
+import com.btcpayapp.ui.screens.store.speedPolicyOptions
 import com.btcpayapp.ui.theme.Motion
 import java.math.BigDecimal
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -345,17 +347,10 @@ fun CreateInvoiceScreen(
 
                     FormDropdown(
                         label = "Confirmation policy",
-                        options = listOf(
-                            SpeedPolicy.HighSpeed,
-                            SpeedPolicy.MediumSpeed,
-                            SpeedPolicy.LowMediumSpeed,
-                            SpeedPolicy.LowSpeed,
-                        ),
+                        options = speedPolicyOptions,
                         selected = state.speedPolicy,
                         onSelect = { value -> viewModel.update { it.copy(speedPolicy = value) } },
-                        optionLabel = { policy ->
-                            "${policy.name} — ${policy.confirmations} confirmation${if (policy.confirmations == 1) "" else "s"}"
-                        },
+                        optionLabel = { it.speedLabel() },
                         supportingText = "Leave unset to use the store default.",
                     )
 
