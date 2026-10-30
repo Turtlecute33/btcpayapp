@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -80,6 +81,8 @@ data class CreateInvoiceState(
     val currencies: List<String> = emptyList(),
     /** False until the store this form is for has loaded. The form waits for it. */
     val storeReady: Boolean = false,
+    /** The new invoice id, until the composable opens Checkout for it. */
+    val opened: String? = null,
 ) {
     val amountValue: BigDecimal? get() = Amounts.parse(amount)
 
@@ -161,7 +164,7 @@ class CreateInvoiceViewModel(
 
     fun setCurrency(code: String) = _state.update { it.copy(currency = code, currencyTouched = true) }
 
-    fun submit(onCreated: (String) -> Unit) {
+    fun submit() {
         val snapshot = _state.value
         if (!snapshot.canSubmit) return
         val store = storeId ?: run {
@@ -198,13 +201,15 @@ class CreateInvoiceViewModel(
                         checkout = checkout,
                     ),
                 )
-            }.onSuccess { onCreated(it.id) }
+            }.onSuccess { invoice -> _state.update { it.copy(opened = invoice.id) } }
                 .onFailure { failure ->
                     val error = failure.asApiException()
                     _state.update { it.copy(creating = false, error = error) }
                 }
         }
     }
+
+    fun consumeOpened() = _state.update { it.copy(opened = null) }
 }
 
 @Composable
@@ -217,6 +222,14 @@ fun CreateInvoiceScreen(
     val viewModel = appViewModel { CreateInvoiceViewModel(it, prefillAmount, prefillCurrency) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     var advanced by remember { mutableStateOf(false) }
+
+    // Opened from the state, not from the request: a callback held by the
+    // view model goes to the old activity after a recreation.
+    LaunchedEffect(state.opened) {
+        val invoiceId = state.opened ?: return@LaunchedEffect
+        viewModel.consumeOpened()
+        onCreated(invoiceId)
+    }
 
     val validation = state.error as? ApiException.Validation
 
@@ -386,7 +399,7 @@ fun CreateInvoiceScreen(
             Spacer(Modifier.height(24.dp))
 
             Button(
-                onClick = { viewModel.submit(onCreated) },
+                onClick = viewModel::submit,
                 enabled = state.canSubmit,
                 modifier = Modifier
                     .fillMaxWidth()

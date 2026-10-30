@@ -25,6 +25,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -153,6 +154,8 @@ data class RefundState(
     val outcomeUnknown: Boolean = false,
     val notice: String? = null,
     val error: ApiException? = null,
+    /** The new pull payment id, until the composable opens it. */
+    val opened: String? = null,
 ) {
     /** The payment method's currency, which decides whether a Custom refund is approved by the server. */
     val paymentCurrency: String
@@ -282,7 +285,7 @@ class RefundViewModel(
 
     fun reportNotice(text: String) = _state.update { it.copy(notice = text) }
 
-    fun submit(onCreated: (String) -> Unit) {
+    fun submit() {
         val snapshot = _state.value
         // A refund creates a claimable pull payment against the store's funds,
         // so a double tap is a second one the customer can also redeem. Like
@@ -320,8 +323,7 @@ class RefundViewModel(
                 // Cleared on success too. Left true, a no-op navigation (the
                 // screen already popped) would leave the spinner spinning
                 // forever and the button disabled.
-                _state.update { current -> current.copy(submitting = false) }
-                onCreated(it.id)
+                _state.update { current -> current.copy(submitting = false, opened = it.id) }
             }.onFailure { failure ->
                 val error = failure.asApiException()
                 edit {
@@ -334,6 +336,8 @@ class RefundViewModel(
             }
         }
     }
+
+    fun consumeOpened() = _state.update { it.copy(opened = null) }
 }
 
 private const val OUTCOME_UNKNOWN = "The refund may have been created. Check Pull payments before you try again."
@@ -357,6 +361,14 @@ fun RefundScreen(
     // Leaving would cancel the create with the view model and lose its answer,
     // which says whether it is safe to try again. So back waits for it.
     BackHandler(enabled = state.submitting) {}
+
+    // Opened from the state, not from the request: a callback held by the
+    // view model goes to the old activity after a recreation.
+    LaunchedEffect(state.opened) {
+        val pullPaymentId = state.opened ?: return@LaunchedEffect
+        viewModel.consumeOpened()
+        onCreated(pullPaymentId)
+    }
 
     AppScreen(title = "Refund", onBack = { if (!state.submitting) onBack() }) { padding ->
         // A spinner rather than a skeleton: what is coming is a form, and a
@@ -557,7 +569,7 @@ fun RefundScreen(
                 reviewing = false
                 val subtitle = "$amount from ${viewModel.storeName}"
                 scope.afterSpendGate(gate, "Confirm refund", subtitle, viewModel::reportNotice) {
-                    viewModel.submit(onCreated)
+                    viewModel.submit()
                 }
             },
         )

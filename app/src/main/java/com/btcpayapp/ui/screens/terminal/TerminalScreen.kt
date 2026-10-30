@@ -141,6 +141,8 @@ data class TerminalState(
     val canCreateInvoice: Boolean = true,
     /** A one-off line for the snackbar, such as a setting that did not save. */
     val notice: String? = null,
+    /** The new invoice id, until the composable opens Checkout for it. */
+    val opened: String? = null,
 ) {
     /**
      * Minor-unit digits for the selected currency.
@@ -280,7 +282,7 @@ class TerminalViewModel(private val graph: AppGraph) : ViewModel() {
         viewModelScope.launch { graph.session.refresh() }
     }
 
-    fun charge(onCreated: (String) -> Unit) {
+    fun charge() {
         val snapshot = _state.value
         if (!snapshot.canCharge) return
         val storeId = snapshot.storeId ?: run {
@@ -310,14 +312,15 @@ class TerminalViewModel(private val graph: AppGraph) : ViewModel() {
                     ),
                 )
             }.onSuccess { invoice ->
-                _state.update { it.cleared() }
-                onCreated(invoice.id)
+                _state.update { it.cleared().copy(opened = invoice.id) }
             }.onFailure { failure ->
                 val error = failure.asApiException()
                 _state.update { it.copy(creating = false, error = error) }
             }
         }
     }
+
+    fun consumeOpened() = _state.update { it.copy(opened = null) }
 }
 
 /**
@@ -343,6 +346,14 @@ fun TerminalScreen(onCheckout: (String) -> Unit) {
         val notice = state.notice ?: return@LaunchedEffect
         snackbar.showSnackbar(notice)
         viewModel.noticeShown()
+    }
+
+    // Opened from the state, not from the request: a callback held by the
+    // view model goes to the old activity after a recreation.
+    LaunchedEffect(state.opened) {
+        val invoiceId = state.opened ?: return@LaunchedEffect
+        viewModel.consumeOpened()
+        onCheckout(invoiceId)
     }
 
     // The store list takes a while on a cold start, longer over Tor. Until it
@@ -373,7 +384,7 @@ fun TerminalScreen(onCheckout: (String) -> Unit) {
                     description = "This key cannot see a store. Create one on the server, or pair again.",
                 )
 
-                TerminalPhase.Ready -> TerminalBody(state = state, viewModel = viewModel, onCheckout = onCheckout)
+                TerminalPhase.Ready -> TerminalBody(state = state, viewModel = viewModel)
             }
         }
     }
@@ -404,7 +415,7 @@ private val MIN_AMOUNT_HEIGHT = 96.dp
  * a screen that is wider than it is tall.
  */
 @Composable
-private fun TerminalBody(state: TerminalState, viewModel: TerminalViewModel, onCheckout: (String) -> Unit) {
+private fun TerminalBody(state: TerminalState, viewModel: TerminalViewModel) {
     val settings = LocalSettings.current
     val haptics = LocalHapticFeedback.current
 
@@ -432,7 +443,7 @@ private fun TerminalBody(state: TerminalState, viewModel: TerminalViewModel, onC
             onTip = viewModel::askForTip,
             onCharge = {
                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                viewModel.charge(onCheckout)
+                viewModel.charge()
             },
         )
     }

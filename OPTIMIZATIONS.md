@@ -20,7 +20,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-02 | Start the screen's own requests first on pull-to-refresh in Home and Wallet | speed | S | low | applied |
 | BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | applied |
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | applied |
-| BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | approved |
+| BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | applied |
 | BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | approved |
 | BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | approved |
@@ -91,7 +91,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: UI state and navigation wiring only. The lines come from a8d48af and f2d14a0 (70c03dd touched TerminalScreen in a different area). SpendGate, the `spending {}` marking, the in-flight checks and outcomeUnknown in RefundViewModel do not change. No storage, schema, preference or key change. No dependency.
 - **Verify**: Edge case: if the user leaves the Terminal tab during the request, Checkout opens when the Terminal shows again. On an emulator: start a charge on a slow link and change the system language (or connect a hardware keyboard) before the answer comes. Checkout must open.
 - **Effort**: S. **Risk**: low. **Net lines**: about +12 (estimate).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (600 tests). Not checked: no run-time check on a device or emulator (the language or keyboard change during a charge in Verify); no unit test covers the view models or the LaunchedEffect.
+- **Status**: applied
 
 ### BTCPAY-OPT-06: Delete ProGuard rules that repeat the rules the libraries ship
 
