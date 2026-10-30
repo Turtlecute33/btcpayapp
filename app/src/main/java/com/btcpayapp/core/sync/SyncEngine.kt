@@ -97,15 +97,7 @@ class SyncEngine internal constructor(
         // An account removed while this run was busy may have had entries
         // written, or notifications posted, after its removal cleaned up.
         val current = accounts.vault.value.accounts.map { it.id }.toSet()
-        val now = System.currentTimeMillis()
-        stateFile.update { state ->
-            val kept = state.retainAccounts(current)
-            if (failed == all.size) {
-                kept.copy(lastFailureAt = now, consecutiveFailures = state.consecutiveFailures + 1)
-            } else {
-                kept.copy(lastRunAt = now, consecutiveFailures = 0)
-            }
-        }
+        stateFile.update { it.retainAccounts(current) }
         all.filterNot { it.id in current }.forEach { notifier.cancelAccount(it.id) }
 
         return when {

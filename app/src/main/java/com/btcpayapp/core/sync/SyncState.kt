@@ -16,6 +16,7 @@ data class SyncState(
     val invoiceWatermarks: Map<String, Long> = emptyMap(),
     /** `accountId|storeId` → payout ids already announced as awaiting approval. */
     val announcedPayouts: Map<String, List<String>> = emptyMap(),
+    // Not written any more. Kept, so that the file format does not change.
     val lastRunAt: Long = 0L,
     val lastFailureAt: Long = 0L,
     val consecutiveFailures: Int = 0,

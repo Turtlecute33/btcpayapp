@@ -123,6 +123,10 @@ internal class EncryptedJsonFile<T>(
             "refusing to write ${file.name}: the existing document could not be read"
         }
         val next = transform(_state.value)
+        // The same document: do not write it again. Each write costs a
+        // Keystore seal, an fsync and a rename. A lost document is written,
+        // because that save ends [lost].
+        if (next == _state.value && !_lost.value) return@withLock next
         // Write and publish as one step that cancellation cannot split. With a
         // plain `withContext(IO)`, a caller cancelled mid-write (the user left
         // the screen) gets the file renamed into place and then a

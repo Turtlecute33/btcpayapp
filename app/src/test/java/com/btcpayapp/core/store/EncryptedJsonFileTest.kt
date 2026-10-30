@@ -56,6 +56,39 @@ class EncryptedJsonFileTest {
         } finally { file.delete(); dir.delete() }
     }
 
+    // Most sync runs change nothing. Each write costs a Keystore seal, an
+    // fsync and a rename.
+    @Test fun `an update that changes nothing does not write`() = runTest {
+        val dir = Files.createTempDirectory("btcpay-store-test").toFile()
+        val file = File(dir, "document")
+        try {
+            file.writeText("41")
+            var writes = 0
+            val store = EncryptedJsonFile(file, Int.serializer(), 0, ApiJson.instance, backgroundScope,
+                encrypt = { writes++; it.copyOf() }, decrypt = { it.copyOf() })
+            assertEquals(41, store.update { it })
+            assertEquals(0, writes)
+            assertEquals(42, store.update { it + 1 })
+            assertEquals(1, writes)
+        } finally { dir.deleteRecursively() }
+    }
+
+    // The lost-settings notice saves the recovered settings as they are. That
+    // save must end the flag.
+    @Test fun `an update that changes nothing still saves a lost document`() = runTest {
+        val dir = Files.createTempDirectory("btcpay-store-test").toFile()
+        val file = File(dir, "document")
+        try {
+            file.writeText("not a number")
+            val store = EncryptedJsonFile(file, Int.serializer(), 0, ApiJson.instance, backgroundScope,
+                encrypt = { it.copyOf() }, decrypt = { it.copyOf() }, recovered = { 7 })
+            store.loaded.first { it }
+            store.update { it }
+            assertFalse(store.lost.value)
+            assertEquals("7", file.readText())
+        } finally { dir.deleteRecursively() }
+    }
+
     // The Keystore daemon is routinely not up yet just after boot. The first
     // read then fails, and before retry() nothing read the file again.
     @Test fun `a read that failed once for a temporary reason loads after retry`() = runTest {

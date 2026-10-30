@@ -23,7 +23,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | applied |
 | BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | applied |
-| BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | approved |
+| BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | applied |
 | BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | approved |
 | BTCPAY-OPT-10 | Replace seven private chevron-row composables with one shared NavRow | minimalism | M | medium | approved |
 
@@ -131,7 +131,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Effort**: S. **Risk**: low. **Net lines**: about -5 (estimate).
 - **Owner check**: Confirm that encrypted writes of vault.bin, settings.bin and sync.bin may be skipped when nothing changes. Today a no-op write rewrites an old-format document with the current fields (encodeDefaults, coerceInputValues); after this change such a document stays in the old format until a real change.
 - **Owner decision**: Owner approved: skip encrypted writes that change nothing; an old-format document may stay in the old format until a real change.
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests; 2 new EncryptedJsonFileTest tests: an equal update does not seal or write, and an equal update of a lost document still writes and ends the lost flag). Not checked: no run-time check on a device; the write counts in Benefit are not measured.
+- **Status**: applied
 
 ### BTCPAY-OPT-09: Bring the build files in line with the owner toolchain rule
 
