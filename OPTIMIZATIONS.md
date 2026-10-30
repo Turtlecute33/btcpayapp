@@ -24,7 +24,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | applied |
 | BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | applied |
-| BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | approved |
+| BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | applied |
 | BTCPAY-OPT-10 | Replace seven private chevron-row composables with one shared NavRow | minimalism | M | medium | approved |
 
 ### BTCPAY-OPT-01: Return Cancelled when the biometric prompt starts after the activity state is saved
@@ -146,7 +146,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Effort**: S. **Risk**: low. **Net lines**: about -2 (estimate).
 - **Owner check**: Confirm the removal of the stale kotlin-android checksum lines from SEC-007. If in-process Kotlin breaks the CI command, decide if CI may run the variants in separate commands.
 - **Owner decision**: Owner approved, as two commits. Do not change the CI workflow; if the in-process Kotlin setting can break the CI command (two variants in one command), say so in notes.
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests) and `./gradlew :app:assembleRelease` passed, after each commit, as separate commands; Kotlin compiled with the IN_PROCESS strategy. The release APK has the same entries, sizes and CRCs as at the base commit (unzip -lv). KGP still resolves to 2.4.21 (buildEnvironment). Without the root alias, Gradle reads kotlin-gradle-plugin-2.2.10.module (the AGP 9 request) before it selects 2.4.21, so the second commit adds its sha256; Fonte, Ombra and MegaGlass-Android have the same value. Not checked: the CI command (debug and release in one Gradle command) with in-process Kotlin.
+- **Status**: applied
 
 ### BTCPAY-OPT-10: Replace seven private chevron-row composables with one shared NavRow
 
