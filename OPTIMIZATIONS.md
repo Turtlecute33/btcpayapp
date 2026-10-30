@@ -1,7 +1,7 @@
 # Optimizations
 
 Review of BTCPay (btcpayapp) on 2026-10-30, at commit 3bb78a6 on branch fix/production-review.
-Status: the owner approved all 10 items. 9 are applied on branch optimize, 1 is not applied. See Results.
+Status: the owner approved all 10 items, and all 10 are applied on branch optimize. See Results.
 
 Rules for this list: the security-review changes (the audit of 2026-10-27: the commits with a 'Report: <ID>' line, see `git log --grep='Report:' --format='%h %s'`; /Users/user/Documents/Github/android/NEXT-STEPS.md has the status of each item in sections 5 and 6 and in the appendix section for this app) stay as they are. No change to storage formats, database schemas, preference keys or encryption. Each applied item is one commit, so that you can revert it alone.
 
@@ -21,7 +21,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | applied |
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | applied |
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | applied |
-| BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | not applied |
+| BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | applied |
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | applied |
 | BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | applied |
 | BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | applied |
@@ -104,7 +104,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Build config from a8d48af, not a 'Report:' commit. The Log stripping rule stays (v/d/i/w/e), so release logs stay stripped. No keep rule for app code goes; the app has no reflection. No storage, preference key or key change. No dependency.
 - **Verify**: A missing -dontwarn shows as a build error, not a runtime risk. Run assembleRelease, diff usage.txt and seeds.txt against the 0.2.6 build, and do one install that opens the scanner and a checkout.
 - **Effort**: S. **Risk**: low. **Net lines**: about -40 (estimate).
-- **Status**: not applied: the session had no permission to edit app/proguard-rules.pro. Give that permission and do the item again, with a new base release build for the usage.txt and seeds.txt diff.
+- **Verified**: Applied by hand after the agent was blocked. `./gradlew :app:assembleRelease` passes with no missing-class error. usage.txt and seeds.txt are identical to the build with the old rules, and the APK stays 6,270,136 B, so R8 keeps the same code. `./gradlew :app:testDebugUnitTest :app:assembleDebug` passes. Not checked: the scanner and a checkout at run time.
+- **Status**: applied
 
 ### BTCPAY-OPT-07: Use one label and one order for the invoice confirmation policy
 
@@ -193,14 +194,12 @@ Release APK size (0.2.6, versionCode 206, measured):
 | Download size (apkanalyzer) | 3,207,265 bytes | 3,204,915 bytes | -2,350 bytes |
 | classes.dex | 5,561,196 bytes | 5,555,556 bytes | -5,640 bytes |
 
-Not applied:
-
-- BTCPAY-OPT-06: the session had no permission to edit app/proguard-rules.pro.
+Not applied: none. BTCPAY-OPT-06 was blocked for the agent and then applied by hand; the APK size does not change.
 
 The owner must still check by hand (no device or emulator was used; no Windows check applies to this app):
 
 - BTCPAY-OPT-01: turn on the app lock, install fresh and press Home within 1 s while the lock screen prepares the first prompt. Come back: Unlock must be enabled, and one tap must show the prompt.
-- BTCPAY-OPT-02: count the GETs in the server access log for one pull on Home and on Wallet. Open decision: if a session refresh during a Wallet pull finds no enabled payment method, the pull indicator can keep spinning. This race was there before the change. A possible fix is `refreshing = false` in the state copy of the Wallet collector; it is not applied.
+- BTCPAY-OPT-02: count the GETs in the server access log for one pull on Home and on Wallet. If a session refresh during a Wallet pull finds no enabled payment method, the pull indicator must stop (the Wallet collector sets `refreshing = false`, in the BTCPAY-OPT-02 commit).
 - BTCPAY-OPT-03: open Checkout > Invoice details and double-tap Back fast. The app must stop on Checkout.
 - BTCPAY-OPT-05: start a charge on a slow link and change the system language (or connect a hardware keyboard) before the answer comes. Checkout must open. Do the same for New invoice and Refund.
 - BTCPAY-OPT-07: open New invoice > More options and Store settings. Both must show the same labels in the order 0, 1, 2, 6.
