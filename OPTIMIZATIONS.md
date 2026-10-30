@@ -25,7 +25,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 | BTCPAY-OPT-07 | Use one label and one order for the invoice confirmation policy | ui-ux | S | low | applied |
 | BTCPAY-OPT-08 | Skip encrypted writes that change nothing, and stop writing sync counters that nothing reads | battery | S | low | applied |
 | BTCPAY-OPT-09 | Bring the build files in line with the owner toolchain rule | battery | S | low | applied |
-| BTCPAY-OPT-10 | Replace seven private chevron-row composables with one shared NavRow | minimalism | M | medium | approved |
+| BTCPAY-OPT-10 | Replace seven private chevron-row composables with one shared NavRow | minimalism | M | medium | applied |
 
 ### BTCPAY-OPT-01: Return Cancelled when the biometric prompt starts after the activity state is saved
 
@@ -159,7 +159,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Compose UI only. No spend gate, app lock, network, storage, preference key or key handling. No line comes from a 'Report:' commit. No dependency.
 - **Verify**: Risk is medium because the merge visibly changes 6 screens (Lightning and Wallet lose the primary icon tint, ManageNodeRow text goes from bodyMedium to bodyLarge, padding and press feedback change), and the app has no UI tests. Check each of the 7 screens on the emulator, in LTR and with an RTL pseudo-locale.
 - **Effort**: M. **Risk**: medium. **Net lines**: about -150 (estimate).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests). `./gradlew :app:lintDebug` passed, with no issue in the changed files. A source search finds no other chevron row and no Icons.Rounded.ChevronRight. More keeps a private MenuRow of 2 lines that puts its inset divider under NavRow. Net lines: -164. Not checked: no run-time check of the 7 screens on a device or emulator, in LTR or with an RTL pseudo-locale (the Verify step); no unit test covers NavRow.
+- **Status**: applied
 
 ## Areas in good shape
 

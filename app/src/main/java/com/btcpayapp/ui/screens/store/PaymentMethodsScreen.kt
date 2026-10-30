@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.Payments
@@ -52,6 +51,7 @@ import com.btcpayapp.ui.components.AppScreen
 import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.ThinDivider
@@ -266,9 +266,10 @@ fun PaymentMethodsScreen(
                                 ThinDivider()
                             }
                             group.missing.forEach { id ->
-                                MissingMethodRow(
-                                    paymentMethodId = id,
+                                NavRow(
+                                    title = id,
                                     icon = group.kind.icon,
+                                    subtitle = "Not set up",
                                     onClick = { onEdit(id) },
                                 )
                                 ThinDivider()
@@ -344,39 +345,6 @@ private fun PaymentMethodRow(
                 )
             }
         }
-    }
-}
-
-/** A method the server supports and this store has not set up. */
-@Composable
-private fun MissingMethodRow(
-    paymentMethodId: String,
-    icon: ImageVector,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(paymentMethodId, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = "Not set up",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Spacer(Modifier.width(12.dp))
-        Icon(
-            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

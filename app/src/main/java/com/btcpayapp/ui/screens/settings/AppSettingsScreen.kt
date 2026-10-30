@@ -1,9 +1,7 @@
 package com.btcpayapp.ui.screens.settings
 
 import android.content.Context
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,7 +12,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -32,7 +29,6 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.activity.compose.LocalActivity
 import androidx.fragment.app.FragmentActivity
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -60,6 +56,7 @@ import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.FormDropdown
 import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
 import kotlinx.coroutines.CoroutineScope
@@ -383,14 +380,14 @@ fun AppSettingsScreen(
             // --- Data -------------------------------------------------------
 
             FormSection(title = "Data", modifier = Modifier.arrive(4)) {
-                LinkRow(
+                NavRow(
                     title = "Accounts",
-                    description = "Servers, keys and certificates.",
+                    subtitle = "Servers, keys and certificates.",
                     onClick = onAccounts,
                 )
-                LinkRow(
+                NavRow(
                     title = "About",
-                    description = "Version, privacy and links.",
+                    subtitle = "Version, privacy and links.",
                     onClick = onAbout,
                 )
             }
@@ -483,35 +480,6 @@ internal fun rememberOwnerCheck(onFailed: () -> Unit): OwnerCheck {
     val scope = rememberCoroutineScope()
     val failed = rememberUpdatedState(onFailed)
     return remember(context, activity, scope) { OwnerCheck(context, activity, scope, failed) }
-}
-
-@Composable
-private fun LinkRow(title: String, description: String?, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            if (description != null) {
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-        Spacer(Modifier.width(16.dp))
-        Icon(
-            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
 }
 
 private val LOCK_DELAYS = listOf(0, 30, 60, 300, 900)

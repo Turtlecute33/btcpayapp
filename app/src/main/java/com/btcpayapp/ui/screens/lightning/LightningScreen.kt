@@ -6,7 +6,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -26,7 +25,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.SwapHoriz
@@ -46,7 +44,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -78,6 +75,7 @@ import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.FigureText
 import com.btcpayapp.ui.components.LoadingState
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.QrCode
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.StatusPill
@@ -371,14 +369,14 @@ fun LightningScreen(
                             // the word "Channels" is the label written out twice;
                             // it would double the height of this card to say
                             // nothing the title does not already say.
-                            ActionRow(Icons.Rounded.Hub, "Channels", onChannels)
+                            NavRow("Channels", Icons.Rounded.Hub, onClick = onChannels)
                             ThinDivider()
-                            ActionRow(Icons.Rounded.SwapHoriz, "Invoices and payments", onPayments)
+                            NavRow("Invoices and payments", Icons.Rounded.SwapHoriz, onClick = onPayments)
                             // Lightning addresses are a store feature; the server
                             // node has no store to attach a username to.
                             if (!serverNode) {
                                 ThinDivider()
-                                ActionRow(Icons.Rounded.AlternateEmail, "Lightning addresses", onAddresses)
+                                NavRow("Lightning addresses", Icons.Rounded.AlternateEmail, onClick = onAddresses)
                             }
                         }
                     }
@@ -621,26 +619,6 @@ private fun BalanceSection(balance: LightningBalanceData?, unit: BitcoinUnit) {
 /** Null for absent, unparsable, or zero — the three cases worth hiding. */
 internal fun String?.takeIfPositive(): String? =
     this?.takeIf { Amounts.serverDecimal(it)?.signum() == 1 }
-
-@Composable
-private fun ActionRow(icon: ImageVector, title: String, onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-        Spacer(Modifier.width(16.dp))
-        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
-        Icon(
-            imageVector = Icons.Rounded.ChevronRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
 
 /** A plain coloured dot; the node's advertised colour is decorative only. */
 @Composable

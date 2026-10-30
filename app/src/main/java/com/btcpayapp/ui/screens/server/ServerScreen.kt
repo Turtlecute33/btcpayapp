@@ -7,7 +7,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -23,12 +22,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Email
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Payments
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -39,7 +36,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,6 +59,7 @@ import com.btcpayapp.ui.components.CopyableField
 import com.btcpayapp.ui.components.DetailRow
 import com.btcpayapp.ui.components.ErrorState
 import com.btcpayapp.ui.components.LoadingState
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.PulsingDot
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.StatusPill
@@ -222,7 +219,7 @@ fun ServerScreen(
                     ) {
                         CalmNotice("These screens belong to the instance administrator. Your account is not one.")
                     }
-                    MenuRow(
+                    NavRow(
                         icon = Icons.Rounded.Group,
                         title = "Users",
                         subtitle = "Approve, lock and remove accounts",
@@ -230,7 +227,7 @@ fun ServerScreen(
                         onClick = { onNavigate(ServerUsersRoute) },
                     )
                     ThinDivider()
-                    MenuRow(
+                    NavRow(
                         icon = Icons.Rounded.Email,
                         title = "Email",
                         subtitle = "SMTP settings used for server notices",
@@ -238,7 +235,7 @@ fun ServerScreen(
                         onClick = { onNavigate(ServerEmailRoute) },
                     )
                     ThinDivider()
-                    MenuRow(
+                    NavRow(
                         icon = Icons.Rounded.Payments,
                         title = "Payout processors",
                         subtitle = "Send approved payouts automatically",
@@ -246,7 +243,7 @@ fun ServerScreen(
                         onClick = { onNavigate(PayoutProcessorsRoute) },
                     )
                     ThinDivider()
-                    MenuRow(
+                    NavRow(
                         icon = Icons.Rounded.Bolt,
                         title = "Internal Lightning node",
                         subtitle = "The node this instance runs itself",
@@ -477,45 +474,5 @@ private fun CalmNotice(text: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-@Composable
-private fun MenuRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-) {
-    val tint = if (enabled) {
-        MaterialTheme.colorScheme.onSurface
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
-    }
-
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .let { if (enabled) it.clickable(onClick = onClick) else it }
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(imageVector = icon, contentDescription = null, tint = tint)
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.bodyLarge, color = tint)
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Icon(
-            imageVector = if (enabled) Icons.AutoMirrored.Rounded.KeyboardArrowRight else Icons.Rounded.Lock,
-            contentDescription = null,
-            modifier = Modifier.size(18.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }

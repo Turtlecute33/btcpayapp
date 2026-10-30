@@ -26,7 +26,6 @@ import androidx.compose.material.icons.rounded.AccountBalanceWallet
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.Bolt
-import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material3.Button
@@ -88,6 +87,7 @@ import com.btcpayapp.ui.components.DirectionIcon
 import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.components.ErrorBanner
 import com.btcpayapp.ui.components.ErrorState
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.SkeletonRow
 import com.btcpayapp.ui.components.StatusPill
@@ -838,7 +838,7 @@ fun WalletScreen(
                         // they sit at the end of the history instead of above
                         // it. The overflow menu reaches them without scrolling.
                         nodeCode?.let { code ->
-                            item { ManageNodeRow(onClick = { onOpenLightning(code) }) }
+                            item { NavRow("Channels, node info and addresses", Icons.Rounded.Bolt, onClick = { onOpenLightning(code) }) }
                         }
                     } else {
                         onChainActivity(
@@ -1315,35 +1315,6 @@ private fun CapabilityNote(visible: Boolean, text: String) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-    }
-}
-
-@Composable
-private fun ManageNodeRow(onClick: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Rounded.Bolt,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(20.dp),
-        )
-        Spacer(Modifier.width(12.dp))
-        Text(
-            text = "Channels, node info and addresses",
-            style = MaterialTheme.typography.bodyMedium,
-            modifier = Modifier.weight(1f),
-        )
-        Icon(
-            imageVector = Icons.Rounded.ChevronRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

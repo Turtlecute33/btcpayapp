@@ -2,22 +2,18 @@ package com.btcpayapp.ui.screens.store
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.CurrencyExchange
 import androidx.compose.material.icons.rounded.Email
@@ -28,7 +24,6 @@ import androidx.compose.material.icons.rounded.Webhook
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHostState
@@ -39,11 +34,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -74,6 +67,7 @@ import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.FormSection
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.LoadingState
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.components.confirmDiscardChanges
@@ -930,45 +924,45 @@ private fun StoreReceiptSection(
 @Composable
 private fun StoreMenuSection(onNavigate: (Any) -> Unit, modifier: Modifier = Modifier) {
     FormSection("More settings", modifier) {
-        StoreMenuRow(
+        NavRow(
             title = "Payment methods",
-            description = "Wallets, Lightning node, LNURL",
+            subtitle = "Wallets, Lightning node, LNURL",
             icon = Icons.Rounded.Payments,
             onClick = { onNavigate(PaymentMethodsRoute) },
         )
-        StoreMenuRow(
+        NavRow(
             title = "Users and roles",
-            description = "Who can see and manage this store",
+            subtitle = "Who can see and manage this store",
             icon = Icons.Rounded.Group,
             onClick = { onNavigate(StoreUsersRoute) },
         )
-        StoreMenuRow(
+        NavRow(
             title = "Rates",
-            description = "Exchange rate source and spread",
+            subtitle = "Exchange rate source and spread",
             icon = Icons.Rounded.CurrencyExchange,
             onClick = { onNavigate(StoreRatesRoute) },
         )
-        StoreMenuRow(
+        NavRow(
             title = "Email",
-            description = "SMTP server used for store notifications",
+            subtitle = "SMTP server used for store notifications",
             icon = Icons.Rounded.Email,
             onClick = { onNavigate(StoreEmailRoute) },
         )
-        StoreMenuRow(
+        NavRow(
             title = "Webhooks",
-            description = "Push invoice events to another system",
+            subtitle = "Push invoice events to another system",
             icon = Icons.Rounded.Webhook,
             onClick = { onNavigate(WebhooksRoute) },
         )
-        StoreMenuRow(
+        NavRow(
             title = "Apps",
-            description = "Point of sale and crowdfunding",
+            subtitle = "Point of sale and crowdfunding",
             icon = Icons.Rounded.Apps,
             onClick = { onNavigate(AppsRoute) },
         )
-        StoreMenuRow(
+        NavRow(
             title = "Switch store",
-            description = "Choose or create another store",
+            subtitle = "Choose or create another store",
             icon = Icons.Rounded.Store,
             onClick = { onNavigate(StoreListRoute) },
         )
@@ -1022,39 +1016,6 @@ private fun StoreDangerSection(
 // ---------------------------------------------------------------------------
 // Pieces
 // ---------------------------------------------------------------------------
-
-@Composable
-private fun StoreMenuRow(
-    title: String,
-    description: String,
-    icon: ImageVector,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(16.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Spacer(Modifier.width(8.dp))
-        Icon(
-            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
-}
 
 /** Tri-state for the receipt flags, where a null is "inherit", not "off". */
 enum class StoreInheritable(val label: String, val value: Boolean?) {

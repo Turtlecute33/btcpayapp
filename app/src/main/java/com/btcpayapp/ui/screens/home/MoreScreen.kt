@@ -1,20 +1,13 @@
 package com.btcpayapp.ui.screens.home
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.Apps
@@ -31,14 +24,8 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Storefront
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Webhook
-import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ripple
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
@@ -46,10 +33,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.components.chainSubtitle
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.NavRow
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.components.arrive
-import com.btcpayapp.ui.components.pressScale
 import com.btcpayapp.ui.nav.AboutRoute
 import com.btcpayapp.ui.nav.AccountsRoute
 import com.btcpayapp.ui.nav.AppSettingsRoute
@@ -204,6 +191,7 @@ fun MoreScreen(onNavigate: (Any) -> Unit) {
     }
 }
 
+/** A [NavRow] with the inset divider of this screen under it. */
 @Composable
 private fun MenuRow(
     title: String,
@@ -211,43 +199,6 @@ private fun MenuRow(
     subtitle: String? = null,
     onClick: () -> Unit,
 ) {
-    // A full-width row is too large a target for the ripple alone to answer
-    // for: a tap near either end leaves the ink so far from the finger that it
-    // reads as nothing having happened. The row shrinks slightly instead, and
-    // the divider below it stays put, so the row reads as the one thing pressed.
-    val interactions = remember { MutableInteractionSource() }
-    Column {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .pressScale(interactions)
-                .clickable(interactionSource = interactions, indication = ripple(), onClick = onClick)
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(22.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.width(16.dp))
-            Column(Modifier.weight(1f)) {
-                Text(title, style = MaterialTheme.typography.bodyLarge)
-                if (subtitle != null) {
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-            Icon(
-                imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        ThinDivider(Modifier.padding(start = 54.dp))
-    }
+    NavRow(title, icon, subtitle, onClick = onClick)
+    ThinDivider(Modifier.padding(start = 54.dp))
 }
