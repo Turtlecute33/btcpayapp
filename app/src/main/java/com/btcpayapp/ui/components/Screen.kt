@@ -54,6 +54,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.keepScreenOn
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.dropUnlessResumed
 import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.theme.Motion
 import androidx.compose.ui.text.style.TextOverflow
@@ -105,7 +106,9 @@ fun AppScreen(
             }
             val navigation: @Composable () -> Unit = {
                 if (onBack != null) {
-                    IconButton(onClick = onBack) {
+                    // During a screen transition no screen is resumed, so a
+                    // fast second tap cannot close one more screen.
+                    IconButton(onClick = dropUnlessResumed(block = onBack)) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
                     }
                 }

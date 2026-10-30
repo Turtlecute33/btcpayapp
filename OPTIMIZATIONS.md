@@ -18,7 +18,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 |---|---|---|---|---|---|
 | BTCPAY-OPT-01 | Return Cancelled when the biometric prompt starts after the activity state is saved | stability | S | low | applied |
 | BTCPAY-OPT-02 | Start the screen's own requests first on pull-to-refresh in Home and Wallet | speed | S | low | applied |
-| BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | approved |
+| BTCPAY-OPT-03 | Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed) | stability | S | low | applied |
 | BTCPAY-OPT-04 | Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow | minimalism | S | low | approved |
 | BTCPAY-OPT-05 | Open Checkout from screen state, not from a navigation callback held by the ViewModel | stability | S | low | approved |
 | BTCPAY-OPT-06 | Delete ProGuard rules that repeat the rules the libraries ship | minimalism | S | low | approved |
@@ -65,7 +65,8 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Click handling of the toolbar arrow only. Screen.kt:102-112 come from a8d48af, AppNavHost.kt:261-263 from f2d14a0; no 'Report:' commit. The guard can only drop a tap. The lock overlay, spend gate, BackHandlers, storage, preferences and keys do not change. No new dependency. Side effect: the app ignores a Back tap during the screen's own enter transition (about 0.45 s).
 - **Verify**: Merged from the stability and UI reviews (same line, same change). After the change: open Checkout > Invoice details and double-tap Back fast. The app must stop on Checkout.
 - **Effort**: S. **Risk**: low. **Net lines**: about +1 (estimate).
-- **Status**: approved
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). Not checked: no run-time check on a device (the double-tap Back test in Verify); no unit test covers the click guard.
+- **Status**: applied
 
 ### BTCPAY-OPT-04: Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow
 
