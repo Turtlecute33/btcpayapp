@@ -39,7 +39,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Effort**: S. **Risk**: low. **Net lines**: about +2 (estimate).
 - **Owner check**: Confirm that you accept a one-line change in the SEC-002 prompt function. It only returns Cancelled, and it makes the 120 s rule and the idle lock apply again, so the lock gets stricter.
 - **Owner decision**: Owner approved the one-line change in the SEC-002 prompt function (it fails closed).
-- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). javap of biometric-1.1.0 shows the same isStateSaved check. Not checked: no run-time check on a device (the Home-during-first-prompt test in Verify). Emulator (2026-10-30): pass. In 14 runs with Home during prompt preparation, Unlock stays enabled and one tap shows the prompt. The 0.2.6 base build stays stuck on 'Waiting...'.
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). javap of biometric-1.1.0 shows the same isStateSaved check. Not checked: no run-time check on a device (the Home-during-first-prompt test in Verify). Emulator (2026-10-30): pass. In 14 runs with Home during prompt preparation, Unlock stays enabled and one tap shows the prompt. The 0.2.6 base build stays stuck on 'Waiting...'. Phone (2026-10-31): pass. The owner pressed Home within 1 s while the lock screen prepared the prompt, and Unlock worked.
 - **Status**: applied
 
 ### BTCPAY-OPT-02: Start the screen's own requests first on pull-to-refresh in Home and Wallet
@@ -52,7 +52,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Only the order of read-only GET requests in two view models changes. git blame on HomeScreen.kt:214-221 and WalletScreen.kt:390-396 gives a8d48af and f2d14a0, not a 'Report:' commit. No storage, schema, preference key, encryption or key handling is touched. No dependency.
 - **Verify**: The review checked that the collectors cancel the job in flight, so a dashboard load that starts before session.refresh cannot write data for an old store. After the change: count GETs in the server access log for one pull on Home and on Wallet, before and after.
 - **Effort**: S. **Risk**: low. **Net lines**: about 0 (estimate).
-- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). Not checked: no run-time check on a device and no count of GETs in a server access log (the Verify step); no unit test covers the two view models. Emulator with a local fake server (2026-10-30): pass. The screen's own GETs now start together with the session GETs, and the GET count does not change (9 on Home, 7 on Wallet). The pull indicator stops when no payment method is enabled.
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). Not checked: no run-time check on a device and no count of GETs in a server access log (the Verify step); no unit test covers the two view models. Emulator with a local fake server (2026-10-30): pass. The screen's own GETs now start together with the session GETs, and the GET count does not change (9 on Home, 7 on Wallet). The pull indicator stops when no payment method is enabled. Phone (2026-10-31): pass. Pull to refresh works on Home and Wallet with the real server.
 - **Status**: applied
 
 ### BTCPAY-OPT-03: Drop a second toolbar Back tap while the screen transition runs (dropUnlessResumed)
@@ -65,7 +65,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Click handling of the toolbar arrow only. Screen.kt:102-112 come from a8d48af, AppNavHost.kt:261-263 from f2d14a0; no 'Report:' commit. The guard can only drop a tap. The lock overlay, spend gate, BackHandlers, storage, preferences and keys do not change. No new dependency. Side effect: the app ignores a Back tap during the screen's own enter transition (about 0.45 s).
 - **Verify**: Merged from the stability and UI reviews (same line, same change). After the change: open Checkout > Invoice details and double-tap Back fast. The app must stop on Checkout.
 - **Effort**: S. **Risk**: low. **Net lines**: about +1 (estimate).
-- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). Not checked: no run-time check on a device (the double-tap Back test in Verify); no unit test covers the click guard. Emulator (2026-10-30): pass. A fast double-tap on Back stops on Checkout in 5 runs and in the release build. The base build closes Checkout.
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (601 tests). Not checked: no run-time check on a device (the double-tap Back test in Verify); no unit test covers the click guard. Emulator (2026-10-30): pass. A fast double-tap on Back stops on Checkout in 5 runs and in the release build. The base build closes Checkout. Phone (2026-10-31): pass. Back two times fast closes one screen.
 - **Status**: applied
 
 ### BTCPAY-OPT-04: Remove dead declarations left after the 0.2.x cleanup, including the eager SessionManager.allAccounts flow
@@ -104,7 +104,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Safety**: Build config from a8d48af, not a 'Report:' commit. The Log stripping rule stays (v/d/i/w/e), so release logs stay stripped. No keep rule for app code goes; the app has no reflection. No storage, preference key or key change. No dependency.
 - **Verify**: A missing -dontwarn shows as a build error, not a runtime risk. Run assembleRelease, diff usage.txt and seeds.txt against the 0.2.6 build, and do one install that opens the scanner and a checkout.
 - **Effort**: S. **Risk**: low. **Net lines**: about -40 (estimate).
-- **Verified**: Applied by hand after the agent was blocked. `./gradlew :app:assembleRelease` passes with no missing-class error. usage.txt and seeds.txt are identical to the build with the old rules, and the APK stays 6,270,136 B, so R8 keeps the same code. `./gradlew :app:testDebugUnitTest :app:assembleDebug` passes. Not checked: the scanner and a checkout at run time. Emulator (2026-10-30): pass. The R8 release build opens the scanner camera and a checkout, with no crash. Not checked: the decode of a real QR code.
+- **Verified**: Applied by hand after the agent was blocked. `./gradlew :app:assembleRelease` passes with no missing-class error. usage.txt and seeds.txt are identical to the build with the old rules, and the APK stays 6,270,136 B, so R8 keeps the same code. `./gradlew :app:testDebugUnitTest :app:assembleDebug` passes. Not checked: the scanner and a checkout at run time. Emulator (2026-10-30): pass. The R8 release build opens the scanner camera and a checkout, with no crash. Not checked: the decode of a real QR code. Phone (2026-10-31): pass. The release build signed with the owner key scans a real QR code.
 - **Status**: applied
 
 ### BTCPAY-OPT-07: Use one label and one order for the invoice confirmation policy
@@ -132,7 +132,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Effort**: S. **Risk**: low. **Net lines**: about -5 (estimate).
 - **Owner check**: Confirm that encrypted writes of vault.bin, settings.bin and sync.bin may be skipped when nothing changes. Today a no-op write rewrites an old-format document with the current fields (encodeDefaults, coerceInputValues); after this change such a document stays in the old format until a real change.
 - **Owner decision**: Owner approved: skip encrypted writes that change nothing; an old-format document may stay in the old format until a real change.
-- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests; 2 new EncryptedJsonFileTest tests: an equal update does not seal or write, and an equal update of a lost document still writes and ends the lost flag). Not checked: no run-time check on a device; the write counts in Benefit are not measured. Emulator (2026-10-30): pass. An install over 0.2.6 data keeps the account, the app lock and the sync job. A sync run with no change writes 0 times (base: 2).
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests; 2 new EncryptedJsonFileTest tests: an equal update does not seal or write, and an equal update of a lost document still writes and ends the lost flag). Not checked: no run-time check on a device; the write counts in Benefit are not measured. Emulator (2026-10-30): pass. An install over 0.2.6 data keeps the account, the app lock and the sync job. A sync run with no change writes 0 times (base: 2). Phone (2026-10-31): pass. After the install over the 0.2.5 release, the accounts, settings, app lock and sync work as before.
 - **Status**: applied
 
 ### BTCPAY-OPT-09: Bring the build files in line with the owner toolchain rule
@@ -147,7 +147,7 @@ Areas in good shape: cold start, network, background sync, encrypted storage, li
 - **Effort**: S. **Risk**: low. **Net lines**: about -2 (estimate).
 - **Owner check**: Confirm the removal of the stale kotlin-android checksum lines from SEC-007. If in-process Kotlin breaks the CI command, decide if CI may run the variants in separate commands.
 - **Owner decision**: Owner approved, as two commits. Do not change the CI workflow; if the in-process Kotlin setting can break the CI command (two variants in one command), say so in notes.
-- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests) and `./gradlew :app:assembleRelease` passed, after each commit, as separate commands; Kotlin compiled with the IN_PROCESS strategy. The release APK has the same entries, sizes and CRCs as at the base commit (unzip -lv). KGP still resolves to 2.4.21 (buildEnvironment). Without the root alias, Gradle reads kotlin-gradle-plugin-2.2.10.module (the AGP 9 request) before it selects 2.4.21, so the second commit adds its sha256; Fonte, Ombra and MegaGlass-Android have the same value. Not checked: the CI command (debug and release in one Gradle command) with in-process Kotlin. Local run (2026-10-30): pass. The CI command passes as one Gradle command with in-process Kotlin (602 tests). Not checked: the GitHub Actions run.
+- **Verified**: `./gradlew :app:testDebugUnitTest :app:assembleDebug` passed (602 tests) and `./gradlew :app:assembleRelease` passed, after each commit, as separate commands; Kotlin compiled with the IN_PROCESS strategy. The release APK has the same entries, sizes and CRCs as at the base commit (unzip -lv). KGP still resolves to 2.4.21 (buildEnvironment). Without the root alias, Gradle reads kotlin-gradle-plugin-2.2.10.module (the AGP 9 request) before it selects 2.4.21, so the second commit adds its sha256; Fonte, Ombra and MegaGlass-Android have the same value. Not checked: the CI command (debug and release in one Gradle command) with in-process Kotlin. Local run (2026-10-30): pass. The CI command passes as one Gradle command with in-process Kotlin (602 tests). Not checked: the GitHub Actions run. Local run (2026-10-31): pass with --rerun-tasks. The new sha256 of kotlin-gradle-plugin-2.2.10.module is the value that Fonte, Plico, Varco, Ombra and MegaGlass-Android already trust.
 - **Status**: applied
 
 ### BTCPAY-OPT-10: Replace seven private chevron-row composables with one shared NavRow
@@ -196,7 +196,7 @@ Release APK size (0.2.6, versionCode 206, measured):
 
 Not applied: none. BTCPAY-OPT-06 was blocked for the agent and then applied by hand; the APK size does not change.
 
-The owner check list is now in "Still for the owner" under Device checks (2026-10-30).
+The owner check list is now in "Still for the owner" under Phone session (2026-10-31).
 
 ### Device checks (2026-10-30)
 
@@ -220,9 +220,19 @@ Method: a debug build of branch optimize (dc57ba3) on an API 35 emulator, with n
 
 Crashes and ANRs: the optimize debug and release builds did not crash and had no ANR. The only crash is the base build in the BTCPAY-OPT-05 A/B check.
 
+### Phone session (2026-10-31)
+
+Method: a phone session with the owner, on the owner Pixel 9 Pro XL (GrapheneOS, Android 17). Claude built the release APK of branch optimize. Claude checked that its signing certificate is the same as the installed release. Claude installed it over the installed release with `adb install -r`, so the app data stayed. The owner did the steps on the phone and reported them as good. Claude read logcat after each step: the app did not crash and had no ANR.
+
+- Build: release 0.2.6 (versionCode 206). Certificate SHA-256 67ac728e...27ba, the same value as in the README.
+- Install: over the 0.2.5 release on the phone. This is an upgrade, in one direction only.
+- BTCPAY-OPT-08: after the upgrade, accounts, settings, the app lock and sync work. Pass.
+- BTCPAY-OPT-01: Home within 1 s while the lock screen prepares the prompt. Pass.
+- BTCPAY-OPT-02: pull to refresh on Home and Wallet. Pass.
+- BTCPAY-OPT-06: a real QR scan in the release build. Pass.
+- BTCPAY-OPT-03: Back two times fast. Pass.
+- BTCPAY-OPT-09: the CI command (`./gradlew :app:testDebugUnitTest :app:lintRelease :app:assembleRelease`, one command, in-process Kotlin) passed locally with `--rerun-tasks`. The new sha256 of kotlin-gradle-plugin-2.2.10.module (d0aa5491...8821) is the value that Fonte, Plico, Varco, Ombra and MegaGlass-Android already trust.
+
 Still for the owner (no Windows check applies to this app):
 
-- BTCPAY-OPT-01: on the phone, turn on the app lock, install fresh and press Home within 1 s while the lock screen prepares the first prompt. The emulator has no StrongBox and no fingerprint sensor, so only the phone shows the real key generation time and the real biometric prompt. Come back: Unlock must be enabled, and one tap must show the prompt.
-- BTCPAY-OPT-06: on the phone, scan a real QR code with a release build signed with the owner key. The emulator camera shows no QR code.
-- BTCPAY-OPT-08: on the phone, install over the real 0.2.6 data. Accounts, settings, the app lock and background sync must work as before. Only the phone has 0.2.6 files that can be in an older format.
-- BTCPAY-OPT-09: run CI (.github/workflows/ci.yml:41) one time. The local run passed. If CI fails, run each variant in a separate command, or set `-Pkotlin.compiler.execution.strategy=daemon` in CI. Also accept the new sha256 of kotlin-gradle-plugin-2.2.10.module in verification-metadata.xml, or revert 74bf99e alone.
+- BTCPAY-OPT-09: one real CI run (.github/workflows/ci.yml:41) when the branch is pushed. If CI fails, run each variant in a separate command, or set `-Pkotlin.compiler.execution.strategy=daemon` in CI.
