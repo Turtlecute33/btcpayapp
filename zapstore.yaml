@@ -1,0 +1,18 @@
+# Zapstore listing. The Zapstore indexer reads this file and publishes each new GitHub release.
+repository: https://github.com/Turtlecute33/btcpayapp
+summary: Unofficial native Android client for your own BTCPay Server. No WebView.
+description: |
+  An unofficial, native Android client for BTCPay Server, built with Jetpack Compose on the
+  Greenfield API. It is a community project. The BTCPay Server Foundation and the BTCPay Server
+  contributors do not make, endorse or support it.
+
+  - **Terminal**: keypad point of sale, tips, live checkout QR.
+  - **Invoices**: search, filters, refunds, payment requests, crowdfunds.
+  - **Wallets**: on-chain and Lightning, one Send screen for both.
+  - **Payouts**: pull payments, approvals, payout processors.
+  - **Admin**: stores, users, webhooks, email, server status.
+  - **Alerts**: payments, payouts and server notifications, checked by the phone.
+license: MIT
+tags: [bitcoin, lightning, point-of-sale]
+icon: ./.github/assets/icon.png
+metadata_sources: []
