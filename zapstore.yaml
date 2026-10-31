@@ -15,4 +15,8 @@ description: |
 license: MIT
 tags: [bitcoin, lightning, point-of-sale]
 icon: ./.github/assets/icon.png
+images:
+  - ./.github/assets/screenshots/checkout.png
+  - ./.github/assets/screenshots/invoices.png
+  - ./.github/assets/screenshots/wallet.png
 metadata_sources: []
