@@ -436,6 +436,10 @@ class StoreSettingsViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
+    /** True if the key has `btcpay.store.<policy>` on the bound store (ADM-2, same rule as MoreScreen). */
+    fun can(policy: String): Boolean =
+        bound.id?.let { graph.session.hasPermission("btcpay.store.$policy", it) } == true
+
 }
 
 @Composable
@@ -527,9 +531,18 @@ fun StoreSettingsScreen(
                         ThinDivider()
                         StoreReceiptSection(current, state.loaded?.receipt, viewModel, Modifier.arrive(3))
                         ThinDivider()
-                        StoreMenuSection(onNavigate, Modifier.arrive(4))
-                        ThinDivider()
-                        StoreDangerSection(current, viewModel, Modifier.arrive(5))
+                        // A view-only key sees no links and no actions that the server refuses (ADM-2).
+                        val manageStore = viewModel.can("canmodifystoresettings")
+                        StoreMenuSection(
+                            manageStore = manageStore,
+                            webhooks = viewModel.can("webhooks.canmodifywebhooks"),
+                            onNavigate = onNavigate,
+                            modifier = Modifier.arrive(4),
+                        )
+                        if (manageStore) {
+                            ThinDivider()
+                            StoreDangerSection(current, viewModel, Modifier.arrive(5))
+                        }
 
                         Spacer(Modifier.height(32.dp))
                     }
@@ -922,38 +935,49 @@ private fun StoreReceiptSection(
 }
 
 @Composable
-private fun StoreMenuSection(onNavigate: (Any) -> Unit, modifier: Modifier = Modifier) {
+private fun StoreMenuSection(
+    manageStore: Boolean,
+    webhooks: Boolean,
+    onNavigate: (Any) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     FormSection("More settings", modifier) {
-        NavRow(
-            title = "Payment methods",
-            subtitle = "Wallets, Lightning node, LNURL",
-            icon = Icons.Rounded.Payments,
-            onClick = { onNavigate(PaymentMethodsRoute) },
-        )
-        NavRow(
-            title = "Users and roles",
-            subtitle = "Who can see and manage this store",
-            icon = Icons.Rounded.Group,
-            onClick = { onNavigate(StoreUsersRoute) },
-        )
+        if (manageStore) {
+            NavRow(
+                title = "Payment methods",
+                subtitle = "Wallets, Lightning node, LNURL",
+                icon = Icons.Rounded.Payments,
+                onClick = { onNavigate(PaymentMethodsRoute) },
+            )
+            NavRow(
+                title = "Users and roles",
+                subtitle = "Who can see and manage this store",
+                icon = Icons.Rounded.Group,
+                onClick = { onNavigate(StoreUsersRoute) },
+            )
+        }
         NavRow(
             title = "Rates",
             subtitle = "Exchange rate source and spread",
             icon = Icons.Rounded.CurrencyExchange,
             onClick = { onNavigate(StoreRatesRoute) },
         )
-        NavRow(
-            title = "Email",
-            subtitle = "SMTP server used for store notifications",
-            icon = Icons.Rounded.Email,
-            onClick = { onNavigate(StoreEmailRoute) },
-        )
-        NavRow(
-            title = "Webhooks",
-            subtitle = "Push invoice events to another system",
-            icon = Icons.Rounded.Webhook,
-            onClick = { onNavigate(WebhooksRoute) },
-        )
+        if (manageStore) {
+            NavRow(
+                title = "Email",
+                subtitle = "SMTP server used for store notifications",
+                icon = Icons.Rounded.Email,
+                onClick = { onNavigate(StoreEmailRoute) },
+            )
+        }
+        if (webhooks) {
+            NavRow(
+                title = "Webhooks",
+                subtitle = "Push invoice events to another system",
+                icon = Icons.Rounded.Webhook,
+                onClick = { onNavigate(WebhooksRoute) },
+            )
+        }
         NavRow(
             title = "Apps",
             subtitle = "Point of sale and crowdfunding",
@@ -1055,11 +1079,12 @@ private fun NetworkFeeMode.feeModeLabel(): String = when (this) {
 private fun String.digits(): String = filter { it.isDigit() }
 
 /**
- * Digits and the first ',' or '.', for the durations. A digits-only filter
+ * Digits and the first ',' or '.', for the durations (also the payout
+ * processor interval, ADM-4). A digits-only filter
  * dropped the separator of a shown "1.5" hours, so one more digit made it
  * "155" hours, and a fraction could not be typed at all.
  */
-private fun String.decimalText(): String {
+internal fun String.decimalText(): String {
     val separator = indexOfFirst { it == ',' || it == '.' }
     return filterIndexed { index, c -> c.isDigit() || index == separator }
 }

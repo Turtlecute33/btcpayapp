@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -59,6 +60,7 @@ import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.FormProblem
 import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.SectionHeader
+import com.btcpayapp.ui.components.confirmDiscardChanges
 import com.btcpayapp.ui.components.maskedIfPrivate
 import com.btcpayapp.ui.components.rememberSpendGate
 import com.btcpayapp.ui.components.afterSpendGate
@@ -157,6 +159,12 @@ data class RefundState(
     /** The new pull payment id, until the composable opens it. */
     val opened: String? = null,
 ) {
+    /** True when the user changed the form from its loaded values (UX-10). */
+    val dirty: Boolean
+        get() = variant != RefundVariant.CurrentRate || customAmount.isNotBlank() ||
+            subtractPercentage.isNotBlank() || description.isNotBlank() ||
+            (invoice != null && (name != defaultRefundName(invoice.id) || customCurrency != invoice.currency))
+
     /** The payment method's currency, which decides whether a Custom refund is approved by the server. */
     val paymentCurrency: String
         get() = trigger?.paymentCurrency?.takeIf { it.isNotBlank() }
@@ -238,7 +246,7 @@ class RefundViewModel(
                         methodIds = paid,
                         selectedMethodId = paid.firstOrNull(),
                         customCurrency = data.currency,
-                        name = "Refund ${data.id.take(8)}",
+                        name = defaultRefundName(data.id),
                         loading = false,
                     )
                 }
@@ -342,6 +350,9 @@ class RefundViewModel(
 
 private const val OUTCOME_UNKNOWN = "The refund may have been created. Check Pull payments before you try again."
 
+/** The name that the form starts with. The form is dirty only when the name is different. */
+private fun defaultRefundName(invoiceId: String): String = "Refund ${invoiceId.take(8)}"
+
 /** Payout method ids collapse LNURL onto Lightning. */
 private fun String.toPayoutMethodId(): String =
     if (endsWith("-LNURL", ignoreCase = true)) substringBefore('-') + "-LN" else this
@@ -361,6 +372,7 @@ fun RefundScreen(
     // Leaving would cancel the create with the view model and lose its answer,
     // which says whether it is safe to try again. So back waits for it.
     BackHandler(enabled = state.submitting) {}
+    val back = confirmDiscardChanges(state.dirty && !state.submitting, onBack)
 
     // Opened from the state, not from the request: a callback held by the
     // view model goes to the old activity after a recreation.
@@ -370,7 +382,7 @@ fun RefundScreen(
         onCreated(pullPaymentId)
     }
 
-    AppScreen(title = "Refund", onBack = { if (!state.submitting) onBack() }) { padding ->
+    AppScreen(title = "Refund", onBack = { if (!state.submitting) back() }) { padding ->
         // A spinner rather than a skeleton: what is coming is a form, and a
         // placeholder that guessed the wrong shape would be worse than none.
         AnimatedSwap(state.loading, label = "refund") { loading ->
@@ -401,15 +413,17 @@ fun RefundScreen(
 
                 if (state.methodIds.size > 1) {
                     SectionHeader("Paid with")
-                    Row(
+                    // FlowRow: with 3 methods or a large font, the chips go onto a second line (UX-8).
+                    FlowRow(
                         Modifier.padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         state.methodIds.forEach { id ->
                             FilterChip(
                                 selected = id == state.selectedMethodId,
                                 onClick = { viewModel.selectMethod(id) },
-                                label = { Text(id) },
+                                label = { Text(id.friendlyName()) },
                             )
                         }
                     }

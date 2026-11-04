@@ -137,11 +137,12 @@ fun BtcPayApp(
             if (settingsLoaded && accountsLoaded) {
                 // The permission is denied until something asks for it, so
                 // `canPost()` alone is not enough. Asked once, and only
-                // when the user actually has an account and has left payment
-                // alerts switched on.
+                // when the user has an account, background checks are on and
+                // at least one alert is on.
                 NotificationPermissionRequest(
-                    enabled = !locked && vault.accounts.isNotEmpty() &&
-                        (settings.notifyPayments || settings.notifyPayouts),
+                    enabled = !locked && vault.accounts.isNotEmpty() && settings.backgroundSync &&
+                        (settings.notifyPayments || settings.notifyPayouts ||
+                            settings.notifyServerNotifications || settings.notifyServerIssues),
                     notifier = graph.notifier,
                 )
 
@@ -264,7 +265,7 @@ private fun NotificationPermissionRequest(enabled: Boolean, notifier: Notifier) 
     var asked by rememberSaveable { mutableStateOf(false) }
     val launcher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
-    ) { /* Denial is respected; Settings explains how to turn alerts back on. */ }
+    ) { /* Denial is respected; Settings shows that alerts are off and opens Android Settings. */ }
 
     LaunchedEffect(enabled, asked) {
         if (enabled && !asked && notifier.needsPermission()) {

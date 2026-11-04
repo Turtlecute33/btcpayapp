@@ -171,6 +171,11 @@ class PaymentRequestListViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
+    /** False hides New, Create one and Archive. The server refuses them with a 403 (ADM-3). */
+    val canModify: Boolean
+        get() = _state.value.storeId
+            ?.let { graph.session.hasPermission("btcpay.store.canmodifypaymentrequests", it) } == true
+
     fun setFilter(filter: PaymentRequestFilter) = _state.update { it.copy(filter = filter) }
 
     fun refresh() = load(refreshing = true)
@@ -277,11 +282,13 @@ fun PaymentRequestListScreen(
         onRefresh = viewModel::refresh,
         snackbarHostState = snackbarHostState,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onCreate,
-                icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
-                text = { Text("New") },
-            )
+            if (viewModel.canModify) {
+                ExtendedFloatingActionButton(
+                    onClick = onCreate,
+                    icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                    text = { Text("New") },
+                )
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -342,8 +349,8 @@ fun PaymentRequestListScreen(
                         },
                         description = "A payment request is a reusable page a customer can pay from.",
                         icon = Icons.AutoMirrored.Rounded.ReceiptLong,
-                        actionLabel = "Create one".takeIf { state.filter == PaymentRequestFilter.All },
-                        onAction = onCreate.takeIf { state.filter == PaymentRequestFilter.All },
+                        actionLabel = "Create one".takeIf { state.filter == PaymentRequestFilter.All && viewModel.canModify },
+                        onAction = onCreate.takeIf { state.filter == PaymentRequestFilter.All && viewModel.canModify },
                     )
 
                     PaymentRequestsPhase.Content -> LazyColumn(Modifier.fillMaxSize()) {
@@ -372,7 +379,7 @@ fun PaymentRequestListScreen(
                                             qrLink = link
                                         }
                                     },
-                                    onArchive = { viewModel.requestArchive(request) },
+                                    onArchive = { viewModel.requestArchive(request) }.takeIf { viewModel.canModify },
                                 )
                                 ThinDivider()
                             }
@@ -428,7 +435,8 @@ private fun PaymentRequestRow(
     onClick: () -> Unit,
     onCopyLink: () -> Unit,
     onShowQr: () -> Unit,
-    onArchive: () -> Unit,
+    /** Null hides Archive, for a key that cannot modify payment requests. */
+    onArchive: (() -> Unit)?,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -495,7 +503,7 @@ private fun PaymentRequestRow(
                         onShowQr()
                     },
                 )
-                if (!request.archived) {
+                if (!request.archived && onArchive != null) {
                     DropdownMenuItem(
                         text = { Text("Archive") },
                         leadingIcon = { Icon(Icons.Rounded.Archive, contentDescription = null) },

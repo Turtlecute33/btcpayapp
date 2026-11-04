@@ -634,7 +634,7 @@ class PaymentMethodEditViewModel(
  * it: the server replaces the config wholesale.
  */
 private fun MethodDraft.toConfigJson(): JsonObject? = when (this) {
-    is MethodDraft.Wallet -> derivationScheme.trim().takeIf { it.isNotEmpty() }?.let { scheme ->
+    is MethodDraft.Wallet -> derivationScheme.trim().takeIf { it.isNotEmpty() && !holdsPrivateKey(it) }?.let { scheme ->
         buildJsonObject {
             put("derivationScheme", scheme)
             label.trim().takeIf { it.isNotEmpty() }?.let { put("label", it) }
@@ -646,6 +646,12 @@ private fun MethodDraft.toConfigJson(): JsonObject? = when (this) {
         .takeIf { it.isNotEmpty() }
         ?.let { buildJsonObject { put("connectionString", it) } }
 }
+
+/** A Base58 extended private key (xprv, zprv, tprv, ...): SEC-2. */
+private val EXTENDED_PRIVATE_KEY = Regex("\\b[xyztuvYZUV]prv[1-9A-HJ-NP-Za-km-z]{100,}")
+
+/** True when the text holds an extended private key. It must not leave the phone (SEC-2). */
+private fun holdsPrivateKey(text: String): Boolean = EXTENDED_PRIVATE_KEY.containsMatchIn(text)
 
 /** Every key, so the server never falls back to a default of its own. */
 private fun lnurlJson(value: MethodConfig.Lnurl): JsonObject = buildJsonObject {
@@ -1098,6 +1104,7 @@ private fun DraftSection(state: PaymentMethodEditState, viewModel: PaymentMethod
 
 @Composable
 private fun WalletDraftFields(draft: MethodDraft.Wallet, state: PaymentMethodEditState, viewModel: PaymentMethodEditViewModel) {
+    val privateKey = remember(draft.derivationScheme) { holdsPrivateKey(draft.derivationScheme) }
     FormField(
         label = "Derivation scheme",
         value = draft.derivationScheme,
@@ -1105,6 +1112,7 @@ private fun WalletDraftFields(draft: MethodDraft.Wallet, state: PaymentMethodEdi
         singleLine = false,
         supportingText = "An output descriptor or an extended public key. Paste a watch-only " +
             "key here to keep the private keys off the server.",
+        error = if (privateKey) "This is a private key. Paste the extended public key." else null,
     )
     FormField(
         label = "Account key path",
@@ -1125,7 +1133,7 @@ private fun WalletDraftFields(draft: MethodDraft.Wallet, state: PaymentMethodEdi
     ) {
         OutlinedButton(
             onClick = viewModel::previewDraft,
-            enabled = !state.draftPreviewing && draft.derivationScheme.isNotBlank(),
+            enabled = !state.draftPreviewing && draft.derivationScheme.isNotBlank() && !privateKey,
         ) {
             Text("Preview")
         }
@@ -1453,7 +1461,13 @@ private fun MnemonicDialog(mnemonic: String, onDismiss: () -> Unit) {
                     if (shown) {
                         AppCard {
                             Column(Modifier.padding(12.dp)) {
-                                Text(text = mnemonic, style = MonospaceStyle)
+                                // Numbered words, so the user can check the order on paper (SEC-4).
+                                val numbered = remember(mnemonic) {
+                                    mnemonic.trim().split(Regex("\\s+"))
+                                        .mapIndexed { i, word -> "${i + 1}.\u00A0$word" }
+                                        .joinToString("   ")
+                                }
+                                Text(text = numbered, style = MonospaceStyle)
                             }
                         }
                     } else {

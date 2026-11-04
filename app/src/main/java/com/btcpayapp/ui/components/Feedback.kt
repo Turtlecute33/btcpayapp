@@ -36,6 +36,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -44,7 +47,6 @@ import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.ui.LocalAppGraph
 import com.btcpayapp.ui.theme.Motion
-import kotlinx.coroutines.launch
 
 /**
  * A spinner, for waits with no predictable shape.
@@ -263,7 +265,11 @@ fun ErrorBanner(
         exit = shrinkVertically(Motion.spatialSize) + fadeOut(Motion.effectsFast),
     ) {
         Card(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            // A live region, so that TalkBack speaks the failure (A11Y-1).
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+                .semantics { liveRegion = LiveRegionMode.Polite },
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.errorContainer,
                 contentColor = MaterialTheme.colorScheme.onErrorContainer,
@@ -349,7 +355,10 @@ fun FormProblem(
     ) {
         Text(
             text = shown.orEmpty(),
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = verticalPadding),
+            // A live region, as in [ErrorBanner] (A11Y-1).
+            modifier = Modifier
+                .padding(horizontal = 16.dp, vertical = verticalPadding)
+                .semantics { liveRegion = LiveRegionMode.Polite },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.error,
         )
@@ -380,7 +389,7 @@ fun NoStoreSelectedState(modifier: Modifier = Modifier) {
         error != null -> ErrorState(
             error = error,
             modifier = modifier,
-            onRetry = { graph.scope.launch { graph.session.refresh() } },
+            onRetry = graph.session::retry,
         )
         !storesLoaded -> LoadingState(modifier)
         else -> EmptyState(

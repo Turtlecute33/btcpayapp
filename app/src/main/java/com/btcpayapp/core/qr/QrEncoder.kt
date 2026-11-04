@@ -27,11 +27,17 @@ object QrEncoder {
 
     private val writer = QRCodeWriter()
 
+    /**
+     * The white border in modules. ISO 18004 asks for 4. The screen adds only
+     * a fixed padding, and a dark background starts after it (RCV-6).
+     */
+    internal const val QUIET_ZONE = 4
+
     fun encode(
         contents: String,
         foreground: Color = Color.Black,
         background: Color = Color.White,
-        quietZoneModules: Int = 2,
+        quietZoneModules: Int = QUIET_ZONE,
     ): ImageBitmap? {
         val matrix = matrix(contents, quietZoneModules) ?: return null
 
@@ -55,7 +61,7 @@ object QrEncoder {
      * The module grid, or null when [contents] is empty or too long for a QR
      * code. Split from [encode] so a JVM test can run it without a Bitmap.
      */
-    internal fun matrix(contents: String, quietZoneModules: Int = 2): BitMatrix? {
+    internal fun matrix(contents: String, quietZoneModules: Int = QUIET_ZONE): BitMatrix? {
         if (contents.isEmpty()) return null
         return runCatching {
             writer.encode(contents, BarcodeFormat.QR_CODE, 0, 0, hints(contents, quietZoneModules))

@@ -304,6 +304,15 @@ object Biometrics {
         title: String,
         subtitle: String?,
     ): AuthOutcome {
+        // With no screen lock, the auth-bound key cannot exist, so lockCipher()
+        // gives null. Tell the user to set a screen lock, not "try again".
+        if (!hasScreenLock(activity)) {
+            return AuthOutcome.Unavailable(
+                BiometricPrompt.ERROR_NO_DEVICE_CREDENTIAL,
+                "This phone has no screen lock. Set one in Android Settings to unlock the app.",
+            )
+        }
+
         // Off the main thread: on first use this generates a StrongBox-backed
         // AES-256 key, which routinely takes several hundred milliseconds to
         // over a second. On the caller's dispatcher — for the lock screen, the

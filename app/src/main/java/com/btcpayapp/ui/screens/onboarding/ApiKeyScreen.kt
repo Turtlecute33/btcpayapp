@@ -179,8 +179,11 @@ class ApiKeyViewModel(
     internal val lockOffer = AppLockOffer(graph)
 
     // Each change sends the key back through the check, so a note on screen
-    // is always about the key and the access shown with it.
-    fun setApiKey(value: String) = _state.update { it.copy(apiKey = value.trim(), error = null, review = null) }
+    // is always about the key and the access shown with it. Only printable
+    // ASCII stays: a space, line break or invisible character from a paste
+    // makes the HTTP header fail, and the user sees a wrong cause (NET-1).
+    fun setApiKey(value: String) =
+        _state.update { it.copy(apiKey = value.filter { c -> c in '!'..'~' }, error = null, review = null) }
 
     fun setAccess(value: PermissionSet) = _state.update { it.copy(access = value, review = null) }
 
@@ -345,7 +348,7 @@ fun ApiKeyScreen(
 
     // The field text as last entered, spaces and all. A paste, by the button
     // below or by the system menu, leaves exactly the clip here, while the
-    // view model keeps only the trimmed key, so this is the text to clear.
+    // view model keeps only the cleaned key, so this is the text to clear.
     // In memory only: a key never goes into saved state.
     var entered by remember { mutableStateOf<String?>(null) }
     val enterKey: (String) -> Unit = { text ->
@@ -391,8 +394,14 @@ fun ApiKeyScreen(
             Step(
                 2,
                 "Create the key",
+                // Chromium browsers do not open .onion addresses (NET-2).
                 detail = "Approve the request on your server. Then copy the key at the top of the " +
-                    "page. It shows only once.",
+                    "page. It shows only once." +
+                    if (baseUrl.serverHost().endsWith(".onion", ignoreCase = true)) {
+                        " Open this page in Tor Browser, or create the key on the server."
+                    } else {
+                        ""
+                    },
                 modifier = Modifier.arrive(1),
             )
             FilledTonalButton(

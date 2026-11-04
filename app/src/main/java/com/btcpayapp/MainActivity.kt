@@ -60,6 +60,9 @@ class MainActivity : FragmentActivity() {
 
         super.onCreate(savedInstanceState)
 
+        // Other apps cannot draw over the spend, approve and wipe controls (HARD-1, SEC-UI-1).
+        window.setHideOverlayWindows(true)
+
         // The session's store, user and server requests serve only the UI.
         // Started here rather than when the graph is built, so a process
         // started for a sync job or at boot does not send them.

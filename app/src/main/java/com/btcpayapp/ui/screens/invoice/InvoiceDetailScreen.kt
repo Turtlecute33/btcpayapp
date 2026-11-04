@@ -161,6 +161,14 @@ class InvoiceDetailViewModel(
 
     fun dismissError() = _state.update { it.copy(error = null) }
 
+    /** True when the key can make a refund for [invoice]. The refund route needs this permission. */
+    fun canRefund(invoice: InvoiceData): Boolean =
+        invoice.offersRefund &&
+            graph.session.hasPermission(
+                "btcpay.store.cancreatenonapprovedpullpayments",
+                invoice.storeId.ifBlank { null },
+            )
+
     /**
      * The name of the store [invoice] is in, for a confirmation that must say
      * whose invoice it changes. Found by the invoice's own store id: the
@@ -176,13 +184,15 @@ class InvoiceDetailViewModel(
         if (_state.value.working) return
         _state.update { it.copy(working = true, error = null) }
         viewModelScope.launch {
+            // Reload only after a change that the server accepted. A reload
+            // after a refused change clears its error before the user sees it.
             runCatching { block(graph.session.requireApi(), storeId.await()) }
+                .onSuccess { load() }
                 .onFailure { failure ->
                     val error = failure.asApiException()
                     _state.update { it.copy(error = error) }
                 }
             _state.update { it.copy(working = false) }
-            load()
         }
     }
 }
@@ -248,7 +258,7 @@ fun InvoiceDetailScreen(
                         },
                     )
                 }
-                if (invoice?.offersRefund == true) {
+                if (invoice != null && viewModel.canRefund(invoice)) {
                     DropdownMenuItem(
                         text = { Text("Refund") },
                         leadingIcon = { Icon(Icons.AutoMirrored.Rounded.Undo, contentDescription = null) },
@@ -367,7 +377,7 @@ fun InvoiceDetailScreen(
                         }
                     }
 
-                    if (invoice.offersRefund) {
+                    if (viewModel.canRefund(invoice)) {
                         Column(Modifier.fillMaxWidth().arrive(4)) {
                             Spacer(Modifier.height(16.dp))
                             OutlinedButton(

@@ -7,6 +7,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.btcpayapp.core.sync.SyncScheduler
 import com.btcpayapp.core.util.Dates
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -70,13 +71,20 @@ class BtcPayApplication : Application() {
             // would be dropped, and background sync never armed for anyone who
             // installed the app and did not visit Settings.
             graph.settings.loaded.first { it }
+            // With no account, each run is a cold start that does nothing
+            // (SYNC-3). Wait for a real vault read: an unreadable vault looks
+            // empty and must not cancel a merchant's alerts.
+            graph.accounts.loaded.first { it }
+            val hasAccounts = graph.accounts.vault.map { it.accounts.isNotEmpty() }
             graph.settings.settings
                 // Only the three fields that affect the job. Rescheduling on
                 // every unrelated settings write (theme, privacy mode, the
                 // terminal's remembered currency) would replace the JobInfo and
                 // restart its periodic window each time, pushing the next sync
                 // out indefinitely for anyone toggling switches.
-                .map { SyncPreferences(it.backgroundSync, it.syncIntervalMinutes, it.syncOnUnmeteredOnly) }
+                .combine(hasAccounts) { s, any ->
+                    SyncPreferences(s.backgroundSync && any, s.syncIntervalMinutes, s.syncOnUnmeteredOnly)
+                }
                 .distinctUntilChanged()
                 .collect { settings ->
                     if (settings.backgroundSync) {

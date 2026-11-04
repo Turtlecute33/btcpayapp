@@ -47,6 +47,7 @@ import com.btcpayapp.ui.components.FormDropdown
 import com.btcpayapp.ui.components.FormField
 import com.btcpayapp.ui.components.FormSwitch
 import com.btcpayapp.ui.components.SectionHeader
+import com.btcpayapp.ui.components.confirmDiscardChanges
 import com.btcpayapp.ui.components.NoStoreSelectedState
 import com.btcpayapp.ui.screens.store.speedLabel
 import com.btcpayapp.ui.screens.store.speedPolicyOptions
@@ -235,7 +236,14 @@ fun CreateInvoiceScreen(
 
     val validation = state.error as? ApiException.Validation
 
-    AppScreen(title = "New invoice", onBack = onBack) { padding ->
+    // A back gesture must not lose a filled form without a prompt (UX-10).
+    val dirty = state.amount != prefillAmount.orEmpty() || state.orderId.isNotBlank() ||
+        state.itemDescription.isNotBlank() || state.buyerEmail.isNotBlank() || state.notes.isNotBlank() ||
+        state.expirationMinutes.isNotBlank() || state.redirectUrl.isNotBlank() || state.topUp ||
+        state.speedPolicy != null || state.selectedMethods.isNotEmpty()
+    val back = confirmDiscardChanges(dirty && !state.creating, onBack)
+
+    AppScreen(title = "New invoice", onBack = back) { padding ->
         // Until the store is here there is no currency to choose and nothing
         // to submit. This says why, as the Terminal does: on a cold start from
         // the "New invoice" shortcut the store list may still be loading, or

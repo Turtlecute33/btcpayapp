@@ -734,6 +734,9 @@ fun WalletScreen(
                     description = "This store has neither an on-chain wallet nor a Lightning node. " +
                         "Add a derivation scheme or a node in the store's payment settings first.",
                     icon = Icons.Rounded.AccountBalanceWallet,
+                    // A pull does not work here, because nothing scrolls (UX-2).
+                    actionLabel = "Retry",
+                    onAction = viewModel::refresh,
                 )
 
                 WalletPhase.Content -> LazyColumn(Modifier.fillMaxSize().padding(padding)) {

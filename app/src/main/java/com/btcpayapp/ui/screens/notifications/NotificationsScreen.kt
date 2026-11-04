@@ -92,6 +92,9 @@ import kotlinx.coroutines.launch
 
 private const val PAGE_SIZE = 50
 
+/** At most this many pages in one "mark all", for a server that does not keep the marks. */
+private const val MAX_MARK_PAGES = 20
+
 /**
  * What the body of the screen is showing.
  *
@@ -230,11 +233,20 @@ class NotificationsViewModel(private val graph: AppGraph) : ViewModel() {
                 return@launch
             }
             // There is no bulk endpoint, so this is one call per unseen item.
+            // The list shows only one page, so the next unseen page is read
+            // again until none is left (ADM-5). A failure stops the loop, and
+            // so does a page limit, for a server that does not keep the marks.
             var failures = 0
-            unseen.chunked(4).forEach { batch ->
-                failures += batch.map { item -> async {
-                    attempt { api.markNotification(item.id, true) }
-                } }.awaitAll().count { it.isFailure }
+            var page = unseen
+            var pages = 0
+            while (page.isNotEmpty() && pages++ < MAX_MARK_PAGES) {
+                page.chunked(4).forEach { batch ->
+                    failures += batch.map { item -> async {
+                        attempt { api.markNotification(item.id, true) }
+                    } }.awaitAll().count { it.isFailure }
+                }
+                if (failures > 0) break
+                page = attempt { api.notifications(seen = false, take = PAGE_SIZE) }.getOrNull() ?: break
             }
             if (failures > 0) {
                 val what = TextUtil.plural(failures, "notification", "notifications")

@@ -99,7 +99,8 @@ data class TransactionDetailState(
     val dirty: Boolean
         get() {
             val loaded = transaction ?: return false
-            return comment != loaded.comment || labels != loaded.labels.map { it.text }
+            // A typed label that is not added yet is also an edit (TX-2).
+            return comment != loaded.comment || labels != loaded.labels.map { it.text } || newLabel.isNotBlank()
         }
 }
 
@@ -124,6 +125,14 @@ class TransactionDetailViewModel(
      * screen: an account switch rebuilds every screen.
      */
     val privateRoute: Boolean = graph.session.activeAccount.value?.let { it.isOnion || it.proxy != null } == true
+
+    /**
+     * False makes the comment and labels read-only, because the server refuses
+     * a change with a 403 (TX-1). On 2.2 and 2.3, `canmodifystoresettings`
+     * covers this policy (see [com.btcpayapp.data.session.Permissions]).
+     */
+    val canEdit: Boolean
+        get() = storeId?.let { graph.session.hasPermission("btcpay.store.canmanagewallettransactions", it) } == true
 
     private val _state = MutableStateFlow(TransactionDetailState())
     val state = _state.asStateFlow()
@@ -180,6 +189,8 @@ class TransactionDetailViewModel(
 
     fun save() {
         val storeId = storeId ?: return fail(ApiException.NoAccount())
+        // Send a typed label that is not added yet (TX-2).
+        addLabel()
         val snapshot = _state.value
         if (snapshot.saving) return
 
@@ -279,8 +290,10 @@ fun TransactionDetailScreen(
                     Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = "View in explorer")
                 }
             }
-            IconButton(onClick = viewModel::save, enabled = state.dirty && !state.saving) {
-                Icon(Icons.Rounded.Check, contentDescription = "Save")
+            if (viewModel.canEdit) {
+                IconButton(onClick = viewModel::save, enabled = state.dirty && !state.saving) {
+                    Icon(Icons.Rounded.Check, contentDescription = "Save")
+                }
             }
         },
     ) { padding ->
@@ -376,6 +389,7 @@ fun TransactionDetailScreen(
                             value = state.comment,
                             onValueChange = viewModel::setComment,
                             placeholder = "Only you and your store's users can see this",
+                            enabled = viewModel.canEdit,
                             singleLine = false,
                             imeAction = ImeAction.Default,
                         )
@@ -419,6 +433,7 @@ fun TransactionDetailScreen(
                                         InputChip(
                                             selected = false,
                                             onClick = { viewModel.removeLabel(label) },
+                                            enabled = viewModel.canEdit,
                                             label = { Text(label) },
                                             modifier = Modifier.animateItem(
                                                 fadeInSpec = Motion.effects,
@@ -442,11 +457,13 @@ fun TransactionDetailScreen(
                             label = "Add a label",
                             value = state.newLabel,
                             onValueChange = viewModel::setNewLabel,
+                            enabled = viewModel.canEdit,
                             imeAction = ImeAction.Done,
+                            onImeAction = viewModel::addLabel,
                             trailingIcon = {
                                 IconButton(
                                     onClick = viewModel::addLabel,
-                                    enabled = state.newLabel.isNotBlank(),
+                                    enabled = viewModel.canEdit && state.newLabel.isNotBlank(),
                                 ) {
                                     Icon(Icons.Rounded.Add, contentDescription = "Add label")
                                 }

@@ -24,12 +24,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.btcpayapp.AppGraph
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.data.api.ApiException
+import com.btcpayapp.data.api.asApiException
 import com.btcpayapp.data.api.dto.PullPaymentData
 import com.btcpayapp.data.api.endpoints.pullPayments
 import com.btcpayapp.ui.appViewModel
@@ -44,6 +47,7 @@ import com.btcpayapp.ui.components.SkeletonList
 import com.btcpayapp.ui.components.StatusPill
 import com.btcpayapp.ui.components.ThinDivider
 import com.btcpayapp.ui.theme.AppTheme
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -72,6 +76,13 @@ class PullPaymentListViewModel(private val graph: AppGraph) : ViewModel() {
     private val _state = MutableStateFlow(PullPaymentListState())
     val state = _state.asStateFlow()
 
+    /** False hides New and Create one. The server refuses a create with a 403 (ADM-3). */
+    val canCreate: Boolean
+        get() = graph.session.activeStore.value?.id
+            ?.let { graph.session.hasPermission(CREATE_PULL_PAYMENTS, it) } == true
+
+    private var loadJob: Job? = null
+
     init {
         viewModelScope.launch {
             graph.session.activeStore
@@ -91,12 +102,23 @@ class PullPaymentListViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun refresh() = load(refreshing = true)
 
+    /**
+     * A quiet reload when the screen comes back, for example from a new or
+     * archived pull payment (FUNDS-1). Ignored while a load runs.
+     */
+    fun reload() {
+        val current = _state.value
+        if (!current.loading && !current.refreshing) load()
+    }
+
     fun dismissError() = _state.update { it.copy(error = null) }
 
+    /** The last call wins: an older answer cannot replace a newer one (FUNDS-5). */
     private fun load(refreshing: Boolean = false) {
         val store = graph.session.activeStore.value?.id ?: return
         val includeArchived = _state.value.includeArchived
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _state.update {
                 it.copy(
                     loading = !refreshing && it.pullPayments.isEmpty(),
@@ -115,8 +137,7 @@ class PullPaymentListViewModel(private val graph: AppGraph) : ViewModel() {
                         it.copy(
                             loading = false,
                             refreshing = false,
-                            error = failure as? ApiException
-                                ?: ApiException.Transport(failure.message ?: "Unexpected failure"),
+                            error = failure.asApiException(),
                         )
                     }
                 }
@@ -133,17 +154,21 @@ fun PullPaymentListScreen(
     val viewModel = appViewModel { PullPaymentListViewModel(it) }
     val state by viewModel.state.collectAsStateWithLifecycle()
 
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { viewModel.reload() }
+
     AppScreen(
         title = "Pull payments",
         onBack = onBack,
         refreshing = state.refreshing,
         onRefresh = viewModel::refresh,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = onCreate,
-                icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
-                text = { Text("New") },
-            )
+            if (viewModel.canCreate) {
+                ExtendedFloatingActionButton(
+                    onClick = onCreate,
+                    icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                    text = { Text("New") },
+                )
+            }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
@@ -191,8 +216,8 @@ fun PullPaymentListScreen(
                         title = "No pull payments yet",
                         description = "A pull payment is a link someone else redeems to claim funds from this store.",
                         icon = Icons.Rounded.Redeem,
-                        actionLabel = "Create one",
-                        onAction = onCreate,
+                        actionLabel = "Create one".takeIf { viewModel.canCreate },
+                        onAction = onCreate.takeIf { viewModel.canCreate },
                     )
 
                     PullPaymentsPhase.Content -> LazyColumn(Modifier.fillMaxSize()) {
@@ -267,6 +292,9 @@ private fun PullPaymentRow(pullPayment: PullPaymentData, onClick: () -> Unit) {
         )
     }
 }
+
+/** The lowest create policy. Permissions.covers maps manage and create to it. */
+private const val CREATE_PULL_PAYMENTS = "btcpay.store.cancreatenonapprovedpullpayments"
 
 private fun describeWindow(pullPayment: PullPaymentData): String {
     val starts = pullPayment.startsAt?.let { "From ${Dates.date(it)}" }

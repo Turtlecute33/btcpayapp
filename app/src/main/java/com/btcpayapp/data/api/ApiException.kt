@@ -3,6 +3,7 @@ package com.btcpayapp.data.api
 import com.btcpayapp.core.net.TlsProblem
 import com.btcpayapp.data.api.dto.ApiValidationError
 import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.SerializationException
 
 /**
  * Everything the API layer can fail with, modelled so the UI can react
@@ -135,6 +136,8 @@ fun ApiException.mayHaveGoneThrough(): Boolean =
  */
 fun Throwable.asApiException(): ApiException {
     if (this is CancellationException) throw this
+    // A decode message can quote the JSON input (it can hold a secret), so show fixed text.
+    if (this is SerializationException) return ApiException.Decoding(this)
     return this as? ApiException ?: ApiException.Transport(message ?: "Unexpected failure")
 }
 

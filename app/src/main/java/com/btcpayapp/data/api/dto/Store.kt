@@ -268,6 +268,11 @@ data class StoreUserRequest(
     val id: String,
     /** `Owner`, `Manager`, `Employee`, `Guest`, or a custom role id. */
     val storeRole: String,
+    /**
+     * The same role under the key of 2.4.4 and later (see [StoreUserData]). A
+     * server ignores the key that it does not know (API-2).
+     */
+    val roleId: String = storeRole,
     val requireInvitation: Boolean? = null,
 )
 

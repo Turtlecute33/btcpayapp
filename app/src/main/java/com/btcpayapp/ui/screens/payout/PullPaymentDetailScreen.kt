@@ -118,6 +118,10 @@ class PullPaymentDetailViewModel(
     private val bound = StoreBinding(graph.session)
     private val storeId: String? get() = bound.id
 
+    /** False hides the Archive menu. The server refuses an archive with a 403 (ADM-3). */
+    val canArchive: Boolean
+        get() = storeId?.let { graph.session.hasPermission("btcpay.store.canarchivepullpayments", it) } == true
+
     private val _state = MutableStateFlow(PullPaymentDetailState())
     val state = _state.asStateFlow()
 
@@ -236,19 +240,22 @@ fun PullPaymentDetailScreen(
             ) {
                 Icon(Icons.Rounded.Share, contentDescription = "Share claim link")
             }
-            IconButton(onClick = { menuOpen = true }) {
-                Icon(Icons.Rounded.MoreVert, contentDescription = "More actions")
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Archive") },
-                    leadingIcon = { Icon(Icons.Rounded.Archive, contentDescription = null) },
-                    enabled = pullPayment?.archived == false,
-                    onClick = {
-                        menuOpen = false
-                        viewModel.requestArchive()
-                    },
-                )
+            // Archive is the only item, so the menu goes when the key cannot archive.
+            if (viewModel.canArchive) {
+                IconButton(onClick = { menuOpen = true }) {
+                    Icon(Icons.Rounded.MoreVert, contentDescription = "More actions")
+                }
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Archive") },
+                        leadingIcon = { Icon(Icons.Rounded.Archive, contentDescription = null) },
+                        enabled = pullPayment?.archived == false,
+                        onClick = {
+                            menuOpen = false
+                            viewModel.requestArchive()
+                        },
+                    )
+                }
             }
         },
     ) { padding ->

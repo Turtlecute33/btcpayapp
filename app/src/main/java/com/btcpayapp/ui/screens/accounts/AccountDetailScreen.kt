@@ -83,6 +83,7 @@ import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.ui.screens.settings.rememberOwnerCheck
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -235,27 +236,46 @@ class AccountDetailViewModel(
      */
     fun revokeAndRemove() {
         val account = _state.value.account ?: return
+        if (refusedWhileBusy(account)) return
         viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null) }
-            val revoked = runCatching { BtcPayApi(graph.client, account.toEndpoint()).revokeCurrentApiKey() }
-            revoked.exceptionOrNull()?.let { failure ->
-                val error = failure.asApiException()
-                // A changed server key blocks the revocation too. The notice it
-                // raises is the way to trust the new key and try again.
-                _state.update { it.copy(busy = false, error = error, keyChanged = it.keyChanged || error.isKeyChanged()) }
-                return@launch
+            // NonCancellable: a back press during the call must not leave a
+            // revoked key on an account that stays (ACC-4).
+            withContext(NonCancellable) {
+                _state.update { it.copy(busy = true, error = null) }
+                val revoked = runCatching { BtcPayApi(graph.client, account.toEndpoint()).revokeCurrentApiKey() }
+                // 401: the server already does not accept the key, so remove it (ACC-5).
+                revoked.exceptionOrNull()?.takeIf { it !is ApiException.Unauthorized }?.let { failure ->
+                    val error = failure.asApiException()
+                    // A changed server key blocks the revocation too. The notice it
+                    // raises is the way to trust the new key and try again.
+                    _state.update { it.copy(busy = false, error = error, keyChanged = it.keyChanged || error.isKeyChanged()) }
+                    return@withContext
+                }
+                remove(account.id, "The key is revoked, but the account could not be removed from this " +
+                    "phone. Use Remove without revoking.")
             }
-            remove(account.id, "The key is revoked, but the account could not be removed from this " +
-                "phone. Use Remove without revoking.")
         }
     }
 
     fun removeWithoutRevoking() {
         val account = _state.value.account ?: return
+        if (refusedWhileBusy(account)) return
         viewModelScope.launch {
             _state.update { it.copy(busy = true) }
             remove(account.id, "Could not remove the account. Check device storage and try again.")
         }
+    }
+
+    /**
+     * Removing the active account switches to another account, which clears
+     * the screens of a payment in flight. So refuse it as
+     * [com.btcpayapp.data.session.SessionManager.selectAccount] does (ACC-1).
+     */
+    private fun refusedWhileBusy(account: Account): Boolean {
+        if (account.id != graph.session.activeAccount.value?.id) return false
+        val text = graph.session.spendBlock() ?: return false
+        _state.update { it.copy(error = ApiException.Transport(text)) }
+        return true
     }
 
     /**

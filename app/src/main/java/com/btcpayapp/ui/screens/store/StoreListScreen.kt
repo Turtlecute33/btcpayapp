@@ -140,7 +140,14 @@ class StoreListViewModel(private val graph: AppGraph) : ViewModel() {
             }.onSuccess { created ->
                 graph.session.refresh()
                 // A new store is almost always the one you want to work in next.
-                val problem = graph.session.selectStore(created.id)
+                // Select it only when the refresh got it: an id that is not in the
+                // list would switch the store later with no action (STATE-5).
+                val listed = graph.session.stores.value.any { it.id == created.id }
+                val problem = if (listed) {
+                    graph.session.selectStore(created.id)
+                } else {
+                    "Store created. Pull to refresh to open it."
+                }
                 _state.update {
                     it.copy(creating = false, showCreate = false, done = problem == null, message = problem)
                 }

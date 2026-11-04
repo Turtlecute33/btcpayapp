@@ -84,6 +84,7 @@ import com.btcpayapp.ui.components.SuccessCheck
 import com.btcpayapp.ui.components.groupedAddress
 import com.btcpayapp.ui.components.rememberLast
 import com.btcpayapp.ui.components.rememberSpendGate
+import com.btcpayapp.ui.screens.lightning.CHANNEL_FEE_CEILING
 import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
 import com.btcpayapp.ui.screens.wallet.formatAmountInput
 import com.btcpayapp.ui.screens.wallet.parseAmountToBtc
@@ -227,6 +228,9 @@ internal fun reviewOf(
     val warning = listOfNotNull(
         "This fee rate is more than twice the next-block estimate."
             .takeIf { nextBlockRate != null && nextBlockRate > 0 && rate > 2 * nextBlockRate },
+        // No estimate: the fixed ceiling of the channel open catches the slip (FUNDS-2).
+        "This fee rate is more than $CHANNEL_FEE_CEILING sat/vB."
+            .takeIf { (nextBlockRate == null || nextBlockRate <= 0) && rate > CHANNEL_FEE_CEILING.toDouble() },
         "Not all of the fee is taken from the amount. Check the total.".takeIf { subtractFee && !feeFromAmount },
         "The fee is more than 10% of the amount.".takeIf { feeSats * 10 > amountSats },
     ).joinToString("\n").ifEmpty { null }
@@ -536,6 +540,13 @@ class WalletSendViewModel(
      * watch-only store and an under-scoped key identically, so both land here.
      */
     fun review() {
+        // A typed bitcoin: URI stays whole in the field (FUNDS-3), so it is opened here.
+        _state.value.destination.trim().let { typed ->
+            val payload = ScanParser.parse(typed)
+            if (cryptoCode.equals("BTC", ignoreCase = true) && payload is ScannedPayload.Bip21 && payload.address.isNotBlank()) {
+                applyScanned(typed)
+            }
+        }
         val snapshot = _state.value
         if (snapshot.phase != OnChainPhase.Form || !snapshot.spendable || snapshot.feeRateError != null) return
         val storeId = storeId ?: return

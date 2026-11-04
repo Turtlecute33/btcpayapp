@@ -1,6 +1,8 @@
 package com.btcpayapp.ui.screens.settings
 
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -42,6 +44,7 @@ import com.btcpayapp.core.net.ORBOT_PORT_RISK
 import com.btcpayapp.core.security.AuthOutcome
 import com.btcpayapp.core.security.BiometricAvailability
 import com.btcpayapp.core.security.Biometrics
+import com.btcpayapp.core.util.safeStartActivity
 import com.btcpayapp.data.api.ApiException
 import com.btcpayapp.data.api.attempt
 import com.btcpayapp.data.model.AppLockMode
@@ -68,6 +71,9 @@ class AppSettingsViewModel(private val graph: AppGraph) : ViewModel() {
 
     val settings = graph.settings.settings
     val vault = graph.accounts.vault
+
+    /** False when Android blocks this app's notifications, so no alert can show. */
+    fun canPost(): Boolean = graph.notifier.canPost()
 
     private val _wiped = MutableStateFlow(false)
     val wiped = _wiped.asStateFlow()
@@ -122,9 +128,11 @@ fun AppSettingsScreen(
     // the phone's settings, and the switches must follow what they did there.
     var biometrics by remember { mutableStateOf(Biometrics.availability(context)) }
     var screenLock by remember { mutableStateOf(Biometrics.hasScreenLock(context)) }
+    var canPost by remember { mutableStateOf(viewModel.canPost()) }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         biometrics = Biometrics.availability(context)
         screenLock = Biometrics.hasScreenLock(context)
+        canPost = viewModel.canPost()
     }
     val biometricsUsable = biometrics == BiometricAvailability.Available
     // Confirm payments is on, but nothing can confirm one.
@@ -322,6 +330,21 @@ fun AppSettingsScreen(
                         },
                 )
 
+                // Sync skips each run when it cannot post (SYNC-2), so tell
+                // the user and give the way to fix it.
+                if (settings.backgroundSync && !canPost) {
+                    NavRow(
+                        title = "Notifications are off for this app",
+                        subtitle = "You get no alerts. Open Android Settings to turn them on.",
+                        onClick = {
+                            context.safeStartActivity(
+                                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+                            )
+                        },
+                    )
+                }
+
                 FormDropdown(
                     label = "How often",
                     options = SYNC_INTERVALS,
@@ -371,7 +394,7 @@ fun AppSettingsScreen(
                     checked = settings.notifyServerIssues,
                     onCheckedChange = { value -> viewModel.update { it.copy(notifyServerIssues = value) } },
                     enabled = settings.backgroundSync,
-                    description = "Warns when your server stops answering or falls behind the chain.",
+                    description = "Warns when your server stops answering for an hour or more.",
                 )
             }
 

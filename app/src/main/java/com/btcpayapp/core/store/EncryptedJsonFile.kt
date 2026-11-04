@@ -190,7 +190,8 @@ internal class EncryptedJsonFile<T>(
         }
         return try {
             val sealed = file.readBytes()
-            if (sealed.isEmpty()) return ReadOutcome.Value(defaultValue)
+            // An empty file is not a fresh install: decrypt fails and the
+            // file goes to quarantine, so the app lock stays on (STORE-1).
             val plaintext = decrypt(sealed)
             val value = try {
                 json.decodeFromString(serializer, plaintext.toString(Charsets.UTF_8))

@@ -28,8 +28,17 @@ class ScanSafetyTest {
         assertTrue(ScanParser.parse("bitcoin:address?req-feature=true") is ScannedPayload.Unknown)
     }
     @Test fun `invalid BIP21 amounts are rejected`() {
-        for (amount in listOf("-1", "garbage", "0.000000001", "1e2147483647")) {
+        for (amount in listOf("-1", "garbage", "0.000000001", "1e2147483647", "1e2", "1E-3", "+1", ".", "")) {
             assertTrue(ScanParser.parse("bitcoin:address?amount=$amount") is ScannedPayload.Unknown)
+        }
+    }
+    @Test fun `repeated BIP21 amount is rejected`() {
+        assertTrue(ScanParser.parse("bitcoin:address?amount=0.0001&amount=1") is ScannedPayload.Unknown)
+    }
+    @Test fun `valid BIP21 amounts are read`() {
+        for ((text, expected) in listOf("1" to "1", "0.5" to "0.5", ".5" to "0.5", "2." to "2", "0.00000001" to "0.00000001")) {
+            val result = ScanParser.parse("bitcoin:address?amount=$text") as ScannedPayload.Bip21
+            assertEquals(0, result.amountBtc?.compareTo(expected.toBigDecimal()))
         }
     }
 }

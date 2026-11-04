@@ -186,8 +186,11 @@ fun SendScreen(
     val paying = lightningState?.let { it.sending || it.tracking != null } == true ||
         (onChainState != null && onChainState.phase != OnChainPhase.Form)
 
-    /** Files a destination under the rail that can actually pay it. */
-    fun receive(text: String) {
+    /**
+     * Files a destination under the rail that can actually pay it. [old]
+     * is the old text of the field that changed, null for a scan or a prefill.
+     */
+    fun receive(text: String, old: String? = null) {
         if (paying) return
         val payload = ScanParser.parse(text)
         notice = null
@@ -231,9 +234,13 @@ fun SendScreen(
         // The destination is handed over whole unless it is an envelope worth
         // opening. `applyScanned` takes the amount out of a BIP21 as well as the
         // address, which is the entire reason to unwrap one.
+        // A keystroke is never unwrapped, so a typed URI keeps its scheme
+        // (FUNDS-3). A paste adds more than one character. The on-chain review
+        // opens a URI that stays whole.
+        val keystroke = old != null && text.length - old.length <= 1
         when (target) {
             SendRail.OnChain ->
-                if (payload is ScannedPayload.Bip21 && payload.address.isNotBlank()) {
+                if (payload is ScannedPayload.Bip21 && payload.address.isNotBlank() && !keystroke) {
                     onChainViewModel?.applyScanned(text)
                 } else {
                     onChainViewModel?.setDestination(text)
@@ -409,7 +416,7 @@ fun SendScreen(
                                         value = onChainState.destination,
                                         placeholder = "Address or bitcoin: URI",
                                         enabled = onChainState.phase == OnChainPhase.Form,
-                                        onValueChange = ::receive,
+                                        onValueChange = { receive(it, old = onChainState.destination) },
                                         onScan = { onScan(scanPurpose(hasOnChain, hasLightning)) },
                                     )
                                     // The other half is only worth mentioning to
@@ -437,7 +444,7 @@ fun SendScreen(
                                         value = lightningState.bolt11,
                                         placeholder = "lnbc…",
                                         enabled = !lightningState.sending,
-                                        onValueChange = ::receive,
+                                        onValueChange = { receive(it, old = lightningState.bolt11) },
                                         onScan = { onScan(scanPurpose(hasOnChain, hasLightning)) },
                                     )
                                     val alternative = unified?.takeIf { hasOnChain }

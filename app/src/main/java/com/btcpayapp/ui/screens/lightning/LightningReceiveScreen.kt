@@ -164,8 +164,9 @@ class LightningReceiveViewModel(
             return
         }
         val minutes = snapshot.expiryMinutes.trim().toIntOrNull()
-        if (minutes == null || minutes <= 0) {
-            _state.update { it.copy(formError = "Expiry must be a number of minutes.") }
+        // Up to one year, so that `minutes * 60` cannot overflow the Int (RCV-2).
+        if (minutes == null || minutes !in 1..525_600) {
+            _state.update { it.copy(formError = "Expiry must be from 1 to 525600 minutes.") }
             return
         }
 
@@ -486,8 +487,9 @@ private fun InvoiceState(
         // A customer is reading this code, so the display stays on. As a
         // customer screen the idle lock waits 15 minutes without a touch, so
         // the app does not lock while the customer pays. Once the invoice
-        // cannot be paid, the normal screen timeout applies again.
-        if (waiting) KeepScreenOn(customerFacing = true)
+        // cannot be paid, the normal screen timeout applies again. The user
+        // setting applies here too, as on Checkout (RCV-3).
+        if (waiting && LocalSettings.current.terminalKeepScreenOn) KeepScreenOn(customerFacing = true)
 
         Spacer(Modifier.height(16.dp))
         // The code itself has its own entrance — see `QrCode` — so the rest of
@@ -562,7 +564,7 @@ private fun InvoiceState(
  * recomposes once, when the code has to go, and not every second.
  */
 @Composable
-private fun isPast(expiresAt: Long): Boolean {
+internal fun isPast(expiresAt: Long): Boolean {
     val past by produceState(System.currentTimeMillis() / 1000 >= expiresAt, expiresAt) {
         // Clamped, so an absurd value from the server cannot overflow the millis.
         val remainingMs = expiresAt.coerceIn(0, Long.MAX_VALUE / 1000) * 1000 - System.currentTimeMillis()

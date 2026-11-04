@@ -248,16 +248,24 @@ class TerminalViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    fun press(digit: Char) = _state.update { it.typed(digit) }
+    /**
+     * Applies [change] to the entry, but not while a charge runs. The charge
+     * uses the amount from before the request, so the screen must keep that
+     * amount (UX-6).
+     */
+    private fun editEntry(change: (TerminalState) -> TerminalState) =
+        _state.update { if (it.creating) it else change(it) }
 
-    fun backspace() = _state.update { it.copy(digits = it.digits.dropLast(1), error = null) }
+    fun press(digit: Char) = editEntry { it.typed(digit) }
 
-    fun clear() = _state.update { it.copy(digits = "", tipPercent = null, askingForTip = false, error = null) }
+    fun backspace() = editEntry { it.copy(digits = it.digits.dropLast(1), error = null) }
+
+    fun clear() = editEntry { it.copy(digits = "", tipPercent = null, askingForTip = false, error = null) }
 
     fun setCurrency(code: String) {
         val current = _state.value
         val key = current.currencyKey ?: return
-        if (code == current.currency) return
+        if (code == current.currency || current.creating) return
         _state.update { it.withCurrency(code) }
         viewModelScope.launch {
             val saved = graph.settings.update {
@@ -271,9 +279,9 @@ class TerminalViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun noticeShown() = _state.update { it.copy(notice = null) }
 
-    fun askForTip() = _state.update { it.copy(askingForTip = true) }
+    fun askForTip() = editEntry { it.copy(askingForTip = true) }
 
-    fun setTip(percent: Int?) = _state.update { it.copy(tipPercent = percent, askingForTip = false) }
+    fun setTip(percent: Int?) = editEntry { it.copy(tipPercent = percent, askingForTip = false) }
 
     fun dismissError() = _state.update { it.copy(error = null) }
 

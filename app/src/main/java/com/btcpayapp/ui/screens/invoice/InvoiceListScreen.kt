@@ -190,7 +190,7 @@ class InvoiceListViewModel(private val graph: AppGraph) : ViewModel() {
                 .drop(1)
                 .debounce(350)
                 .distinctUntilChanged()
-                .collectLatest { if (it != searched) reset() }
+                .collectLatest { if (it != searched) reset(refreshing = true) }
         }
     }
 
@@ -201,18 +201,19 @@ class InvoiceListViewModel(private val graph: AppGraph) : ViewModel() {
 
     /** The keyboard's Search key: the typed search now, not after the pause. */
     fun searchNow() {
-        if (_state.value.query != searched) reset()
+        if (_state.value.query != searched) reset(refreshing = true)
     }
 
     fun setStatus(status: InvoiceStatus?) {
         _state.update { it.copy(statusFilter = status) }
-        reset()
+        // Show progress: the old rows stay on screen until the new page comes (UX-3).
+        reset(refreshing = true)
     }
 
     fun clearFilters() {
         _state.update { it.copy(query = "", statusFilter = null) }
         searchTrigger.value = ""
-        reset()
+        reset(refreshing = true)
     }
 
     fun refresh() = reset(refreshing = true)

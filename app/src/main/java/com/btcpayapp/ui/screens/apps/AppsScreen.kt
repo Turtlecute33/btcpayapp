@@ -105,6 +105,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 const val APP_TYPE_CROWDFUND = "Crowdfund"
+const val APP_TYPE_POINT_OF_SALE = "PointOfSale"
 
 private const val SALES_DAYS = 7
 private const val TOP_ITEMS = 5
@@ -416,9 +417,12 @@ fun AppsScreen(
                                     stats = state.stats[app.id],
                                     modifier = Modifier.animateItem(),
                                     onOpen = {
+                                        // This app has no editor for plugin app types,
+                                        // so they open in the browser (ADM-6).
                                         when (app.appType) {
+                                            APP_TYPE_POINT_OF_SALE -> onEditPointOfSale(app.id)
                                             APP_TYPE_CROWDFUND -> onEditCrowdfund(app.id)
-                                            else -> onEditPointOfSale(app.id)
+                                            else -> publicLink(state.baseUrl, app.id)?.let(uriHandler::openUri)
                                         }
                                     },
                                     onToggleStats = { viewModel.toggleStats(app.id) },

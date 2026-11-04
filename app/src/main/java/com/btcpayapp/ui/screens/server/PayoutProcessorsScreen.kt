@@ -88,6 +88,7 @@ import com.btcpayapp.ui.components.maskedIfPrivate
 import com.btcpayapp.ui.components.rememberSpendGate
 import com.btcpayapp.ui.components.afterSpendGate
 import com.btcpayapp.data.session.StoreBinding
+import com.btcpayapp.ui.screens.store.decimalText
 import com.btcpayapp.ui.screens.wallet.cryptoCodeOf
 import com.btcpayapp.ui.theme.Motion
 import java.math.BigDecimal
@@ -268,7 +269,7 @@ class PayoutProcessorsViewModel(private val graph: AppGraph) : ViewModel() {
         it.copy(editor = ProcessorEditor(kind = kind, payoutMethodId = payoutMethodId, existing = false))
     }
 
-    fun setMinutes(value: String) = mutateEditor { it.copy(minutes = value.filter(Char::isDigit), minutesError = null) }
+    fun setMinutes(value: String) = mutateEditor { it.copy(minutes = value.decimalText(), minutesError = null) }
 
     fun setProcessInstantly(value: Boolean) = mutateEditor { it.copy(processInstantly = value) }
 
@@ -778,7 +779,7 @@ private fun ProcessorSheet(
                 modifier = Modifier.arrive(1),
                 error = editor.minutesError,
                 supportingText = "The API stores this in seconds; minutes are easier to reason about.",
-                keyboardType = KeyboardType.Number,
+                keyboardType = KeyboardType.Decimal,
             )
 
             FormSwitch(

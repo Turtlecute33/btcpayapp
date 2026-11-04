@@ -16,6 +16,7 @@ import com.btcpayapp.data.api.endpoints.serverInfo
 import com.btcpayapp.data.api.endpoints.stores
 import com.btcpayapp.data.model.Account
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -143,6 +144,7 @@ class SessionManager(
         scope.launch {
             started.first { it }
             activeAccount.map { it?.sessionIdentity() }.distinctUntilChanged().collectLatest { account ->
+                retryJob?.cancel()
                 storesOwner.value = null
                 _storesLoaded.value = false
                 _stores.value = emptyList()
@@ -184,9 +186,10 @@ class SessionManager(
 
     /**
      * The account minus what may change without making it another session:
-     * the chosen store, and the server version this class writes back itself.
+     * the chosen store, the server version this class writes back itself, and
+     * the label (a rename must not reload the session, ACC-7).
      */
-    private fun Account.sessionIdentity() = copy(activeStoreId = null, serverVersion = null)
+    private fun Account.sessionIdentity() = copy(activeStoreId = null, serverVersion = null, label = "")
 
     // --- Payments in flight --------------------------------------------------
 
@@ -248,15 +251,30 @@ class SessionManager(
      * would remove it at once. Never throws for a failed write.
      */
     suspend fun selectStore(storeId: String): String? {
-        if (_busy.value) return SPEND_IN_FLIGHT
+        spendBlock()?.let { return it }
         val accountId = activeAccount.value?.id ?: return null
         return if (saved(TAG) { accounts.setActiveStore(accountId, storeId) }) null else SAVE_FAILED
     }
 
+    /**
+     * The text to show when a change that clears the active account's screens
+     * must wait, while [busy]; else null. Used by every such change (ACC-1).
+     */
+    fun spendBlock(): String? = if (_busy.value) SPEND_IN_FLIGHT else null
+
     /** As [selectStore], for the active account. */
     suspend fun selectAccount(accountId: String): String? {
-        if (_busy.value) return SPEND_IN_FLIGHT
+        spendBlock()?.let { return it }
         return if (saved(TAG) { accounts.setActive(accountId) }) null else SAVE_FAILED
+    }
+
+    /** The job of [retry]. An account switch cancels it, so that the new account does not wait behind it (ACC-2). */
+    @Volatile private var retryJob: Job? = null
+
+    /** Runs [refresh] in the app scope, for a caller that can go away before the load ends. */
+    fun retry() {
+        if (retryJob?.isActive == true) return
+        retryJob = scope.launch { refresh() }
     }
 
     /**

@@ -85,6 +85,7 @@ import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.QrCode
 import com.btcpayapp.ui.components.SuccessCheck
 import com.btcpayapp.ui.components.rememberLast
+import com.btcpayapp.ui.screens.lightning.isPast
 import com.btcpayapp.ui.theme.AppTheme
 import com.btcpayapp.ui.theme.Motion
 import kotlinx.coroutines.CancellationException
@@ -134,6 +135,11 @@ data class CheckoutState(
      * the user's next action instead.
      */
     val activationError: ApiException? = null,
+    /**
+     * A poll saw the invoice change to Settled. One time only, so that a
+     * return to this screen does not vibrate again (STATE-2, UX-7).
+     */
+    val paidNow: Boolean = false,
 ) {
     val methods: List<InvoicePaymentMethodData> get() = invoice?.paymentMethods.orEmpty()
     val selected: InvoicePaymentMethodData?
@@ -195,6 +201,8 @@ class CheckoutViewModel(
             _state.update {
                 it.copy(
                     invoice = data,
+                    paidNow = it.paidNow ||
+                        (it.invoice != null && it.invoice.status != InvoiceStatus.Settled && data.status == InvoiceStatus.Settled),
                     loading = false,
                     error = null,
                     selectedMethodId = it.selectedMethodId
@@ -209,6 +217,9 @@ class CheckoutViewModel(
             false
         }
     }
+
+    /** The screen played the "paid" signal for [CheckoutState.paidNow]. */
+    fun celebrated() = _state.update { it.copy(paidNow = false) }
 
     fun select(methodId: String) {
         _state.update { it.copy(selectedMethodId = methodId, activationError = null) }
@@ -352,9 +363,10 @@ fun CheckoutScreen(
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) { viewModel.poll() }
     }
 
-    val settled = state.invoice?.status == InvoiceStatus.Settled
-    LaunchedEffect(settled) {
-        if (settled && settings.terminalVibrateOnPaid) context.celebrate()
+    LaunchedEffect(state.paidNow) {
+        if (!state.paidNow) return@LaunchedEffect
+        if (settings.terminalVibrateOnPaid) context.celebrate()
+        viewModel.celebrated()
     }
 
     val invoice = state.invoice
@@ -593,6 +605,9 @@ private fun PayingState(
     // amount as 0 until something arrives. "$0.00" and "0 BTC due" read as
     // "nothing to pay" to the customer.
     val anyAmount = invoice.type == InvoiceType.TopUp && invoice.paidAmount.signum() == 0
+    // By the phone clock. If the polls fail near the expiry, the status stays
+    // New, but the code must not stay on screen for a customer to pay (RCV-4).
+    val past = isPast(invoice.expirationTime)
 
     Column(
         Modifier
@@ -657,6 +672,9 @@ private fun PayingState(
         }
 
         when {
+            // ExpiryCountdown above already says that the invoice has expired.
+            past -> Unit
+
             method == null -> Text("No payment method is available for this invoice.")
 
             !method.activated -> Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -797,7 +815,7 @@ private fun OutcomeState(
 }
 
 /** `BTC-CHAIN` reads badly on a chip; `Bitcoin` does not. */
-private fun String.friendlyName(): String = when {
+internal fun String.friendlyName(): String = when {
     endsWith("-CHAIN", true) -> substringBefore('-').let { if (it == "BTC") "Bitcoin" else it }
     endsWith("-LNURL", true) -> "LNURL"
     endsWith("-LN", true) -> "Lightning"

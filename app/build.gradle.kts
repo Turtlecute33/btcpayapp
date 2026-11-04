@@ -66,6 +66,9 @@ android {
             require(minor < 100 && patch < 100) { "minor and patch must stay below 100" }
             major * 10_000 + minor * 100 + patch
         }
+        // Ship only arm64 native code. minSdk 35 devices are arm64, and the
+        // CameraX libraries for other ABIs added about 127 KB (estimate).
+        ndk { abiFilters += "arm64-v8a" }
     }
 
     buildFeatures {
@@ -157,6 +160,8 @@ android {
     lint {
         abortOnError = true
         checkDependencies = true
+        // The arm64-only abiFilters above is on purpose; ChromeOS is not a target.
+        disable += "ChromeOsAbiSupport"
     }
 
     testOptions {

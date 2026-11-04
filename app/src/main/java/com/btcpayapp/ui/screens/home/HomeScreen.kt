@@ -455,7 +455,7 @@ fun HomeScreen(
                 HomePhase.Empty -> EmptyState(
                     title = "No store yet",
                     description = "This account has no store, or the key cannot see one. " +
-                        "Create a store on the server, then pull to refresh.",
+                        "Create a store on the server, then tap Retry.",
                     icon = Icons.Rounded.Storefront,
                     actionLabel = "Retry",
                     onAction = viewModel::refresh,

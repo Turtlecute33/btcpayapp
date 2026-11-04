@@ -11,6 +11,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavBackStackEntry
@@ -75,6 +76,9 @@ import com.btcpayapp.ui.screens.wallet.TransactionDetailScreen
 import com.btcpayapp.ui.screens.wallet.UtxoScreen
 import com.btcpayapp.ui.screens.wallet.WalletReceiveScreen
 import com.btcpayapp.ui.screens.wallet.WalletScreen
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * How far the screen *underneath* lags behind, as a fraction of the width.
@@ -325,9 +329,28 @@ fun AppNavHost(
                 screen<HomeRoute> {
                     // A code scanned from Home (or the Scan shortcut) is
                     // something to pay: the send screen tells the rails apart.
-                    val scanned = navController.consumeScanResult()
+                    // The consume removes the result, so a remembered copy keeps
+                    // it over a recomposition during the wait below.
+                    val pending = remember { mutableStateOf<String?>(null) }
+                    navController.consumeScanResult()?.let { pending.value = it }
+                    val scanned = pending.value
                     LaunchedEffect(scanned) {
                         if (scanned == null) return@LaunchedEffect
+                        // The rails come from the payment methods. Before they
+                        // load, Send opened with no rail and did not recover
+                        // (STATE-1). A session failure, or a loaded store list
+                        // with no store, ends the wait at once. After the
+                        // timeout, Send opens as before.
+                        withTimeoutOrNull(10_000) {
+                            combine(
+                                graph.session.paymentMethodsLoaded,
+                                graph.session.lastError,
+                                graph.session.storesLoaded,
+                                graph.session.activeStore,
+                            ) { loaded, error, storesLoaded, store ->
+                                loaded || error != null || (storesLoaded && store == null)
+                            }.first { it }
+                        }
                         navController.navigate(
                             SendRoute(
                                 paymentMethodId = graph.session.enabledPaymentMethodIds
@@ -336,6 +359,7 @@ fun AppNavHost(
                                 prefill = scanned,
                             ),
                         )
+                        pending.value = null
                     }
                     HomeScreen(
                         onOpenInvoice = { navController.navigate(InvoiceDetailRoute(it)) },

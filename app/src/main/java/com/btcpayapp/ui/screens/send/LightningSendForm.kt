@@ -117,6 +117,9 @@ private val SEND_TIMEOUT_RANGE = 10..120
 private val HIGH_FEE_PERCENT = BigDecimal(5)
 private val HUNDRED = BigDecimal(100)
 
+/** All bitcoin that can exist, in sat. A larger flat fee is a typo, and toLong() would wrap it (STATE-3). */
+private val MAX_FLAT_FEE_SATS = BigDecimal(2_100_000_000_000_000L)
+
 /** Keys of [buildPayRequest]'s field errors: the request's own field names. */
 internal const val FIELD_AMOUNT = "amount"
 internal const val FIELD_MAX_FEE_PERCENT = "maxFeePercent"
@@ -234,7 +237,9 @@ private fun feePercentOf(text: String): BigDecimal? =
     Amounts.parse(text)?.takeIf { it.signum() >= 0 && it <= HUNDRED }
 
 private fun flatFeeOf(text: String): BigDecimal? =
-    Amounts.parse(text)?.takeIf { it.signum() >= 0 && it.stripTrailingZeros().scale() <= 0 }?.stripTrailingZeros()
+    Amounts.parse(text)
+        ?.takeIf { it.signum() >= 0 && it.stripTrailingZeros().scale() <= 0 && it <= MAX_FLAT_FEE_SATS }
+        ?.stripTrailingZeros()
 
 /** Blank means the default, which is sent too: the pay call's own wait is sized from it. */
 private fun sendTimeoutOf(text: String): Int? =

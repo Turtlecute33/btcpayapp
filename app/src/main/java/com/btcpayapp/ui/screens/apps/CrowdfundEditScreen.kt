@@ -532,7 +532,7 @@ private fun CrowdfundForm(
                 label = "Reset every",
                 value = state.resetEveryAmount,
                 onValueChange = viewModel::setResetEveryAmount,
-                supportingText = "How many periods between resets. Blank means never.",
+                supportingText = "How many periods between resets. To stop resets, choose Never as the period.",
                 keyboardType = KeyboardType.Number,
                 enabled = editable,
             )

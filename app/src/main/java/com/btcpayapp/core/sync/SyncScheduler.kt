@@ -155,10 +155,12 @@ class BootReceiver : BroadcastReceiver() {
                     // 30 s, so a process that lived longer would only wait.
                     graph.retryStorage()
                     graph.settings.loaded.first { it }
+                    graph.accounts.loaded.first { it }
                 }
                 if (loaded != true) return@launch
                 val settings = graph.settings.settings.value
-                if (settings.backgroundSync) {
+                // No account: nothing to check (SYNC-3).
+                if (settings.backgroundSync && graph.accounts.vault.value.accounts.isNotEmpty()) {
                     SyncScheduler.schedule(
                         appContext,
                         settings.syncIntervalMinutes,

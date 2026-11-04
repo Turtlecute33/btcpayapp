@@ -328,20 +328,27 @@ class SyncEngine internal constructor(
             pages++
         } while (page.size == MAX_BATCH && added.isNotEmpty() && pages < MAX_PAGES)
 
+        // Pending invoices that could not be read. They stay pending, so that
+        // one invoice that always fails does not stop the poll (SYNC-1).
+        val unread = mutableListOf<String>()
         previous?.pending.orEmpty().filterNot { it in listedIds }.chunked(4).forEach { batch ->
             invoices += coroutineScope {
                 batch.map { invoiceId -> async {
                     try {
                         api.invoice(storeId, invoiceId)
                     } catch (_: ApiException.NotFound) {
-                        // Only missing invoices are dropped. Other failures
-                        // abort the checkpoint so the next poll retries them.
+                        // Only missing invoices are dropped.
+                        null
+                    } catch (e: Exception) {
+                        currentCoroutineContext().ensureActive()
+                        Log.w(TAG) { "pending invoice not read: ${e.javaClass.simpleName}" }
+                        synchronized(unread) { unread += invoiceId }
                         null
                     }
                 } }.awaitAll().filterNotNull()
             }
         }
-        val result = evaluateInvoices(previous, invoices, pollStarted)
+        val result = evaluateInvoices(previous, invoices, pollStarted, unread)
         result.payments.forEach { invoice ->
             notifier.paymentReceived(
                 invoiceId = invoice.id,

@@ -117,6 +117,9 @@ private const val CHANNEL_FEE_BLOCK_TARGET = 6
 private const val OPEN_UNKNOWN =
     "The channel may be opening. Check for a pending channel on the Lightning screen before you try again."
 
+/** The server refuses a node address with no host after '@' (LN-2). */
+private const val NO_HOST = "Add the node's host after '@'."
+
 data class LightningChannelsState(
     val channels: List<LightningChannelData> = emptyList(),
     val loading: Boolean = false,
@@ -293,6 +296,10 @@ class LightningChannelsViewModel(
             _state.update { it.copy(formError = "Enter a node address first.") }
             return
         }
+        if (uri.substringAfter('@', "").isBlank()) {
+            _state.update { it.copy(formError = NO_HOST) }
+            return
+        }
         val scope = node.scope ?: run {
             _state.update { it.copy(noStore = true) }
             return
@@ -326,6 +333,8 @@ class LightningChannelsViewModel(
         val problem = when {
             uri.isEmpty() -> "Enter a node address first."
             !NodeDirectory.isPubkey(uri) -> "That is not a node address. It starts with the node's public key."
+            // The server refuses a node address with no host, so stop it before the spend gate (LN-2).
+            uri.substringAfter('@', "").isBlank() -> NO_HOST
             sats == null -> channelSizeProblem(snapshot.channelAmountSats)
             feeRate == null -> Amounts.parseProblem(snapshot.feeRate) ?: "Enter a fee rate in sat/vB."
             else -> null
@@ -535,8 +544,8 @@ private fun reviewText(review: ChannelReview, owner: String, unit: BitcoinUnit, 
         "The funding transaction spends on-chain funds of the node."
 }
 
-/** With no estimate (the server node has no store), a rate above this warns. */
-private val CHANNEL_FEE_CEILING = BigDecimal(500)
+/** With no estimate, a fee rate above this warns. The on-chain send uses it too (FUNDS-2). */
+internal val CHANNEL_FEE_CEILING = BigDecimal(500)
 
 /**
  * The warning for a fee rate that looks like a typing error (2000 for 20), or

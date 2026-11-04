@@ -1,5 +1,7 @@
 package com.btcpayapp.ui.components
 
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import com.btcpayapp.core.util.Dates
 import com.btcpayapp.ui.theme.Motion
 import androidx.compose.animation.fadeOut
@@ -52,6 +54,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.platform.InterceptPlatformTextInput
+import androidx.compose.ui.platform.PlatformTextInputInterceptor
+import androidx.compose.ui.platform.PlatformTextInputMethodRequest
+import androidx.compose.ui.platform.PlatformTextInputSession
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -147,28 +153,44 @@ fun SecretField(
     imeAction: ImeAction = ImeAction.Done,
 ) {
     var revealed by rememberSaveable { mutableStateOf(false) }
-    FormField(
-        label = label,
-        value = value,
-        onValueChange = onValueChange,
-        modifier = modifier,
-        placeholder = placeholder,
-        supportingText = supportingText,
-        error = error,
-        keyboardType = KeyboardType.Password,
-        imeAction = imeAction,
-        visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
-        trailingIcon = {
-            IconButton(onClick = { revealed = !revealed }) {
-                AnimatedSwap(revealed, label = "reveal") { shown ->
-                    Icon(
-                        imageVector = if (shown) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
-                        contentDescription = if (shown) "Hide" else "Reveal",
-                    )
+    // The keyboard must not learn the secret, also when it is revealed (HARD-2).
+    InterceptPlatformTextInput(NoLearningInput) {
+        FormField(
+            label = label,
+            value = value,
+            onValueChange = onValueChange,
+            modifier = modifier,
+            placeholder = placeholder,
+            supportingText = supportingText,
+            error = error,
+            keyboardType = KeyboardType.Password,
+            imeAction = imeAction,
+            visualTransformation = if (revealed) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { revealed = !revealed }) {
+                    AnimatedSwap(revealed, label = "reveal") { shown ->
+                        Icon(
+                            imageVector = if (shown) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                            contentDescription = if (shown) "Hide" else "Reveal",
+                        )
+                    }
                 }
+            },
+        )
+    }
+}
+
+/** Adds IME_FLAG_NO_PERSONALIZED_LEARNING, so that the keyboard does not learn the text. */
+private object NoLearningInput : PlatformTextInputInterceptor {
+    override suspend fun interceptStartInputMethod(
+        request: PlatformTextInputMethodRequest,
+        nextHandler: PlatformTextInputSession,
+    ): Nothing = nextHandler.startInputMethod(object : PlatformTextInputMethodRequest {
+        override fun createInputConnection(outAttributes: EditorInfo): InputConnection =
+            request.createInputConnection(outAttributes).also {
+                outAttributes.imeOptions = outAttributes.imeOptions or EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
             }
-        },
-    )
+    })
 }
 
 @Composable

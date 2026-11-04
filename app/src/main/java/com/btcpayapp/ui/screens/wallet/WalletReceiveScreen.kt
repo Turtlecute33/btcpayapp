@@ -48,6 +48,8 @@ import com.btcpayapp.ui.components.LoadingState
 import com.btcpayapp.ui.components.QrCode
 import com.btcpayapp.ui.components.arrive
 import com.btcpayapp.ui.screens.send.amountProblem
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -87,6 +89,8 @@ class WalletReceiveViewModel(
     private val _state = MutableStateFlow(WalletReceiveState())
     val state = _state.asStateFlow()
 
+    private var loadJob: Job? = null
+
     init {
         load(forceGenerate = false)
         store.retryWhenKnown(viewModelScope) { load(forceGenerate = false) }
@@ -105,7 +109,10 @@ class WalletReceiveViewModel(
             _state.update { it.copy(error = ApiException.NoAccount()) }
             return
         }
-        viewModelScope.launch {
+        // One load at a time: an older response must not put back an
+        // address that was already replaced (RCV-1).
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             _state.update {
                 it.copy(
                     loading = it.address == null,
@@ -124,6 +131,8 @@ class WalletReceiveViewModel(
                     it.copy(address = address, loading = false, generating = false, error = null)
                 }
             }.onFailure { failure ->
+                // A cancelled load must not overwrite the state of the new one.
+                if (failure is CancellationException) return@onFailure
                 _state.update {
                     it.copy(
                         loading = false,
@@ -168,10 +177,13 @@ fun WalletReceiveScreen(paymentMethodId: String, onBack: () -> Unit) {
     // BIP21 always denominates `amount` in BTC, whatever unit the user reads the
     // app in — a sat value here would be silently interpreted as 100 million
     // times too much by every other wallet.
-    val payload: String? = remember(state.address, amountBtc) {
+    val payload: String? = remember(state.address, amountBtc, amountError) {
         val address = state.address
         when {
             address == null || address.address.isBlank() -> null
+            // No code without the amount the merchant typed: the customer
+            // could pay a different amount (UX-4).
+            amountError != null -> null
             cryptoCode.equals("BTC", true) && amountBtc != null && amountBtc.signum() > 0 ->
                 "bitcoin:${address.address}?amount=${Amounts.trim(amountBtc, 8)}"
             else -> address.paymentLink?.takeIf { it.isNotBlank() } ?: address.address

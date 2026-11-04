@@ -165,6 +165,21 @@ class EncryptedJsonFileTest {
         } finally { dir.deleteRecursively() }
     }
 
+    // Only a missing file means a fresh install. An empty file must not load
+    // the defaults, because they turn the app lock off (STORE-1).
+    @Test fun `an empty file starts from the recovered value and is lost`() = runTest {
+        val dir = Files.createTempDirectory("btcpay-store-test").toFile()
+        val file = File(dir, "document")
+        try {
+            file.writeBytes(ByteArray(0))
+            val store = EncryptedJsonFile(file, Int.serializer(), 0, ApiJson.instance, backgroundScope,
+                encrypt = { it.copyOf() }, decrypt = { it.copyOf() }, recovered = { 7 })
+            store.loaded.first { it }
+            assertEquals(7, store.state.value)
+            assertTrue(store.lost.value)
+        } finally { dir.deleteRecursively() }
+    }
+
     @Test fun `clear also removes the copies moved aside`() = runTest {
         val dir = Files.createTempDirectory("btcpay-store-test").toFile()
         val file = File(dir, "document")

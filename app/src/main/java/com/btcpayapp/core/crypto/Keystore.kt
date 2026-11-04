@@ -2,8 +2,9 @@ package com.btcpayapp.core.crypto
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
-import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyStore
+import java.security.ProviderException
+import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -118,8 +119,9 @@ object Keystore {
             KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
                 .apply { init(spec) }
                 .generateKey()
-        } catch (e: StrongBoxUnavailableException) {
-            // No StrongBox on this phone: the key goes in the TEE.
+        } catch (e: ProviderException) {
+            // No StrongBox, or a StrongBox that fails (some phones throw a
+            // plain ProviderException, KEY-1): the key goes in the TEE.
             if (!strongBox) throw e
             generate(alias, requireUserAuthentication, strongBox = false)
         }
@@ -135,7 +137,9 @@ object Keystore {
     }
 
     fun decrypt(key: SecretKey, blob: ByteArray): ByteArray {
-        require(blob.size > GCM_IV_BYTES) { "ciphertext truncated" }
+        // A bad tag, not an IllegalArgumentException, so that the store puts
+        // a truncated file in quarantine and does not retry forever (TST-2).
+        if (blob.size <= GCM_IV_BYTES) throw AEADBadTagException("ciphertext truncated")
         val cipher = Cipher.getInstance(TRANSFORMATION).apply {
             init(
                 Cipher.DECRYPT_MODE,

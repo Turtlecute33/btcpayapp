@@ -45,7 +45,12 @@ internal data class InvoicePollResult(val state: InvoicePollState, val payments:
  * whether a detected payment became final or failed. The alert keeps its id,
  * so it replaces "Payment detected" in the shade.
  */
-internal fun evaluateInvoices(previous: InvoicePollState?, invoices: List<InvoiceData>, now: Long): InvoicePollResult {
+internal fun evaluateInvoices(
+    previous: InvoicePollState?,
+    invoices: List<InvoiceData>,
+    now: Long,
+    unread: List<String> = emptyList(),
+): InvoicePollResult {
     val unique = invoices.distinctBy { it.id }
     val notified = previous?.announced.orEmpty().toSet()
     // Processing at the last run: see InvoicePollState.announced.
@@ -57,7 +62,9 @@ internal fun evaluateInvoices(previous: InvoicePollState?, invoices: List<Invoic
         it.id in detected && (it.status == InvoiceStatus.Settled || it.status == InvoiceStatus.Invalid)
     }
     val payments = if (previous == null) emptyList() else paid.filterNot { it.id in notified } + outcomes
-    val pending = unique.filter { it.isOpen }.map { it.id }
+    // An invoice that could not be read stays pending, and so does its
+    // announced entry: the next poll reads it again.
+    val pending = (unique.filter { it.isOpen }.map { it.id } + unread).distinct()
     // Never back before the last start: a first run listed only the open
     // invoices there, so an older payment would be announced as new. A phone
     // clock that was set back gives now.
