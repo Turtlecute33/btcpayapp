@@ -35,6 +35,9 @@
   for your fingerprint or PIN first.
 - `http://` works only for `.onion` addresses. Every other server, also one on
   your LAN or on this phone, needs `https://`.
+- Settings > About > Support has links to donate and to the developer on X and
+  Nostr. They open in your browser. The app itself does not connect to these
+  hosts.
 
 ## Tor
 

@@ -210,6 +210,19 @@ fun AboutScreen(onBack: () -> Unit) {
                 modifier = Modifier.arrive(8),
             )
 
+            // The browser opens these links; the app itself does not connect to these hosts.
+            ThinDivider()
+            SectionHeader("Support", Modifier.arrive(8))
+            LinkOut(
+                title = "Donate bitcoin",
+                subtitle = "btcpay.priorato.org",
+                url = "https://btcpay.priorato.org/api/v1/invoices?storeId=31ntjiLSTmSSuTC6FrR81z6AAku46bLF2FKAL3MFHtV5&orderId=Donation&checkoutDesc=Donation&currency=USD",
+                open = open,
+                modifier = Modifier.arrive(8),
+            )
+            LinkOut("X", "@turtlecute33", "https://x.com/turtlecute33", open, Modifier.arrive(8))
+            LinkOut("Nostr", "turtlecute@primal.net", "https://primal.net/turtlecute", open, Modifier.arrive(8))
+
             Spacer(Modifier.height(32.dp))
         }
     }
