@@ -67,6 +67,7 @@ import com.btcpayapp.core.sync.Notifier
 import com.btcpayapp.data.api.endpoints.markNotification
 import com.btcpayapp.data.model.AppLockMode
 import com.btcpayapp.ui.components.ConfirmDialog
+import com.btcpayapp.ui.components.DonatePrompt
 import com.btcpayapp.ui.components.EmptyState
 import com.btcpayapp.ui.nav.AccountsRoute
 import com.btcpayapp.ui.nav.AppNavHost
@@ -155,6 +156,8 @@ fun BtcPayApp(
                 )
 
                 LostSettingsNotice(graph, locked = locked, lockOn = settings.appLock != AppLockMode.Off)
+                // A dialog owns its own window, so it waits until the app is unlocked.
+                if (!locked) DonatePrompt()
 
                 // Navigation and screen models belong to one server. Clear old
                 // models (and their requests) when switching or removing it.

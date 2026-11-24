@@ -40,6 +40,7 @@ import com.btcpayapp.R
 import com.btcpayapp.core.lightning.NodeDirectory
 import com.btcpayapp.ui.appViewModel
 import com.btcpayapp.ui.components.AppScreen
+import com.btcpayapp.ui.components.DONATE_URL
 import com.btcpayapp.ui.components.DetailRow
 import com.btcpayapp.ui.components.SectionHeader
 import com.btcpayapp.ui.components.ThinDivider
@@ -216,7 +217,7 @@ fun AboutScreen(onBack: () -> Unit) {
             LinkOut(
                 title = "Donate bitcoin",
                 subtitle = "btcpay.priorato.org",
-                url = "https://btcpay.priorato.org/api/v1/invoices?storeId=31ntjiLSTmSSuTC6FrR81z6AAku46bLF2FKAL3MFHtV5&orderId=Donation&checkoutDesc=Donation&currency=USD",
+                url = DONATE_URL,
                 open = open,
                 modifier = Modifier.arrive(8),
             )
